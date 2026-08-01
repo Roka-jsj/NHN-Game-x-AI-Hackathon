@@ -63,17 +63,22 @@ function serve() {
 // 합성 클록. 모듈이 로드되기 전에 주입해야 rAF·performance.now 를 갈아끼울 수 있다.
 const CLOCK_INIT = () => {
   let t = 0;
-  const pending = [];
+  // 큐 두 개를 번갈아 쓴다. splice(0) 는 매 프레임 새 배열을 만들고,
+  // 그러면 하네스 자신이 힙 톱니를 만들어 게임의 할당량 측정을 오염시킨다.
+  const qA = [], qB = [];
+  let cur = qA;
   const origNow = window.performance.now.bind(window.performance);
   window.performance.now = () => t;
-  window.requestAnimationFrame = (cb) => { pending.push(cb); return pending.length; };
+  window.requestAnimationFrame = (cb) => { cur.push(cb); return cur.length; };
   window.cancelAnimationFrame = () => {};
   window.__clock = {
     now: () => t,
     real: origNow,
     tick(ms) {
       t += ms;
-      const batch = pending.splice(0, pending.length);
+      const batch = cur;
+      cur = (cur === qA) ? qB : qA;
+      cur.length = 0;
       for (let i = 0; i < batch.length; i++) batch[i](t);
     },
   };
@@ -138,13 +143,93 @@ const BOT = () => {
   };
 };
 
+// 3분 연속 구동하며 프레임당 CPU 비용과 힙 톱니를 잰다.
+// 합성 클록 위에서 재므로 "실기기 프레임 안정성(게이트 #2)"이 아니라
+// "프레임 하나를 만드는 데 드는 CPU 비용"을 잰다. 개선 전/후 비교용 숫자다.
+const PERF = async (frameMs, frames) => {
+  const real = window.__clock.real;
+  const times = new Float64Array(frames);
+  const heapN = Math.ceil(frames / 60);
+  const heap = new Float64Array(heapN);
+  let hi = 0;
+  for (let i = 0; i < frames; i++) {
+    const t0 = real();
+    window.__bot.step();
+    window.__clock.tick(frameMs);
+    times[i] = real() - t0;
+    if (i % 60 === 0 && hi < heapN) {
+      heap[hi++] = (performance.memory && performance.memory.usedJSHeapSize) || 0;
+    }
+    if (i % 600 === 0) await new Promise((r) => setTimeout(r, 0));
+  }
+  const sorted = Float64Array.from(times).sort();
+  let sum = 0;
+  const spikes = [];
+  for (let i = 0; i < frames; i++) {
+    sum += times[i];
+    if (times[i] > 16.7 && spikes.length < 24) spikes.push(i + ':' + times[i].toFixed(1));
+  }
+  // 힙 하강 = GC. 하강 폭의 최댓값이 톱니 진폭이다.
+  let drops = 0, maxDrop = 0;
+  for (let i = 1; i < hi; i++) {
+    const d = heap[i - 1] - heap[i];
+    if (d > 0) { drops++; if (d > maxDrop) maxDrop = d; }
+  }
+  return {
+    frames,
+    avg: sum / frames,
+    p50: sorted[(frames * 0.5) | 0],
+    p99: sorted[(frames * 0.99) | 0],
+    max: sorted[frames - 1],
+    over16: spikes.length, spikes,
+    heapStart: heap[0], heapEnd: heap[hi - 1],
+    gcDrops: drops, sawtoothKB: maxDrop / 1024,
+    depth: window.__rising.game.depth,
+  };
+};
+
 async function run() {
   const { chromium } = loadPlaywright();
   const { server, port } = await serve();
   const url = `http://127.0.0.1:${port}/`;
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({ args: ['--enable-precise-memory-info'] });
   const results = [];
   const shotArg = process.argv.indexOf('--shot');
+  const perfOnly = process.argv.includes('--perf');
+
+  if (perfOnly) {
+    const page = await browser.newPage({ viewport: { width: 420, height: 900 } });
+    const logs = [];
+    page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') logs.push(m.text()); });
+    page.on('pageerror', (e) => logs.push(e.message));
+    await page.addInitScript(CLOCK_INIT);
+    await page.addInitScript(BOT);
+    await page.goto(url, { waitUntil: 'load' });
+    await page.waitForFunction('!!window.__rising', null, { timeout: 5000 });
+    await page.evaluate(`window.__perf = ${PERF.toString()}`);
+    // 대조군: rAF 체인을 끊어 게임 루프를 죽이고 클록만 돌린다.
+    // 여기서 나오는 힙 증가·톱니는 전부 브라우저·하네스 몫이다. 우리 코드의 몫이 아니다.
+    if (process.argv.includes('--null')) {
+      await page.evaluate(() => { window.requestAnimationFrame = () => 0; });
+    }
+    const p = await page.evaluate(() => window.__perf(1000 / 60, 10800));
+    await page.close();
+    await browser.close();
+    server.close();
+    console.log('\n─── 3분 연속 구동 (10800 프레임) ' + '─'.repeat(28));
+    console.log(`  프레임당 CPU   avg ${p.avg.toFixed(4)}ms  p50 ${p.p50.toFixed(4)}ms  ` +
+                `p99 ${p.p99.toFixed(4)}ms  max ${p.max.toFixed(3)}ms`);
+    console.log(`  16.7ms 초과    ${p.over16}회 (${(p.over16 / p.frames * 100).toFixed(3)}%)  ` +
+                `[프레임:ms] ${p.spikes.join(' ')}`);
+    console.log(`  힙             시작 ${(p.heapStart / 1048576).toFixed(2)}MB → 끝 ${(p.heapEnd / 1048576).toFixed(2)}MB`);
+    console.log(`  GC 하강        ${p.gcDrops}회, 톱니 진폭 최대 ${p.sawtoothKB.toFixed(1)}KB`);
+    console.log(`  도달 발판      ${p.depth}`);
+    console.log(`  콘솔           ${logs.length ? logs.join(' | ') : '에러·경고 0개'}`);
+    console.log('─'.repeat(62) + '\n');
+    console.log('※ 합성 클록 위 측정이다. 프레임 하나를 만드는 CPU 비용이지,');
+    console.log('  실기기 프레임 안정성(게이트 #2)이 아니다. 그건 사람이 Performance 탭으로 잰다.\n');
+    process.exit(0);
+  }
 
   // ── 한 회차를 특정 프레임 간격으로 구동한다 ──────────────────
   async function drive(frameMs, seconds, opts = {}) {
