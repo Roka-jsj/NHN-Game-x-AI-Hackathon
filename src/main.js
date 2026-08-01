@@ -7,7 +7,7 @@
 //  - 루프 안에서 객체·배열·문자열을 만드는 것
 
 import * as C from './config.js';
-import { Game, ACT } from './game.js';
+import { Game, ACT, S } from './game.js';
 import { Feel } from './feel.js';
 import { Renderer } from './render.js';
 import { Director } from './director.js';
@@ -57,71 +57,56 @@ function enqueue(act, wallTs) {
 function clearQueue() { qHead = 0; qTail = 0; qCount = 0; }
 
 // ─────────────────────────────────────────────────────────────
-// 포인터 — 스와이프는 릴리스가 아니라 **이동 임계값을 넘는 순간** 확정한다.
-// 릴리스까지 기다리면 반사 게임에서 치명적이다.
-//
-// 동사는 좌/우 하나뿐이다. 탭으로도 스와이프로도 낼 수 있고,
-// 러너에서는 레인 이동, 계단에서는 한 칸 오르기가 된다.
+// 포인터 — 화면 아래 버튼 다섯 개가 조작의 전부다.
+// 플래시게임의 문법: 반사가 아니라 **누르는 것**이다. 그래서 릴리스가 아니라
+// 누른 순간에 반응한다. 스와이프도 드래그도 없다.
 // ─────────────────────────────────────────────────────────────
-let ptrId = -1, ptrX = 0, ptrY = 0, ptrSwiped = false;
+function localXY(e) {
+  const r = canvas.getBoundingClientRect();
+  if (r.width <= 0 || r.height <= 0) return null;
+  ptrLX = (e.clientX - r.left) / r.width * C.VIEW_W;
+  ptrLY = (e.clientY - r.top) / r.height * C.VIEW_H;
+  return true;
+}
+let ptrLX = 0, ptrLY = 0;
 
 stage.addEventListener('pointerdown', (e) => {
   e.preventDefault();
   // iOS 는 첫 사용자 제스처 안에서 resume() 해야 소리가 난다.
   // 핸들러 밖(프레임 루프)에서 부르면 제스처 문맥이 아니라 무음이 된다.
   audio.unlock();
+  if (!localXY(e)) return;
 
-  const r = canvas.getBoundingClientRect();
-  if (r.width > 0 && r.height > 0) {
-    const lx = (e.clientX - r.left) / r.width * C.VIEW_W;
-    const ly = (e.clientY - r.top) / r.height * C.VIEW_H;
-    // 토글은 게임 입력이 아니다. 큐에 넣지 않고 여기서 걸러낸다.
-    if (Renderer.hitToggle(lx, ly)) { directorView = !directorView; return; }
-    if (Renderer.hitMute(lx, ly)) { muted = !muted; audio.setMuted(muted); return; }
+  // 토글은 게임 입력이 아니다. 큐에 넣지 않고 여기서 걸러낸다.
+  if (Renderer.hitToggle(ptrLX, ptrLY)) { directorView = !directorView; return; }
+  if (Renderer.hitMute(ptrLX, ptrLY)) { muted = !muted; audio.setMuted(muted); return; }
+
+  if (game.state === S.OVER) { enqueue(ACT.RESTART, e.timeStamp); return; }
+
+  if (game.state === S.DRAFT) {
+    const card = Renderer.hitCard(ptrLX, ptrLY);
+    if (card >= 0) enqueue(ACT.PICK0 + card, e.timeStamp);
+    return;
   }
-  ptrId = e.pointerId;
-  ptrX = e.clientX;
-  ptrY = e.clientY;
-  ptrSwiped = false;
+
+  const b = Renderer.hitButton(ptrLX, ptrLY);
+  if (b >= 0) enqueue(b, e.timeStamp);
 }, { passive: false });
 
-window.addEventListener('pointermove', (e) => {
-  if (e.pointerId !== ptrId || ptrSwiped) return;
-  const dx = e.clientX - ptrX;
-  const dy = e.clientY - ptrY;
-  if (Math.abs(dx) < C.SWIPE_PX && Math.abs(dy) < C.SWIPE_PX) return;
-  ptrSwiped = true;
-  if (Math.abs(dx) > Math.abs(dy)) enqueue(dx > 0 ? ACT.RIGHT : ACT.LEFT, e.timeStamp);
-  else enqueue(dy > 0 ? ACT.SLIDE : ACT.JUMP, e.timeStamp);
-}, { passive: false });
-
-window.addEventListener('pointerup', (e) => {
-  if (e.pointerId !== ptrId) return;
-  if (!ptrSwiped) {
-    // 움직이지 않은 탭 — 누른 쪽이 곧 방향이다
-    const r = canvas.getBoundingClientRect();
-    const lx = r.width > 0 ? (e.clientX - r.left) / r.width * C.VIEW_W : C.VIEW_W * 0.5;
-    enqueue(lx < C.VIEW_W * 0.5 ? ACT.LEFT : ACT.RIGHT, e.timeStamp);
-  }
-  ptrId = -1;
-}, { passive: false });
-
-window.addEventListener('pointercancel', () => { ptrId = -1; });
+window.addEventListener('pointercancel', () => {});
 
 // ─────────────────────────────────────────────────────────────
-// 키보드 — 심사자가 PC로 열 가능성이 높다
+// 키보드 — 심사자가 PC로 열 가능성이 높다. 1~5 가 버튼 다섯 개다.
 // ─────────────────────────────────────────────────────────────
 window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   let act = -1;
   switch (e.key) {
-    case 'ArrowLeft': case 'a': case 'A': act = ACT.LEFT; break;
-    case 'ArrowRight': case 'd': case 'D': act = ACT.RIGHT; break;
-    case 'ArrowUp': case 'w': case 'W': case ' ': act = ACT.JUMP; break;
-    case 'ArrowDown': case 's': case 'S': act = ACT.SLIDE; break;
-    case '1': act = ACT.PICK0; break;
-    case '2': act = ACT.PICK1; break;
-    case '3': act = ACT.PICK2; break;
+    case '1': case 'q': case 'Q': act = ACT.SWORD; break;
+    case '2': case 'w': case 'W': act = ACT.ARCHER; break;
+    case '3': case 'e': case 'E': act = ACT.GIANT; break;
+    case '4': case 'r': case 'R': act = ACT.ERA; break;
+    case '5': case ' ': act = ACT.NUKE; break;
     default: return;
   }
   e.preventDefault();
@@ -189,7 +174,6 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     paused = true;
     clearQueue();
-    ptrId = -1;
     feel.clearTransient();    // 히트스톱·셰이크가 누적되어 터지지 않게
     audio.hush();
   } else {

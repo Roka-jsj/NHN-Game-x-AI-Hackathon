@@ -1,273 +1,157 @@
-// 시뮬레이션 — 레인 이동 · 점프 · 슬라이드 · 충돌 · 물 추격 · 계단 · 특성.
+// 시뮬레이션 — 유닛 · 전투 · 경제 · 시대 진화 · 물 · 특성.
 // 이 파일은 시각·청각·입력장치를 모른다. 순수하게 상태만 굴린다.
 //
 // 규칙 1: 고정 스텝이다. 이 파일 어디에도 deltaTime을 곱하는 코드가 없다.
 // 규칙 2: 상태 전이는 setState() 한 곳에서만 일어난다.
 // 규칙 3: 판정에 Math.random()을 쓰지 않는다. 재현 가능해야 한다.
+// 규칙 4: 루프 안에서 객체·배열을 만들지 않는다. 유닛은 전부 타입배열 풀이다.
 
 import * as C from './config.js';
 
-export const S = { RUN: 0, STAIR: 1, DRAFT: 2, DEAD: 3 };
-export const STATE_NAME = ['RUN', 'STAIR', 'DRAFT', 'DEAD'];
+export const S = { PLAY: 0, DRAFT: 1, OVER: 2 };
+export const STATE_NAME = ['PLAY', 'DRAFT', 'OVER'];
 
-// 수직 자세
-export const V = { GROUND: 0, JUMP: 1, SLIDE: 2 };
+// 진영. 0 = 나, 1 = 적.
+export const SIDE_L = 0, SIDE_R = 1;
 
-// 입력 행동. 좌/우는 두 모드가 공유하는 하나의 동사다.
-export const ACT = { LEFT: 0, RIGHT: 1, JUMP: 2, SLIDE: 3, PICK0: 4, PICK1: 5, PICK2: 6 };
-
-export const EV = {
-  MOVE: 0,          // a = 새 레인
-  JUMP: 1,
-  SLIDE: 2,
-  LAND: 3,
-  COIN: 4,
-  NEAR_MISS: 5,     // a = 스친 거리
-  HIT: 6,           // a = 장애물 종류
-  SHIELD: 7,
-  COMBO: 8,         // a = 콤보, b = 티어
-  COMBO_BREAK: 9,
-  STAIR_ENTER: 10,
-  STAIR_STEP: 11,   // a = 오른 칸 수
-  STAIR_MISS: 12,
-  STAIR_CLEAR: 13,  // a = 정확도 0~1
-  DRAFT_OPEN: 14,
-  DRAFT_PICK: 15,   // a = 특성 인덱스, b = 계열
-  RECORD: 16,
-  DEATH: 17,
-  RESET: 18,
-  PERFECT: 19,      // 자세의 정점으로 넘었다
-  BOOST_READY: 20,  // 게이지가 찼다
-  BOOST_START: 21,
-  BOOST_END: 22,
-  BOOST_SMASH: 23,  // 부스트 중 장애물을 부수고 지나갔다
-  COIN_LINE: 24,    // a = 이어 먹은 개수
+// 입력 행동 — 버튼 다섯 개가 전부다. 플래시게임답게 손가락 하나로 끝난다.
+export const ACT = {
+  SWORD: 0, ARCHER: 1, GIANT: 2, ERA: 3, NUKE: 4,
+  PICK0: 5, PICK1: 6, PICK2: 7, RESTART: 8,
 };
 
-// 디렉터가 없을 때 쓰는 고정 트랙 패턴. 12행이 반복된다.
-// 행마다 [장애물 3레인, 코인 3레인]. 0=없음 1=낮은벽 2=높은빔 3=기둥.
-// **세 레인이 동시에 막힌 행은 없다.** 있으면 어떻게 해도 못 지나가고, 그건 플레이어 탓이 아니다.
-export const FALLBACK_PATTERN = new Uint8Array([
-  0, 0, 0,   0, 1, 0,
-  1, 0, 0,   0, 1, 0,
-  0, 0, 1,   0, 1, 0,
-  0, 2, 0,   1, 0, 1,
-  3, 0, 0,   0, 0, 1,
-  0, 0, 3,   1, 0, 0,
-  1, 1, 0,   0, 0, 1,
-  0, 0, 0,   1, 1, 1,
-  0, 3, 0,   1, 0, 1,
-  2, 0, 2,   0, 1, 0,
-  0, 1, 1,   1, 0, 0,
-  3, 0, 3,   0, 1, 0,
+export const EV = {
+  SPAWN: 0,         // a = 종류, b = 진영
+  ATTACK: 1,        // a = 종류, b = 진영
+  KILL: 2,          // a = 죽은 유닛 종류, b = 죽인 진영
+  BASE_HIT: 3,      // a = 피해, b = 맞은 진영
+  GOLD: 4,          // a = 금액
+  ERA_UP: 5,        // a = 새 시대, b = 진영
+  NUKE: 6,
+  NO_GOLD: 7,       // 살 돈이 없다 — 눌렀는데 안 나가는 것을 소리로 알린다
+  COOLDOWN: 8,      // 쿨다운 중이다
+  WATER_WARN: 9,
+  WATER_HIT: 10,    // 물이 지면에 닿아 기지가 깎인다
+  DRAFT_OPEN: 11,
+  DRAFT_PICK: 12,   // a = 특성 인덱스, b = 계열
+  WIN: 13,
+  LOSE: 14,
+  RESET: 15,
+};
+
+// 디렉터가 없을 때 적이 쓰는 고정 웨이브. 랜덤 0.
+// [지연ms, 유닛종류] 가 반복된다. 이것만으로도 게임은 100% 돌아간다.
+export const FALLBACK_WAVE = new Int16Array([
+  1200, 0,  1600, 0,  2400, 1,  1800, 0,
+  3000, 2,  1600, 1,  1400, 0,  2600, 1,
+  3400, 2,  1500, 0,  2000, 1,  2800, 0,
 ]);
 
-function easeOutQuad(t) { return t * (2 - t); }
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// 협곡 바닥. 가운데가 FLOOR_DIP 만큼 낮다.
+// 이 한 줄이 이 게임의 교착을 푼다 — 전선이 기지보다 먼저 잠긴다.
+export function groundAt(x) {
+  const mid = C.VIEW_W * 0.5;
+  const half = C.VIEW_W * 0.5;
+  const t = (x - mid) / half;               // -1 .. 1
+  return C.GROUND_Y + C.FLOOR_DIP * (1 - t * t);
+}
 
 export class Game {
   constructor() {
-    // ─ 트랙 행 링버퍼. 루프 안에서 객체를 만들지 않기 위해 타입배열로 둔다 ─
-    this._rowZ = new Float64Array(C.ROW_POOL);
-    this._rowOb = new Uint8Array(C.ROW_POOL * C.LANE_COUNT);
-    this._rowCoin = new Uint8Array(C.ROW_POOL * C.LANE_COUNT);
-    this._rowTaken = new Uint8Array(C.ROW_POOL * C.LANE_COUNT);  // 이미 먹은 코인
-    this._rowDone = new Uint8Array(C.ROW_POOL);                  // 판정이 끝난 행
+    // ─ 유닛 풀. 루프 안에서 객체를 만들지 않기 위해 타입배열로 둔다 ─
+    const N = C.UNIT_MAX;
+    this.uAlive = new Uint8Array(N);
+    this.uSide = new Uint8Array(N);
+    this.uKind = new Uint8Array(N);
+    this.uEra = new Uint8Array(N);
+    this.uX = new Float32Array(N);
+    this.uPrevX = new Float32Array(N);
+    this.uHp = new Float32Array(N);
+    this.uHpMax = new Float32Array(N);
+    this.uCd = new Float32Array(N);       // 남은 공격 쿨다운 ms
+    this.uHitFlash = new Uint8Array(N);   // 맞은 직후 프레임 수 (렌더용)
+    this.uAttack = new Uint8Array(N);     // 공격 모션 프레임 (렌더용)
 
-    this.supplier = null;     // 디렉터가 붙는다. 없으면 빈 트랙
+    this.supplier = null;     // 디렉터가 붙는다. 없으면 고정 웨이브
     this.onEvent = null;
 
     // 세션 기록. 전부 메모리에만 둔다 (localStorage 금지)
-    this.bestScore = 0;
-    this.bestDist = 0;
-    this.bestCombo = 0;
-    this.bestGrade = 4;
+    this.wins = 0;
+    this.losses = 0;
+    this.bestTime = 0;
     this.runs = 0;
 
     // main 이 프레임 시작에서 심어주는 시각 기준점
     this.frameWall = 0;
     this.frameSimBase = 0;
 
-    // 특성 (판마다 초기화)
     this.traits = new Uint8Array(C.TRAITS.length);
+    this.draftIdx = new Int8Array(C.TRAIT_OFFER);
+    this.spawnCd = new Float32Array(C.UNIT_KINDS);
 
     this.reset();
-  }
-
-  // ── 행 접근 ─────────────────────────────────────────────────
-  rowZ(i)          { return this._rowZ[i % C.ROW_POOL]; }
-  rowOb(i, lane)   { return this._rowOb[(i % C.ROW_POOL) * C.LANE_COUNT + lane]; }
-  rowCoin(i, lane) { return this._rowCoin[(i % C.ROW_POOL) * C.LANE_COUNT + lane]; }
-  rowTaken(i, lane){ return this._rowTaken[(i % C.ROW_POOL) * C.LANE_COUNT + lane]; }
-
-  ensureRow(i) {
-    while (this.rowMade < i) {
-      const n = this.rowMade + 1;
-      const slot = n % C.ROW_POOL;
-      const base = slot * C.LANE_COUNT;
-      this._rowZ[slot] = n * C.ROW_SPACING;
-      this._rowDone[slot] = 0;
-      for (let l = 0; l < C.LANE_COUNT; l++) {
-        this._rowOb[base + l] = 0;
-        this._rowCoin[base + l] = 0;
-        this._rowTaken[base + l] = 0;
-      }
-      // 계단 구간과 그 앞뒤로는 트랙을 비운다. 규칙이 바뀌는 구간을 장애물로 어지럽히지 않는다.
-      const z = this._rowZ[slot];
-      if (!this.nearStairZone(z) && n > 4) {
-        if (this.supplier) this.supplier.fillRow(this, n, base);
-        else this.fallbackRow(n, base);
-        this.enforceActionSpacing(n, base);
-        this.enforceLaneContinuity(n, base);
-      }
-      this.rowMade = n;
-    }
-  }
-
-  // 디렉터가 없을 때 쓰는 고정 패턴. 랜덤 0.
-  // 세 레인이 동시에 막히는 행은 하나도 없다 — 있으면 즉사 확정이고 그건 플레이어 탓이 아니다.
-  fallbackRow(n, base) {
-    const p = (n % 12) * 6;
-    for (let l = 0; l < C.LANE_COUNT; l++) {
-      this._rowOb[base + l] = FALLBACK_PATTERN[p + l];
-      this._rowCoin[base + l] = FALLBACK_PATTERN[p + 3 + l];
-    }
-  }
-
-  // 같은 레인에서 자세를 요구하는 장애물이 너무 촘촘하면
-  // 점프가 끝나기 전에 다음 것이 도착한다 — 어떻게 눌러도 못 넘는 배치다.
-  // 청크 데이터가 뭘 주든, 레버가 뭘 하든 여기서 잘라낸다.
-  // **데이터가 아니라 규칙으로 막는다.**
-  enforceActionSpacing(n, base) {
-    for (let l = 0; l < C.LANE_COUNT; l++) {
-      const ob = this._rowOb[base + l];
-      if (ob !== C.OB_LOW && ob !== C.OB_BEAM) continue;
-      for (let k = 1; k <= C.MIN_ACTION_ROWS; k++) {
-        const pn = n - k;
-        if (pn < 0) break;
-        const po = this._rowOb[(pn % C.ROW_POOL) * C.LANE_COUNT + l];
-        if (po === C.OB_LOW || po === C.OB_BEAM) { this._rowOb[base + l] = 0; break; }
-      }
-    }
-  }
-
-  // 기둥은 자세로 못 넘는다 — 레인을 바꾸는 수밖에 없다.
-  // 그런데 연속한 두 행이 각각 레인 이동을 강요하면, 최고 속도에서 행 간격은
-  // 316ms 인데 이동 하나가 130ms 라 두 번을 연달아 넣을 수가 없다.
-  //
-  // 실제로 그렇게 됐다. 봇의 3분 피격 8건이 **전부 동일했다** —
-  // 288m, 최고속 760, 기둥, 레인 2, 이동 중이 아님. 앞 행이 레인 2를 강요하고
-  // 다음 행이 레인 2를 막은 배치였다. 어떻게 눌러도 못 지나간다.
-  //
-  // 그래서 **머무를 수 있는 길을 규칙으로 보장한다** — 직전 행에서 서 있을 수
-  // 있었던 레인 중 최소 하나는 이번 행에서도 기둥이 아니어야 한다.
-  // 점프·슬라이드 간격을 MIN_ACTION_ROWS 로 막은 것과 같은 종류의 안전판이고,
-  // 기둥만 이 규칙에서 빠져 있었다.
-  enforceLaneContinuity(n, base) {
-    if (n <= 0) return;
-    const pbase = ((n - 1) % C.ROW_POOL) * C.LANE_COUNT;
-    for (let l = 0; l < C.LANE_COUNT; l++) {
-      if (!this.blocksLane(this._rowOb[pbase + l]) && !this.blocksLane(this._rowOb[base + l])) return;
-    }
-    // 없다 — 직전 행에서 통과 가능했던 레인 하나를 연다
-    for (let l = 0; l < C.LANE_COUNT; l++) {
-      if (!this.blocksLane(this._rowOb[pbase + l])) { this._rowOb[base + l] = C.OB_NONE; return; }
-    }
-    this._rowOb[base] = C.OB_NONE;
-  }
-
-  // 자세로는 못 넘는 종류 — 레인을 바꾸는 수밖에 없다
-  blocksLane(ob) { return ob === C.OB_PILLAR || ob === C.OB_DRIFT; }
-
-  // 움직이는 기둥이 **출발하는** 레인. 도착 레인(판정용)은 행에 저장돼 있다.
-  // 해시라서 같은 판이면 같은 궤적이 나온다 — 외울 수 있고, 그래서 실력이 는다.
-  driftFrom(i, toLane) {
-    const h = (i * 2654435761) % 1000;
-    const alt = h % 2 === 0 ? 0 : 2;
-    return alt === toLane ? 1 : alt;
-  }
-
-  // 계단 구간 진입 직전·직후는 비운다
-  nearStairZone(z) {
-    const next = this.nextStairDist;
-    return z > next - C.ROW_SPACING * 2 && z < next + C.ROW_SPACING * 2;
   }
 
   // ── 리셋 ────────────────────────────────────────────────────
   reset() {
     this.tick = 0;
     this.simTime = 0;
-    this.state = S.RUN;
+    this.state = S.PLAY;
     this.stateTick = 0;
 
-    this.rowMade = -1;
-    if (this.supplier && this.supplier.onRunStart) this.supplier.onRunStart();
+    this.uAlive.fill(0);
+    this.uNext = 0;
+    this.aliveL = 0;
+    this.aliveR = 0;
 
-    this.travelled = 0;
-    this.lane = 1;
-    this.laneFrom = 1;
-    this.laneShift = 0;          // 남은 프레임
-    this.laneShiftTotal = 1;
-    this.worldX = 0;
-    this.prevWorldX = 0;
-    this.lastShiftTick = -999;
+    this.baseHp = [C.BASE_HP, C.BASE_HP];
+    this.baseMax = [C.BASE_HP, C.BASE_HP];
+    this.baseFlash = [0, 0];
+    // 무엇이 기지를 무너뜨렸는가. 0=아직 1=병력 2=물.
+    // 물과 병력이 같은 프레임에 기지를 0으로 만들면 무승부로 끝나 버린다.
+    // **병력이 무너뜨린 것이 물보다 먼저다** — 그게 이 게임에서 이겼다는 뜻이다.
+    this.baseDownBy = [0, 0];
 
-    this.vstate = V.GROUND;
-    this.vFrames = 0;
-    this.vTotal = 1;
-    this.footY = 0;              // 발밑 높이
-    this.prevFootY = 0;
-    this.height = C.PLAYER_H;
+    this.gold = C.GOLD_START;
+    this.xp = 0;
+    this.era = 0;
+    this.spawnCd.fill(0);
+    this.nukeCd = C.NUKE_CD * 0.45;    // 첫 판에도 한 번은 쓸 수 있게 절반만 채워 시작
 
-    this.stumble = 0;
-    this.speed = C.SPEED_BASE;
+    this.aiGold = C.AI_GOLD_START;
+    this.aiXp = 0;
+    this.aiEra = 0;
+    this.aiThink = 0;
+    this.aiWaveIdx = 0;
+    this.aiWaveTimer = FALLBACK_WAVE[0];
 
-    // 물 — 뒤에서 따라온다. gap 이 0이 되면 죽는다.
-    this.gap = C.CHASE_GAP_START;
-    this.prevGap = this.gap;
-    this.chaseGap = C.CHASE_GAP_START;
+    this.water = C.WATER_Y0;
+    this.prevWater = this.water;
+    this.waterWarned = false;
 
-    this.combo = 0;
-    this.comboBest = 0;
-    this.score = 0;
-    this.coins = 0;
-    this.hits = 0;
-    this.nearMisses = 0;
-    this.perfects = 0;
-    this.jumps = 0;
-    this.slides = 0;
-    this.smashed = 0;
+    // 통계 — 디렉터의 지표이자 결과 화면의 재료
+    this.spawned = 0;
+    this.spawnedKind = new Uint16Array(C.UNIT_KINDS);
+    this.goldSpentUnits = 0;
+    this.goldSpentEra = 0;
+    this.kills = 0;
+    this.lost = 0;
+    this.nukes = 0;
+    this.goldPeak = 0;
+    this.goldSum = 0;
+    this.goldSamples = 0;
 
-    // 부스트 — 코인과 아슬아슬로만 찬다
-    this.boost = 0;
-    this.boostFrames = 0;
-    this.boostTotal = Math.round(C.BOOST_MS / C.SIM_DT);
-    this.boosts = 0;
-
-    // 코인 라인 — 연속으로 이어 먹은 개수. 코인이 있던 행을 그냥 지나치면 끊긴다
-    this.coinLine = 0;
-    this.coinLineBest = 0;
-
-    // 계단
-    this.nextStairDist = C.STAIR_FIRST_DIST;
-    this.stairStep = 0;
-    this.stairSide = 0;          // 다음에 눌러야 할 쪽 (0=좌 1=우)
-    this.stairFrames = 0;
-    this.stairStall = 0;
-    this.stairHit = 0;
-    this.stairTry = 0;
-
-    // 드래프트
-    this.draftIdx = new Int8Array(C.TRAIT_OFFER);
+    this.traits.fill(0);
     this.draftOpen = false;
     this.draftFrames = 0;
-    this.traits.fill(0);
-    this.shieldCharges = 0;
+    this.pendingDraft = 0;
 
-    this.recordPassed = this.bestDist <= 0;
-    this.deathTick = -1;
+    this.outcome = C.WIN_NONE;
+    this.endTick = -1;
 
-    this.ensureRow(Math.ceil(C.ZFAR / C.ROW_SPACING) + 2);
+    if (this.supplier && this.supplier.onRunStart) this.supplier.onRunStart();
     this.runs++;
     this.emit(EV.RESET, 0, 0);
   }
@@ -292,135 +176,406 @@ export class Game {
 
   applyTrait(idx) {
     this.traits[idx] = 1;
-    if (C.TRAITS[idx].id === 'shield') this.shieldCharges++;
+    if (C.TRAITS[idx].id === 'wall') {
+      this.baseMax[SIDE_L] += 400;
+      this.baseHp[SIDE_L] += 400;
+    }
+  }
+
+  // ── 파생 스탯 ───────────────────────────────────────────────
+  // 시대 배수와 특성을 여기 한 곳에서만 적용한다. 흩뿌리면 반드시 어긋난다.
+  statHp(kind, era, side) {
+    let v = C.U_HP[kind] * C.ERA_HP_MUL[era];
+    if (side === SIDE_L && this.has('thick')) v *= 1.25;
+    return v;
+  }
+  statDmg(kind, era, side) {
+    let v = C.U_DMG[kind] * C.ERA_DMG_MUL[era];
+    if (side === SIDE_L && this.has('sharp')) v *= 1.2;
+    return v;
+  }
+  statSpeed(kind, side) {
+    let v = C.U_SPEED[kind];
+    if (side === SIDE_L && this.has('swift')) v *= 1.25;
+    return v;
+  }
+  statCooldown(kind, side) {
+    let v = C.U_COOLDOWN[kind];
+    if (side === SIDE_L && kind === C.U_ARCHER && this.has('volley')) v *= 0.7;
+    return v;
+  }
+  cost(kind) { return Math.round(C.U_COST[kind] * C.ERA_COST_MUL[this.era]); }
+  aiCost(kind) { return Math.round(C.U_COST[kind] * C.ERA_COST_MUL[this.aiEra]); }
+  spawnCooldown(kind) {
+    return C.U_SPAWN_CD[kind] * (this.has('rush') ? 0.7 : 1);
+  }
+  goldRate() { return C.GOLD_RATE * (this.has('mine') ? 1.3 : 1); }
+  eraNeed() {
+    return this.era + 1 < C.ERA_COUNT ? C.ERA_XP[this.era + 1] : -1;
+  }
+  eraReady() {
+    const need = this.eraNeed();
+    return need > 0 && this.xp >= need;
   }
 
   // ── 입력 진입점 — main 의 입력 큐만 이걸 부른다 ──────────────
   input(act, simTs, wallTs) {
-    if (this.state === S.DEAD) {
+    if (this.state === S.OVER) {
       // 결과 화면에서는 아무 입력이나 재시작이다
       this.reset();
       return;
     }
     if (this.state === S.DRAFT) {
       if (act >= ACT.PICK0 && act <= ACT.PICK2) this.pickTrait(act - ACT.PICK0);
-      // 계단·러너 동사도 그대로 선택에 매핑한다 — 좌/우로 고르고 위로 확정하지 않는다.
-      else if (act === ACT.LEFT) this.pickTrait(0);
-      else if (act === ACT.RIGHT) this.pickTrait(2);
-      else if (act === ACT.JUMP) this.pickTrait(1);
+      // 유닛 버튼도 그대로 선택에 매핑한다 — 손이 이미 거기 있다
+      else if (act <= ACT.GIANT) this.pickTrait(act);
       return;
     }
-    if (this.state === S.STAIR) {
-      if (act === ACT.LEFT) this.stairInput(0);
-      else if (act === ACT.RIGHT) this.stairInput(1);
-      return;
-    }
-    // RUN
     switch (act) {
-      case ACT.LEFT:  this.shiftLane(-1); break;
-      case ACT.RIGHT: this.shiftLane(1); break;
-      case ACT.JUMP:  this.beginJump(); break;
-      case ACT.SLIDE: this.beginSlide(); break;
+      case ACT.SWORD: case ACT.ARCHER: case ACT.GIANT: this.buy(act); break;
+      case ACT.ERA: this.buyEra(); break;
+      case ACT.NUKE: this.fireNuke(); break;
       default: break;
     }
   }
 
-  shiftLane(dir) {
-    const next = this.lane + dir;
-    if (next < 0 || next >= C.LANE_COUNT) return;
-    this.laneFrom = this.lane;
-    this.lane = next;
-    // 관성 특성은 이동을 즉시 끝낸다
-    this.laneShiftTotal = this.has('inertia')
-      ? 1 : Math.max(1, Math.round(C.LANE_SHIFT_MS / C.SIM_DT));
-    this.laneShift = this.laneShiftTotal;
-    this.lastShiftTick = this.tick;
-    this.emit(EV.MOVE, next, dir);
+  // ── 구매 ────────────────────────────────────────────────────
+  buy(kind) {
+    if (this.spawnCd[kind] > 0) { this.emit(EV.COOLDOWN, kind, 0); return; }
+    const c = this.cost(kind);
+    if (this.gold < c) { this.emit(EV.NO_GOLD, kind, 0); return; }
+    this.gold -= c;
+    this.goldSpentUnits += c;
+    this.spawnCd[kind] = this.spawnCooldown(kind);
+    this.spawn(SIDE_L, kind, this.era);
   }
 
-  beginJump() {
-    if (this.vstate === V.JUMP) return;
-    this.vstate = V.JUMP;
-    this.vTotal = Math.max(1, Math.round(
-      C.JUMP_MS * (this.has('glide') ? 1.4 : 1) / C.SIM_DT));
-    this.vFrames = 0;
-    this.jumps++;
-    this.emit(EV.JUMP, 0, 0);
+  buyEra() {
+    if (!this.eraReady()) { this.emit(EV.NO_GOLD, -1, 0); return; }
+    this.xp -= this.eraNeed();
+    this.era++;
+    this.goldSpentEra += this.eraNeed();
+    this.gold += C.ERA_UP_GOLD;
+    // 진화는 판을 되돌리는 순간이다. 물이 크게 밀린다.
+    this.water += C.WATER_ERA_PUSH;
+    this.emit(EV.ERA_UP, this.era, SIDE_L);
+    this.openDraft();
   }
 
-  beginSlide() {
-    if (this.vstate === V.JUMP) return;   // 공중에서는 슬라이드하지 않는다
-    this.vstate = V.SLIDE;
-    this.vTotal = Math.max(1, Math.round(
-      C.SLIDE_MS * (this.has('brake') ? 1.5 : 1) / C.SIM_DT));
-    this.vFrames = 0;
-    this.slides++;
-    this.emit(EV.SLIDE, 0, 0);
+  fireNuke() {
+    if (this.nukeCd > 0) { this.emit(EV.COOLDOWN, -1, 0); return; }
+    this.nukeCd = C.NUKE_CD;
+    this.nukes++;
+    // 적 유닛 전부에게 피해. 기지는 건드리지 않는다 — 그러면 이건 승리 버튼이 된다
+    for (let i = 0; i < C.UNIT_MAX; i++) {
+      if (!this.uAlive[i] || this.uSide[i] !== SIDE_R) continue;
+      this.damage(i, C.NUKE_DMG, SIDE_L);
+    }
+    this.water += C.NUKE_WATER_PUSH;
+    this.emit(EV.NUKE, 0, 0);
   }
 
-  // ── 계단 구간 ───────────────────────────────────────────────
-  enterStair() {
-    this.setState(S.STAIR);
-    this.stairStep = 0;
-    this.stairSide = this.stairSideFor(0);
-    this.stairStall = 0;
-    this.stairHit = 0;
-    this.stairTry = 0;
-    this.stairFrames = Math.round(C.STAIR_MS / C.SIM_DT);
-    this.vstate = V.GROUND;
-    this.footY = 0;
-    this.emit(EV.STAIR_ENTER, 0, 0);
+  // ── 유닛 소환 ───────────────────────────────────────────────
+  spawn(side, kind, era) {
+    // 풀에서 빈 자리를 찾는다. 없으면 소환하지 않는다 — 조용히 실패해야
+    // 프레임이 튀지 않는다.
+    let idx = -1;
+    for (let k = 0; k < C.UNIT_MAX; k++) {
+      const i = (this.uNext + k) % C.UNIT_MAX;
+      if (!this.uAlive[i]) { idx = i; break; }
+    }
+    if (idx < 0) return;
+    this.uNext = (idx + 1) % C.UNIT_MAX;
+
+    const hp = this.statHp(kind, era, side);
+    this.uAlive[idx] = 1;
+    this.uSide[idx] = side;
+    this.uKind[idx] = kind;
+    this.uEra[idx] = era;
+    this.uX[idx] = side === SIDE_L ? C.SPAWN_L_X : C.SPAWN_R_X;
+    this.uPrevX[idx] = this.uX[idx];
+    this.uHp[idx] = hp;
+    this.uHpMax[idx] = hp;
+    this.uCd[idx] = 0;
+    this.uHitFlash[idx] = 0;
+    this.uAttack[idx] = 0;
+
+    if (side === SIDE_L) { this.aliveL++; this.spawned++; this.spawnedKind[kind]++; }
+    else this.aliveR++;
+    this.emit(EV.SPAWN, kind, side);
   }
 
-  stairInput(side) {
-    if (this.stairStall > 0) return;
-    this.stairTry++;
-    if (side !== this.stairSide) {
-      // 순서를 틀렸다. 비틀거리며 멈춘다 — 그동안 물이 붙는다.
-      this.stairStall = C.STAIR_MISS_STALL;
-      this.combo = 0;
-      this.emit(EV.STAIR_MISS, 0, 0);
+  // ── 한 스텝 ─────────────────────────────────────────────────
+  step() {
+    this.prevWater = this.water;
+    for (let i = 0; i < C.UNIT_MAX; i++) if (this.uAlive[i]) this.uPrevX[i] = this.uX[i];
+
+    this.tick++;
+    this.stateTick++;
+    this.simTime += C.SIM_DT;
+
+    if (this.state === S.DRAFT) { this.draftFrames++; return; }
+    if (this.state === S.OVER) return;
+
+    this.stepEconomy();
+    this.stepAI();
+    this.stepUnits();
+    this.stepWater();
+    this.checkEnd();
+  }
+
+  stepEconomy() {
+    const dt = C.SIM_DT / 1000;
+    this.gold += this.goldRate() * dt;
+    if (this.gold > C.GOLD_CAP) this.gold = C.GOLD_CAP;
+    if (this.gold > this.goldPeak) this.goldPeak = this.gold;
+    this.goldSum += this.gold;
+    this.goldSamples++;
+
+    for (let k = 0; k < C.UNIT_KINDS; k++) {
+      if (this.spawnCd[k] > 0) {
+        this.spawnCd[k] -= C.SIM_DT;
+        if (this.spawnCd[k] < 0) this.spawnCd[k] = 0;
+      }
+    }
+    if (this.nukeCd > 0) {
+      this.nukeCd -= C.SIM_DT;
+      if (this.nukeCd < 0) this.nukeCd = 0;
+    }
+
+    // 적도 같은 규칙으로 번다. 레버가 배수를 준다.
+    let rate = C.AI_GOLD_RATE;
+    if (this.supplier && this.supplier.levers) rate *= this.supplier.levers.goldMul;
+    this.aiGold += rate * dt;
+  }
+
+  // 적 사령관. **결정론적이다.** 디렉터의 레버가 성향을 정한다.
+  stepAI() {
+    this.aiThink -= C.SIM_DT;
+    if (this.aiThink > 0) return;
+    this.aiThink = C.AI_THINK_MS;
+
+    const lv = this.supplier && this.supplier.levers ? this.supplier.levers : null;
+
+    // 시대 진화 — 경험치가 차면 올린다. 레버가 문턱을 조절한다.
+    if (this.aiEra + 1 < C.ERA_COUNT) {
+      const need = C.AI_ERA_XP[this.aiEra + 1] * (lv ? lv.eraThresh : 1);
+      if (this.aiXp >= need) {
+        this.aiXp -= need;
+        this.aiEra++;
+        this.emit(EV.ERA_UP, this.aiEra, SIDE_R);
+      }
+    }
+
+    // 디렉터가 없으면 고정 웨이브를 돈다. 게임은 100% 돌아간다.
+    if (!lv) {
+      this.aiWaveTimer -= C.AI_THINK_MS;
+      if (this.aiWaveTimer <= 0) {
+        const kind = FALLBACK_WAVE[this.aiWaveIdx * 2 + 1];
+        this.spawn(SIDE_R, kind, this.aiEra);
+        this.aiWaveIdx = (this.aiWaveIdx + 1) % (FALLBACK_WAVE.length / 2);
+        this.aiWaveTimer = FALLBACK_WAVE[this.aiWaveIdx * 2];
+      }
       return;
     }
-    this.stairHit++;
-    this.stairStep++;
-    this.stairSide = this.stairSideFor(this.stairStep);
-    this.laneFrom = this.lane;
-    this.lane = side === 0 ? 0 : 2;
-    this.laneShiftTotal = 5;    // 짧게. 계단은 리듬이라 즉각적이어야 한다
-    this.laneShift = 5;
-    // 오른 만큼 물이 밀린다. 이 구간이 유일한 회복 기회다.
-    this.gap += C.STAIR_STEP_PUSH * (this.has('recover') ? 1.6 : 1);
-    this.score += (C.STAIR_STEP_SCORE * this.mult()) | 0;
-    this.emit(EV.STAIR_STEP, this.stairStep, 0);
-    if (this.stairStep >= C.STAIR_STEPS) this.clearStair();
+
+    // 레버가 정한 구성비대로, 살 수 있으면 산다.
+    // 무엇을 뽑을지는 mix 로, 얼마나 자주 뽑을지는 tempo 로 정해진다.
+    if (this.aiHold === undefined) this.aiHold = 0;
+    this.aiHold -= C.AI_THINK_MS;
+    if (this.aiHold > 0) return;
+
+    const kind = this.pickAiKind(lv);
+    const c = this.aiCost(kind);
+    if (this.aiGold < c) return;
+    this.aiGold -= c;
+    this.spawn(SIDE_R, kind, this.aiEra);
+    this.aiHold = lv.tempo;
   }
 
-  // 계단 순서. 좌·우·좌·우로만 두면 두 번째 계단부터는 리듬이 아니라 노동이다.
-  // 같은 쪽이 두 번 연속 나오는 자리를 결정론적으로 섞는다 —
-  // 그래야 **보고 눌러야** 하고, 외워서 누를 수 없다.
-  // 난수가 아니라 해시다. 같은 판이면 같은 순서가 나온다.
-  stairSideFor(step) {
-    const h = (step * 2654435761 + this.runs * 40503) % 1000;
-    // 기본은 교대. 다섯 칸에 한 번꼴로 같은 쪽을 한 번 더 요구한다.
-    const repeat = h % 5 === 0;
-    const base = step % 2;
-    return repeat ? 1 - base : base;
+  // 결정론적 선택. Math.random 없음 — 재현 불가능해지면 증거가 못 된다.
+  pickAiKind(lv) {
+    // mix 는 세 종류의 가중치다. 누적 합을 tick 기반 위상으로 자른다.
+    const total = lv.mix[0] + lv.mix[1] + lv.mix[2];
+    if (total <= 0) return C.U_SWORD;
+    const phase = ((this.tick * 2654435761) % 1000) / 1000 * total;
+    if (phase < lv.mix[0]) return C.U_SWORD;
+    if (phase < lv.mix[0] + lv.mix[1]) return C.U_ARCHER;
+    return C.U_GIANT;
   }
 
-  clearStair() {
-    const acc = this.stairTry > 0 ? this.stairHit / this.stairTry : 0;
-    this.emit(EV.STAIR_CLEAR, acc, 0);
-    this.nextStairDist = this.travelled + C.STAIR_EVERY_DIST;
-    this.lane = 1;
-    this.laneFrom = 1;
-    this.laneShift = 0;
-    this.openDraft();
+  // ── 유닛 갱신 ───────────────────────────────────────────────
+  stepUnits() {
+    const dt = C.SIM_DT / 1000;
+    for (let i = 0; i < C.UNIT_MAX; i++) {
+      if (!this.uAlive[i]) continue;
+      if (this.uHitFlash[i] > 0) this.uHitFlash[i]--;
+      if (this.uAttack[i] > 0) this.uAttack[i]--;
+      if (this.uCd[i] > 0) this.uCd[i] -= C.SIM_DT;
+
+      const side = this.uSide[i];
+      const kind = this.uKind[i];
+      const dir = side === SIDE_L ? 1 : -1;
+      const range = C.U_RANGE[kind];
+
+      // 사거리 안의 가장 가까운 적을 찾는다
+      const target = this.findTarget(i, side, dir, range);
+      if (target >= 0) {
+        if (this.uCd[i] <= 0) {
+          this.uCd[i] = this.statCooldown(kind, side);
+          this.uAttack[i] = 8;
+          this.damage(target, this.statDmg(kind, this.uEra[i], side), side);
+          this.emit(EV.ATTACK, kind, side);
+        }
+        continue;   // 싸우는 동안에는 전진하지 않는다
+      }
+
+      // 적 기지에 닿았는가
+      const baseX = side === SIDE_L ? C.BASE_R_X : C.BASE_L_X;
+      if (Math.abs(this.uX[i] - baseX) <= C.BASE_W * 0.5 + range) {
+        if (this.uCd[i] <= 0) {
+          this.uCd[i] = this.statCooldown(kind, side);
+          this.uAttack[i] = 8;
+          let dmg = this.statDmg(kind, this.uEra[i], side) * C.BASE_DMG_MUL;
+          if (side === SIDE_L && this.has('siege')) dmg *= 2;
+          this.hitBase(side === SIDE_L ? SIDE_R : SIDE_L, dmg);
+        }
+        continue;
+      }
+
+      // 앞에 아군이 막고 있으면 밀지 않는다. 이게 없으면 전부 한 점에 뭉친다.
+      if (this.blockedAhead(i, side, dir)) continue;
+      this.uX[i] += this.statSpeed(kind, side) * dir * dt;
+    }
+
+    // 물에 잠긴 유닛은 익사한다. **가운데가 가장 낮으므로 전선이 먼저 잠긴다** —
+    // 밀지 못하고 물고 늘어지는 쪽이 먼저 병력을 잃는다.
+    for (let i = 0; i < C.UNIT_MAX; i++) {
+      if (!this.uAlive[i]) continue;
+      if (groundAt(this.uX[i]) <= this.water) continue;
+      this.damage(i, C.DROWN_DPS * dt, this.uSide[i] === SIDE_L ? SIDE_R : SIDE_L);
+    }
+  }
+
+  findTarget(i, side, dir, range) {
+    const x = this.uX[i];
+    let best = -1, bestD = 1e9;
+    for (let j = 0; j < C.UNIT_MAX; j++) {
+      if (!this.uAlive[j] || this.uSide[j] === side) continue;
+      const d = (this.uX[j] - x) * dir;      // 앞쪽이 양수
+      if (d < -6 || d > range) continue;
+      if (d < bestD) { bestD = d; best = j; }
+    }
+    return best;
+  }
+
+  blockedAhead(i, side, dir) {
+    const x = this.uX[i];
+    for (let j = 0; j < C.UNIT_MAX; j++) {
+      if (j === i || !this.uAlive[j] || this.uSide[j] !== side) continue;
+      const d = (this.uX[j] - x) * dir;
+      if (d > 0 && d < C.UNIT_GAP) return true;
+    }
+    return false;
+  }
+
+  damage(idx, dmg, byWhom) {
+    this.uHp[idx] -= dmg;
+    this.uHitFlash[idx] = 4;
+    if (this.uHp[idx] > 0) return;
+
+    const kind = this.uKind[idx];
+    const side = this.uSide[idx];
+    this.uAlive[idx] = 0;
+    if (side === SIDE_L) { this.aliveL--; } else { this.aliveR--; }
+
+    if (byWhom === SIDE_L) {
+      this.kills++;
+      this.gold += C.U_BOUNTY[kind] * (this.has('loot') ? 2 : 1);
+      this.xp += C.U_XP[kind] * (this.has('study') ? 1.4 : 1);
+      // 적을 잡으면 물이 밀린다. **공격이 곧 생존이다** — 이게 교착을 푼다.
+      this.water += C.WATER_KILL_PUSH * (this.has('revive') ? 1.8 : 1);
+    } else {
+      this.lost++;
+      this.aiXp += C.U_XP[kind];
+      this.aiGold += C.U_BOUNTY[kind];
+    }
+    this.emit(EV.KILL, kind, byWhom);
+  }
+
+  hitBase(side, dmg) {
+    this.baseHp[side] -= dmg;
+    this.baseFlash[side] = 5;
+    if (this.baseHp[side] <= 0) {
+      this.baseHp[side] = 0;
+      if (this.baseDownBy[side] === 0) this.baseDownBy[side] = 1;   // 병력
+    }
+    this.emit(EV.BASE_HIT, dmg, side);
+  }
+
+  // ── 물 ──────────────────────────────────────────────────────
+  stepWater() {
+    const dt = C.SIM_DT / 1000;
+    const t = this.simTime / 1000;
+    let rise = C.WATER_RISE;
+    if (t > C.WATER_ACCEL_AT) rise *= C.WATER_ACCEL_MUL;
+    if (this.has('drain')) rise *= 0.75;
+    if (this.supplier && this.supplier.levers) rise *= this.supplier.levers.waterMul;
+
+    this.water -= rise * dt;                       // y가 작아질수록 높이 찬다
+    if (this.water < C.WATER_MIN_Y) this.water = C.WATER_MIN_Y;
+    if (this.water > C.WATER_Y0) this.water = C.WATER_Y0;
+
+    if (!this.waterWarned && this.water < C.GROUND_Y + C.WATER_WARN) {
+      this.waterWarned = true;
+      this.emit(EV.WATER_WARN, 0, 0);
+    }
+
+    // 수면이 **기지 발밑**을 넘으면 양쪽 기지가 깎인다.
+    // 기지는 협곡 가장자리(높은 곳)에 있어 전선보다 한참 늦게 잠긴다 —
+    // 그때까지 승부가 안 났으면 둘 다 죽는 게 맞다.
+    if (this.water <= C.WATER_BASE_AT) {
+      const d = C.WATER_DPS * dt;
+      this.baseHp[SIDE_L] -= d;
+      this.baseHp[SIDE_R] -= d;
+      for (let sd = 0; sd < 2; sd++) {
+        if (this.baseHp[sd] <= 0) {
+          this.baseHp[sd] = 0;
+          if (this.baseDownBy[sd] === 0) this.baseDownBy[sd] = 2;   // 물
+        }
+      }
+      if (this.tick % 30 === 0) this.emit(EV.WATER_HIT, 0, 0);
+    }
+  }
+
+  checkEnd() {
+    if (this.baseHp[SIDE_R] <= 0 && this.baseHp[SIDE_L] <= 0) {
+      // 둘 다 0이면 **무엇이 무너뜨렸는지**로 가른다.
+      // 병력으로 적진을 함락시켰다면 그건 이긴 것이다. 물이 뒤따라온 것뿐이다.
+      if (this.baseDownBy[SIDE_R] === 1 && this.baseDownBy[SIDE_L] !== 1) return this.finish(C.WIN_PLAYER);
+      if (this.baseDownBy[SIDE_L] === 1 && this.baseDownBy[SIDE_R] !== 1) return this.finish(C.WIN_ENEMY);
+      return this.finish(C.WIN_DROWN);
+    }
+    if (this.baseHp[SIDE_R] <= 0) return this.finish(C.WIN_PLAYER);
+    // 내 기지만 무너졌으면 그냥 패배다. 물이 높다고 무승부가 아니다 —
+    // 적 기지는 멀쩡한데 "둘 다 잠겼다"고 하면 거짓말이다.
+    if (this.baseHp[SIDE_L] <= 0) return this.finish(C.WIN_ENEMY);
+  }
+
+  finish(outcome) {
+    this.outcome = outcome;
+    this.endTick = this.tick;
+    if (outcome === C.WIN_PLAYER) {
+      this.wins++;
+      const t = this.simTime / 1000;
+      if (this.bestTime === 0 || t < this.bestTime) this.bestTime = t;
+    } else this.losses++;
+    this.setState(S.OVER);
+    this.emit(outcome === C.WIN_PLAYER ? EV.WIN : EV.LOSE, outcome, 0);
   }
 
   // ── 특성 드래프트 ───────────────────────────────────────────
   openDraft() {
-    // 디렉터가 3개를 고른다. 없으면 앞에서부터 3개.
     if (this.supplier && this.supplier.draftOffer) {
       this.supplier.draftOffer(this, this.draftIdx);
     } else {
@@ -439,382 +594,37 @@ export class Game {
     this.applyTrait(idx);
     this.draftOpen = false;
     this.emit(EV.DRAFT_PICK, idx, C.TRAITS[idx].kind);
-    this.setState(S.RUN);
-  }
-
-  // ── 파생값 ──────────────────────────────────────────────────
-  mult() {
-    const step = C.COMBO_MULT_STEP * (this.has('chain') ? 1.5 : 1);
-    let m = 1 + this.combo * step;
-    if (m > C.COMBO_MULT_CAP) m = C.COMBO_MULT_CAP;
-    if (this.boostFrames > 0) m *= C.BOOST_SCORE_MUL;
-    if (this.has('gambler')) m *= 2;
-    return m;
-  }
-
-  // 스턴 없는 기준 속도. 물은 이걸 따라간다 — 플레이어가 비틀거려도 물은 안 느려진다.
-  baseSpeed() {
-    const t = clamp(this.travelled / C.SPEED_RAMP_DIST, 0, 1);
-    let s = C.SPEED_BASE + (C.SPEED_MAX - C.SPEED_BASE) * t;
-    if (this.has('sprint')) s *= 1.15;
-    if (this.boostFrames > 0) s *= C.BOOST_SPEED_MUL;
-    return s;
-  }
-
-  // ── 부스트 ──────────────────────────────────────────────────
-  // 코인과 아슬아슬로만 찬다. 거리로 차면 가만히 있어도 차오르고,
-  // 그러면 보상이 아니라 배급이 된다.
-  //
-  // 발동은 자동이다. 이 게임의 동사는 좌/우/위/아래 넷뿐이고,
-  // 다섯 번째를 만드는 순간 계단 구간의 좌/우와 충돌한다.
-  addBoost(v) {
-    if (this.boostFrames > 0) return;          // 쓰는 동안에는 안 찬다
-    this.boost += v;
-    if (this.boost < C.BOOST_MAX) return;
-    this.boost = C.BOOST_MAX;
-    this.startBoost();
-  }
-
-  startBoost() {
-    this.boost = 0;
-    this.boostFrames = this.boostTotal;
-    this.boosts++;
-    this.stumble = 0;                          // 비틀거림을 끊고 튀어나간다
-    this.gap += C.BOOST_WATER_PUSH;            // 발동 순간 물이 밀린다
-    this.emit(EV.BOOST_START, 0, 0);
-  }
-
-  stepBoost() {
-    if (this.boostFrames <= 0) return;
-    this.boostFrames--;
-    if (this.boostFrames === 0) this.emit(EV.BOOST_END, 0, 0);
-  }
-
-  boostK() { return this.boostFrames > 0 ? this.boostFrames / this.boostTotal : 0; }
-  boostFill() { return this.boost / C.BOOST_MAX; }
-
-  // ── 판 평가 ─────────────────────────────────────────────────
-  // 점수는 "얼마나 오래 버텼나"만 말한다. 그건 잘한 것과 운 좋은 것을 구분하지 못한다.
-  // 등급은 **어떻게 플레이했는가**를 말하고, 그래서 다음 판의 목표가 된다.
-  //
-  // 다섯 축 전부 결정론적이다. 같은 판이면 같은 등급이 나온다.
-  gradeAxis(i) {
-    switch (i) {
-      case 0: return clamp(this.meters() / C.GRADE_DIST_FULL, 0, 1);
-      case 1: return clamp(this.comboBest / C.GRADE_COMBO_FULL, 0, 1);
-      case 2: return clamp(this.perfects / C.GRADE_PERFECT_FULL, 0, 1);
-      case 3: return clamp(this.coins / C.GRADE_COIN_FULL, 0, 1);
-      default: return clamp(1 - this.hits * C.GRADE_CLEAN_PENALTY, 0, 1);
-    }
-  }
-
-  gradeScore() {
-    return this.gradeAxis(0) * C.GRADE_W_DIST
-         + this.gradeAxis(1) * C.GRADE_W_COMBO
-         + this.gradeAxis(2) * C.GRADE_W_PERFECT
-         + this.gradeAxis(3) * C.GRADE_W_COIN
-         + this.gradeAxis(4) * C.GRADE_W_CLEAN;
-  }
-
-  // 0=S … 4=D
-  gradeIndex() {
-    const g = this.gradeScore();
-    for (let i = 0; i < C.GRADE_CUTS.length; i++) if (g >= C.GRADE_CUTS[i]) return i;
-    return C.GRADE_CUTS.length;
-  }
-
-  // 가장 약한 축. "다음엔 이걸 해라"가 된다.
-  weakestAxis() {
-    let worst = 0, wv = 2;
-    for (let i = 0; i < 5; i++) {
-      const v = this.gradeAxis(i);
-      if (v < wv) { wv = v; worst = i; }
-    }
-    return worst;
-  }
-
-  comboWaterMul() {
-    if (this.combo >= C.COMBO_PUSH_AT) return C.COMBO_PUSH_MUL;
-    if (this.combo >= C.COMBO_HOLD_AT) return C.COMBO_HOLD_MUL;
-    return 1;
-  }
-
-  comboTier() { return (this.combo / C.COMBO_TIER) | 0; }
-
-  // **충돌은 목표 레인이 아니라 실제로 서 있는 위치로 판정한다.**
-  // shiftLane() 은 this.lane 을 즉시 목적지로 바꾼다 — 그게 보간의 기준점이기 때문이다.
-  // 그 값으로 충돌을 보면, 스와이프하는 순간 아직 원래 레인에 서 있는데도
-  // 목적지의 장애물에 맞는다. 플레이어가 보고 있는 것과 맞는 것이 달라진다.
-  // 실제로 그렇게 만들었다가 봇이 레인 이동 중에만 골라 맞았다.
-  effLane() {
-    const l = Math.round((this.worldX + C.LANE_W) / C.LANE_W);
-    return l < 0 ? 0 : (l >= C.LANE_COUNT ? C.LANE_COUNT - 1 : l);
-  }
-  meters() { return this.travelled / C.METER_UNITS; }
-
-  // 장애물이 보이기 시작하는 거리. 디렉터의 telegraph 레버와 시야 특성이 늘린다.
-  drawZ() {
-    let z = C.ZFAR;
-    if (this.supplier && this.supplier.levers) z *= this.supplier.levers.telegraph;
-    if (this.has('vision')) z *= 1.3;
-    return z;
-  }
-
-  // ── 한 스텝 ─────────────────────────────────────────────────
-  step() {
-    this.prevWorldX = this.worldX;
-    this.prevFootY = this.footY;
-    this.prevGap = this.gap;
-
-    this.tick++;
-    this.stateTick++;
-    this.simTime += C.SIM_DT;
-
-    if (this.state === S.DRAFT) { this.draftFrames++; return; }
-    if (this.state === S.DEAD) return;
-
-    this.stepBoost();
-
-    const base = this.baseSpeed();
-    let moveSpeed = base;
-    if (this.state === S.STAIR) {
-      // 계단에서는 발이 아니라 리듬이 속도를 만든다
-      moveSpeed = this.stairStall > 0 ? 0 : base * 0.75;
-      this.stairFrames--;
-      if (this.stairStall > 0) this.stairStall--;
-      this.stepLane();          // 계단에서도 좌우로 옮겨 탄다. 안 하면 가운데 박혀 있다
-      if (this.stairFrames <= 0) this.clearStair();
-    } else {
-      if (this.stumble > 0) { this.stumble--; moveSpeed = base * C.STUMBLE_SPEED_MUL; }
-      this.stepLane();
-      this.stepVertical();
-    }
-
-    const advance = moveSpeed / C.SIM_HZ;
-    this.travelled += advance;
-    this.speed = moveSpeed;
-
-    this.stepWater(base, advance);
-
-    if (this.state === S.RUN) {
-      this.stepTrack();
-      if (this.travelled >= this.nextStairDist) this.enterStair();
-    }
-
-    // 거리 점수
-    this.score += advance * C.SCORE_PER_UNIT * this.mult();
-
-    if (this.travelled > this.bestDist && !this.recordPassed) {
-      this.recordPassed = true;
-      this.emit(EV.RECORD, 0, 0);
-    }
-
-    this.ensureRow(Math.ceil((this.travelled + C.ZFAR * 1.5) / C.ROW_SPACING) + 2);
-
-    if (this.gap <= 0) this.die();
-  }
-
-  stepLane() {
-    if (this.laneShift > 0) {
-      this.laneShift--;
-      const t = 1 - this.laneShift / this.laneShiftTotal;
-      const e = easeOutQuad(t);
-      this.worldX = C.LANE_X[this.laneFrom]
-        + (C.LANE_X[this.lane] - C.LANE_X[this.laneFrom]) * e;
-    } else {
-      this.worldX = C.LANE_X[this.lane];
-    }
-  }
-
-  stepVertical() {
-    if (this.vstate === V.GROUND) { this.footY = 0; this.height = C.PLAYER_H; return; }
-    this.vFrames++;
-    const t = this.vFrames / this.vTotal;
-    if (t >= 1) {
-      const was = this.vstate;
-      this.vstate = V.GROUND;
-      this.footY = 0;
-      this.height = C.PLAYER_H;
-      if (was === V.JUMP) this.emit(EV.LAND, 0, 0);
-      return;
-    }
-    if (this.vstate === V.JUMP) {
-      // 포물선. 4·h·t·(1−t) 는 t=0.5 에서 정점 h 가 된다.
-      this.footY = 4 * C.JUMP_APEX * t * (1 - t);
-      this.height = C.PLAYER_H;
-    } else {
-      this.footY = 0;
-      this.height = C.SLIDE_H;
-    }
-  }
-
-  stepWater(base, advance) {
-    // 추격 거리는 깊이가 쌓일수록 좁혀진다
-    const k = clamp(this.travelled / C.CHASE_TIGHTEN_DIST, 0, 1);
-    this.chaseGap = C.CHASE_GAP_START + (C.CHASE_GAP_END - C.CHASE_GAP_START) * k;
-
-    let ratio = C.WATER_RATIO * this.comboWaterMul();
-    if (this.supplier && this.supplier.levers) ratio *= this.supplier.levers.waterMul;
-    if (this.has('chill')) ratio *= 0.8;
-    if (this.has('gambler')) ratio *= 1.25;
-
-    let waterAdvance = base * ratio / C.SIM_HZ;
-    // 너무 벌어지면 3배가 아니라 "플레이어보다 조금 빠르게" 붙는다.
-    // 일정 속도 두 개뿐이고 어느 쪽인지 눈에 보인다. 순간이동하지 않는다.
-    if (this.gap > this.chaseGap) {
-      const chase = base * C.WATER_CHASE_MUL / C.SIM_HZ;
-      if (chase > waterAdvance) waterAdvance = chase;
-    }
-    this.gap += advance - waterAdvance;
-    if (this.gap > this.chaseGap * 1.35) this.gap = this.chaseGap * 1.35;
-  }
-
-  // ── 트랙 판정 ───────────────────────────────────────────────
-  stepTrack() {
-    const first = Math.max(0, Math.floor((this.travelled - C.ROW_SPACING * 2) / C.ROW_SPACING));
-    const last = Math.min(this.rowMade,
-      Math.ceil((this.travelled + C.ROW_SPACING * 2) / C.ROW_SPACING));
-    for (let i = first; i <= last; i++) {
-      const slot = i % C.ROW_POOL;
-      if (this._rowDone[slot]) continue;
-      const z = this._rowZ[slot] - this.travelled;
-
-      // 코인은 통과하는 순간 먹는다
-      if (z < C.COIN_R && z > -C.COIN_R) {
-        const ci = slot * C.LANE_COUNT + this.effLane();
-        if (this._rowCoin[ci] && !this._rowTaken[ci]) {
-          this._rowTaken[ci] = 1;
-          this.coins++;
-          this.score += (C.COIN_SCORE * (this.has('collector') ? 2 : 1) * this.mult()) | 0;
-          // b = 바깥 레인에서 챙겼는가. 디렉터의 greed 지표가 이걸 본다.
-          this.emit(EV.COIN, 0, this.effLane() === 1 ? 0 : 1);
-          this.addBoost(C.BOOST_PER_COIN);
-          this.coinLine++;
-          if (this.coinLine > this.coinLineBest) this.coinLineBest = this.coinLine;
-          if (this.coinLine % C.COIN_LINE_AT === 0) {
-            this.score += (C.COIN_LINE_SCORE * this.mult()) | 0;
-            this.emit(EV.COIN_LINE, this.coinLine, 0);
-          }
-        }
-      }
-
-      // 장애물 판정은 행이 플레이어 평면을 지나는 순간 한 번만
-      if (z > 0) continue;
-      this._rowDone[slot] = 1;
-      // 코인이 있었는데 하나도 못 먹었으면 라인이 끊긴다.
-      // 줍는 것이 아니라 **잇는 것**이 되게 하는 규칙이다.
-      let had = 0, got = 0;
-      for (let l = 0; l < C.LANE_COUNT; l++) {
-        const ci = slot * C.LANE_COUNT + l;
-        if (this._rowCoin[ci]) { had++; if (this._rowTaken[ci]) got++; }
-      }
-      if (had > 0 && got === 0) this.coinLine = 0;
-      this.resolveRow(slot);
-    }
-  }
-
-  resolveRow(slot) {
-    const here = this.effLane();
-    const ob = this._rowOb[slot * C.LANE_COUNT + here];
-    if (ob === C.OB_NONE) {
-      // 옆 레인이 막혀 있으면 점수는 준다 — 좁은 길을 지난 건 맞다.
-      // 하지만 **아슬아슬**로 세지는 않는다. 빈 레인에 가만히 서 있던 것도
-      // 옆이 막혔다는 이유만으로 배짱으로 집계되면, 지표가 플레이어가 아니라
-      // 트랙 밀도를 재게 된다. 아슬아슬은 **마지막 순간에 끼어들었을 때**다.
-      let adjacent = 0;
-      for (let l = 0; l < C.LANE_COUNT; l++) {
-        if (l !== here && this._rowOb[slot * C.LANE_COUNT + l] !== C.OB_NONE) adjacent++;
-      }
-      const dove = this.tick - this.lastShiftTick <= C.NEAR_SHIFT_FRAMES;
-      if (adjacent > 0) this.reward(adjacent, dove ? 1 : 0);
-      return;
-    }
-    // 내 레인이 막혀 있는데 자세로 넘었다.
-    // 자세의 **가장자리**로 지났으면 아슬아슬이고, 정점에 맞췄으면 실력이다.
-    // 너무 이른 것도 너무 늦은 것만큼 위험하므로 양쪽 끝을 다 본다.
-    if (this.clears(ob)) {
-      const phase = this.vTotal > 0 ? this.vFrames / this.vTotal : 0.5;
-      const edge = phase < C.NEAR_PHASE || phase > 1 - C.NEAR_PHASE;
-      // 직전에 이 레인으로 뛰어들어 온 것도 아슬아슬이다. 이 경우를 빼놓았더니
-      // 도박꾼의 **가장 도박다운 행동** — 넘어야 하는 레인에 코인 때문에
-      // 막판에 끼어드는 것 — 이 지표에 하나도 안 잡히고 있었다.
-      this.reward(1, (edge || this.tick - this.lastShiftTick <= C.NEAR_SHIFT_FRAMES) ? 1 : 0);
-      // 정점(0.5)에 맞췄으면 완벽이다. 아슬아슬의 반대편이고 **같은 행동의 숙련도 축**이다.
-      // 이게 있어야 "잘 피했다"와 "겨우 피했다"가 손에서 갈린다.
-      if (Math.abs(phase - 0.5) <= C.PERFECT_WINDOW) {
-        this.perfects++;
-        this.score += (C.PERFECT_SCORE * this.mult()) | 0;
-        this.addBoost(C.BOOST_PER_PERFECT);
-        this.emit(EV.PERFECT, ob, 0);
-      }
-      return;
-    }
-    // 부스트 중에는 부딪히지 않는다. 뚫고 지나간다 — 그게 부스트의 값어치다.
-    if (C.BOOST_HIT_FREE && this.boostFrames > 0) {
-      this.smashed++;
-      this.combo++;
-      if (this.combo > this.comboBest) this.comboBest = this.combo;
-      this.score += (C.NEAR_MISS_SCORE * 2 * this.mult()) | 0;
-      this.emit(EV.BOOST_SMASH, ob, 0);
-      return;
-    }
-    this.takeHit(ob);
-  }
-
-  // 자세로 넘을 수 있는가. 하나로 둘을 넘을 수 없다.
-  clears(ob) {
-    const pad = this.has('precise') ? 18 : 0;
-    const bottom = this.footY;
-    const top = this.footY + this.height;
-    if (ob === C.OB_LOW) return bottom + pad >= C.OB_LOW_H;
-    if (ob === C.OB_BEAM) return top - pad <= C.OB_BEAM_LO;
-    return false;   // 기둥과 움직이는 기둥은 레인을 바꾸는 수밖에 없다
-  }
-
-  reward(adjacent, daring) {
-    this.combo++;
-    if (this.combo > this.comboBest) this.comboBest = this.combo;
-    this.nearMisses += daring;
-    if (daring) this.addBoost(C.BOOST_PER_NEAR);
-    this.score += (C.NEAR_MISS_SCORE * adjacent * this.mult()) | 0;
-    this.emit(EV.NEAR_MISS, adjacent, daring);
-    this.emit(EV.COMBO, this.combo, this.comboTier());
-  }
-
-  takeHit(ob) {
-    if (this.shieldCharges > 0) {
-      this.shieldCharges--;
-      this.emit(EV.SHIELD, 0, 0);
-      return;
-    }
-    this.hits++;
-    if (this.combo > 0) this.emit(EV.COMBO_BREAK, this.combo, 0);
-    this.combo = 0;
-    this.coinLine = 0;
-    this.boost = 0;              // 부딪히면 모아둔 것을 잃는다
-    this.stumble = Math.round(C.STUMBLE_MS / C.SIM_DT);
-    this.vstate = V.GROUND;
-    this.footY = 0;
-    this.height = C.PLAYER_H;
-    this.emit(EV.HIT, ob, 0);
-  }
-
-  die() {
-    this.deathTick = this.tick;
-    if (this.gradeIndex() < this.bestGrade) this.bestGrade = this.gradeIndex();
-    if (this.score > this.bestScore) this.bestScore = this.score;
-    if (this.travelled > this.bestDist) this.bestDist = this.travelled;
-    if (this.comboBest > this.bestCombo) this.bestCombo = this.comboBest;
-    this.combo = 0;
-    this.setState(S.DEAD);
-    this.emit(EV.DEATH, 0, 0);
+    this.setState(S.PLAY);
   }
 
   // ── 조회 ────────────────────────────────────────────────────
-  // 물이 화면을 얼마나 잠식했는가. 0 = 안 보임, 1 = 플레이어를 삼킴.
-  waterK() { return clamp(1 - this.gap / C.CHASE_GAP_START, 0, 1); }
+  elapsed() { return this.simTime / 1000; }
+  waterK() {
+    // 0 = 안 보임, 1 = 지면까지 찼다
+    const span = C.WATER_Y0 - C.GROUND_Y;
+    return clamp((C.WATER_Y0 - this.water) / span, 0, 1);
+  }
   waterNear() {
-    const m = this.gap;
-    return m < C.WATER_NEAR ? clamp(1 - m / C.WATER_NEAR, 0, 1) : 0;
+    const d = this.water - C.GROUND_Y;
+    return d < C.WATER_WARN ? clamp(1 - d / C.WATER_WARN, 0, 1) : 0;
+  }
+  baseK(side) { return clamp(this.baseHp[side] / this.baseMax[side], 0, 1); }
+  goldAvg() { return this.goldSamples > 0 ? this.goldSum / this.goldSamples : 0; }
+
+  // 전선의 화면 x. 게임필이 파편을 어디에 뿌릴지 정할 때 쓴다.
+  frontlineX() {
+    return C.BASE_L_X + (C.BASE_R_X - C.BASE_L_X) * this.frontline();
+  }
+
+  // 전선 — 양쪽 최전방 유닛의 중간. 밀고 있는지 밀리는지가 한 숫자로 나온다.
+  frontline() {
+    let fl = C.BASE_L_X, fr = C.BASE_R_X;
+    for (let i = 0; i < C.UNIT_MAX; i++) {
+      if (!this.uAlive[i]) continue;
+      if (this.uSide[i] === SIDE_L) { if (this.uX[i] > fl) fl = this.uX[i]; }
+      else if (this.uX[i] < fr) fr = this.uX[i];
+    }
+    const mid = (fl + fr) * 0.5;
+    return clamp((mid - C.BASE_L_X) / (C.BASE_R_X - C.BASE_L_X), 0, 1);
   }
 }

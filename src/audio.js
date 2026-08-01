@@ -8,7 +8,7 @@
 // 소리는 기존 상태 전이에 **붙기만** 한다. 전이 타이밍을 바꾸지 않는다.
 
 import * as C from './config.js';
-import { EV, S } from './game.js';
+import { EV, S, SIDE_L } from './game.js';
 
 const MASTER_CAP = 0.7;
 
@@ -160,28 +160,28 @@ export class Audio {
   updateMusic(game, t) {
     const m = this.bgm;
     if (!m) return;
-    const S_STAIR = 1, S_DRAFT = 2, S_DEAD = 3;
-    const dead = game.state === S_DEAD;
+    const S_PLAY = 0, S_DRAFT = 1, S_OVER = 2;
+    const dead = game.state === S_OVER;
     const draft = game.state === S_DRAFT;
-    const stair = game.state === S_STAIR;
+    const stair = false;
 
     // 전체 볼륨 — 죽으면 내리고, 드래프트에서는 반쯤 낮춰 생각할 여지를 준다
     m.bus.gain.setTargetAtTime(dead ? 0 : (draft ? 0.10 : 0.20), t, 0.25);
 
-    // 템포는 속도를 따라간다. 빨라지는 것이 귀로 먼저 들린다.
-    const spd = game.speed / C.SPEED_MAX;
+    // 템포는 전장의 밀도를 따라간다. 판이 커지는 것이 귀로 먼저 들린다.
+    const spd = Math.min(1, (game.aliveL + game.aliveR) / 16);
     const beat = 2.2 + 2.2 * spd;
     m.bass.lfo.frequency.setTargetAtTime(beat, t, 0.3);
     m.arp.lfo.frequency.setTargetAtTime(beat * 4, t, 0.3);
     m.lead.lfo.frequency.setTargetAtTime(beat * 3, t, 0.3);
 
-    // 층 0 — 베이스는 항상. 부스트 중에는 한 옥타브 올라간다
-    const boost = game.boostFrames > 0;
+    // 층 0 — 베이스는 항상. 시대가 오르면 한 옥타브 올라간다
+    const boost = game.era >= 2;
     m.bass.osc.frequency.setTargetAtTime(boost ? 164.81 : 82.41, t, 0.08);
     m.bass.out.gain.setTargetAtTime(dead ? 0 : 0.16, t, 0.2);
 
-    // 층 1 — 콤보 티어가 오르면 열린다. 잘 하고 있으면 음악이 두꺼워진다
-    const tier = Math.min(4, game.comboTier());
+    // 층 1 — 전선을 밀수록 열린다. 이기고 있으면 음악이 두꺼워진다
+    const tier = Math.min(4, Math.round(game.frontline() * 4));
     m.arp.out.gain.setTargetAtTime(dead ? 0 : 0.03 * tier, t, 0.25);
     m.arp.lp.frequency.setTargetAtTime(900 + 500 * tier, t, 0.3);
 
@@ -253,11 +253,11 @@ export class Audio {
     if (!this.ready || this.failed) return;
     const t = this.ctx.currentTime;
 
-    // 질주음 — 속도에 연동
-    const alive = game.state !== S.DEAD && game.state !== S.DRAFT;
-    const spd = game.speed / C.SPEED_MAX;
-    this.runOsc.frequency.setTargetAtTime(48 + 46 * spd, t, 0.05);
-    this.runGain.gain.setTargetAtTime(alive ? 0.05 + 0.05 * spd : 0, t, 0.08);
+    // 전장의 저역 — 유닛이 많을수록 두꺼워진다. 판이 커지는 게 귀로 들린다.
+    const alive = game.state === S.PLAY;
+    const crowd = Math.min(1, (game.aliveL + game.aliveR) / 16);
+    this.runOsc.frequency.setTargetAtTime(46 + 26 * crowd, t, 0.05);
+    this.runGain.gain.setTargetAtTime(alive ? 0.04 + 0.05 * crowd : 0, t, 0.08);
 
     // 물 근접 — 0 → 0.16 을 근접도에 비례해 연속 제어
     const near = game.waterNear();
@@ -270,72 +270,54 @@ export class Audio {
   onEvent(type, a, b, game) {
     if (this.failed) return;
     switch (type) {
-      case EV.MOVE:
-        // 레인 이동 — 짧은 스와이프음. 방향에 따라 위/아래로 쓸린다
-        this.blip('triangle', b > 0 ? 420 : 520, b > 0 ? 560 : 400, 70, 0.07, 0);
+      case EV.SPAWN:
+        // 진영마다 음높이가 다르다 — 내 것과 적의 것이 귀로 구분돼야 한다
+        this.blip('triangle', b === SIDE_L ? 300 : 200, b === SIDE_L ? 420 : 150,
+                  90, 0.07, 0);
         break;
 
-      case EV.JUMP:
-        this.blip('triangle', 300, 620, 130, 0.09, 0);
+      case EV.ATTACK:
+        // 매 공격마다 난다. 아주 짧고 작아야 한다 — 안 그러면 귀가 아프다
+        this.noise(28, 0.035, 2600, 1400, 'bandpass');
         break;
 
-      case EV.SLIDE:
-        this.noise(180, 0.09, 1800, 500, 'lowpass');
+      case EV.KILL:
+        this.blip('square', 240, 90, 130, 0.11, 0);
+        this.noise(150, 0.09, 1400, 260, 'lowpass');
         break;
 
-      case EV.LAND:
-        this.blip('sine', 120, 70, 60, 0.12, 0);
-        this.noise(15, 0.06, 2000, 2000, 'lowpass');
+      case EV.BASE_HIT:
+        this.blip('sine', 130, 70, 120, 0.13, 0);
         break;
 
-      case EV.COIN:
-        this.blip('sine', 880, 1320, 90, 0.10, 0);
-        break;
-
-      case EV.NEAR_MISS:
-        if (a > 0) this.noise(90, 0.07, 2600, 900, 'bandpass');
-        break;
-
-      case EV.COMBO: {
-        // 티어가 오를수록 화음이 위로 쌓인다. 콤보가 귀로 들린다.
-        const tier = b > 5 ? 5 : b;
-        if (tier > 0) {
-          const f = 330 * Math.pow(1.5, tier - 1);
-          this.blip('sine', f, f, 140, 0.09, 0);
+      case EV.ERA_UP:
+        if (b === SIDE_L) {
+          // 상승 3화음 — 판이 바뀌었다는 신호
+          this.blip('sine', 523.25, 523.25, 110, 0.11, 0);
+          this.blip('sine', 659.25, 659.25, 110, 0.11, 0.09);
+          this.blip('sine', 783.99, 783.99, 200, 0.12, 0.18);
+        } else {
+          this.blip('sine', 196, 147, 260, 0.09, 0);
         }
         break;
-      }
 
-      case EV.HIT:
-        // 충돌 — 저역 임팩트 + 마찰. 죽는 소리는 아니지만 아프게 들려야 한다
-        this.blip('square', 180, 60, 180, 0.16, 0);
-        this.noise(260, 0.16, 1200, 180, 'lowpass');
+      case EV.NUKE:
+        this.blip('sawtooth', 180, 40, 620, 0.16, 0);
+        this.noise(620, 0.16, 5200, 200, 'lowpass');
         break;
 
-      case EV.SHIELD:
-        this.blip('sine', 660, 990, 160, 0.12, 0);
+      case EV.NO_GOLD:
+      case EV.COOLDOWN:
+        // 눌렀는데 안 나갔다. **짧고 낮게** — 실패도 피드백이다
+        this.blip('square', 150, 110, 70, 0.06, 0);
         break;
 
-      case EV.STAIR_ENTER:
-        this.blip('sine', 440, 660, 160, 0.10, 0);
-        this.blip('sine', 660, 880, 200, 0.09, 0.1);
+      case EV.WATER_WARN:
+        this.blip('sawtooth', 90, 150, 700, 0.12, 0);
         break;
 
-      case EV.STAIR_STEP: {
-        // 오를수록 음이 올라간다. 리듬이 귀로 들린다.
-        const n = a > 18 ? 18 : a;
-        this.blip('triangle', 300 + n * 26, 300 + n * 26, 90, 0.11, 0);
-        break;
-      }
-
-      case EV.STAIR_MISS:
-        this.blip('square', 200, 110, 160, 0.13, 0);
-        break;
-
-      case EV.STAIR_CLEAR:
-        this.blip('sine', 523.25, 523.25, 80, 0.11, 0);
-        this.blip('sine', 659.25, 659.25, 80, 0.11, 0.08);
-        this.blip('sine', 783.99, 783.99, 120, 0.11, 0.16);
+      case EV.WATER_HIT:
+        this.noise(200, 0.08, 400, 120, 'lowpass');
         break;
 
       case EV.DRAFT_OPEN:
@@ -346,39 +328,16 @@ export class Audio {
         this.blip('sine', 523.25, 784, 200, 0.12, 0);
         break;
 
-      case EV.RECORD:
-        this.blip('sine', 660, 990, 90, 0.10, 0);
-        this.blip('sine', 990, 1320, 120, 0.10, 0.09);
+      case EV.WIN:
+        this.blip('sine', 523.25, 523.25, 130, 0.13, 0);
+        this.blip('sine', 659.25, 659.25, 130, 0.13, 0.12);
+        this.blip('sine', 783.99, 783.99, 130, 0.13, 0.24);
+        this.blip('sine', 1046.5, 1046.5, 420, 0.14, 0.36);
         break;
 
-      case EV.DEATH:
-        // 화이트노이즈 + 로우패스 800 → 80Hz 스윕, 800ms
-        this.noise(800, 0.22, 800, 80, 'lowpass');
-        break;
-
-      case EV.PERFECT:
-        // 완벽 — 맑은 5도. 아슬아슬의 마찰음과 정반대의 질감이어야 한다
-        this.blip('sine', 1046.5, 1046.5, 70, 0.09, 0);
-        this.blip('sine', 1568, 1568, 110, 0.08, 0.05);
-        break;
-
-      case EV.COIN_LINE:
-        this.blip('sine', 1318.5, 1975.5, 160, 0.11, 0);
-        break;
-
-      case EV.BOOST_START:
-        // 상승 스윕 — 뭔가 열렸다는 신호
-        this.blip('sawtooth', 160, 880, 420, 0.13, 0);
-        this.noise(420, 0.10, 400, 5000, 'highpass');
-        break;
-
-      case EV.BOOST_SMASH:
-        this.noise(120, 0.14, 3000, 600, 'bandpass');
-        this.blip('square', 260, 120, 90, 0.10, 0);
-        break;
-
-      case EV.BOOST_END:
-        this.blip('sine', 660, 330, 260, 0.07, 0);
+      case EV.LOSE:
+        this.noise(900, 0.2, 900, 70, 'lowpass');
+        this.blip('sawtooth', 200, 50, 900, 0.12, 0);
         break;
 
       case EV.RESET:

@@ -6,9 +6,12 @@
 //  2. ctx.shadowBlur 를 쓰지 않는다. 캔버스에서 압도적으로 비싸다.
 //  3. 정적 지오메트리는 Path2D 로 한 번만 만든다.
 //  4. save()/restore() 를 타이트 루프에서 남발하지 않는다. setTransform 으로 대체한다.
+//
+// 화면 규칙: **카메라는 움직이지 않는다.** 전장 전체가 한 화면에 있다.
+// 플래시게임의 핵심이 그거다 — 스크롤 없이 판 전체가 보인다.
 
 import * as C from './config.js';
-import { S } from './game.js';
+import { S, SIDE_L, SIDE_R, groundAt } from './game.js';
 import { easeOutBack, easeOutCubic } from './feel.js';
 import { REASONS } from './director.js';
 
@@ -16,58 +19,50 @@ const TAU = Math.PI * 2;
 const HALF_W = C.VIEW_W * 0.5;
 const HALF_H = C.VIEW_H * 0.5;
 
-const FONT_SCORE = '30px ' + C.FONT_STACK;
-const FONT_BIG = '46px ' + C.FONT_STACK;
-const FONT_MID = '20px ' + C.FONT_STACK;
-const FONT_SMALL = '16px ' + C.FONT_STACK;
-const FONT_TINY = '13px ' + C.FONT_STACK;
+const FONT_BIG = '44px ' + C.FONT_STACK;
+const FONT_SCORE = '26px ' + C.FONT_STACK;
+const FONT_MID = '19px ' + C.FONT_STACK;
+const FONT_SMALL = '15px ' + C.FONT_STACK;
+const FONT_TINY = '12px ' + C.FONT_STACK;
 
 const DIGITS = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
 const DOT = '.';
-const SIGN_MINUS = '-';
-const LABEL_RETRY = '아무 키나 눌러 다시';
-const LABEL_PROFILE = '프로파일';
-const LABEL_BEST = '최고 점수';
-const LABEL_COMBO = '최고 콤보';
-const LABEL_DIST = '도달 거리';
-const LABEL_M = 'm';
-const LABEL_HOLD = '물이 느려졌다';
-const LABEL_PUSH = '물이 밀린다';
+
+const BTN_NAME = ['검사', '궁수', '거인', '진화', '해일'];
+const LABEL_GOLD = '금';
+const LABEL_XP = '경험';
+const LABEL_ERA = '시대';
 const LABEL_AI = 'AI';
-const LABEL_STAIR = '계단';
+const LABEL_RETRY = '아무 키나 눌러 다시';
+const LABEL_WIN = '적 기지 함락';
+const LABEL_LOSE = '기지가 무너졌다';
+const LABEL_DROWN = '둘 다 잠겼다';
+const LABEL_TIME = '걸린 시간';
+const LABEL_KILL = '처치';
+const LABEL_LOST = '잃은 병력';
+const LABEL_SPAWN = '소환';
+const LABEL_PROFILE = '프로파일';
 const LABEL_DRAFT = '하나를 고른다';
 const LABEL_WHY = '디렉터가 이 셋을 고른 이유';
+const LABEL_S = 's';
 const PROFILE_UNKNOWN = '—';
-const KIND_NAME = ['공격', '방어', '조작'];
+const KIND_NAME = ['공격', '방어', '경제'];
+const READY = '준비';
+
+const BAN_TXT = ['시대가 바뀌었다', '해일', '물이 차오른다'];
 
 const DV_PROFILE = '프로파일';
 const DV_OBSERVING = '관찰 중';
-const DV_LANE = 'laneBias';
-const DV_GREED = 'greed';
-const DV_REACT = 'reactionMs';
-const DV_LEVERS = '다음 구간 레버';
-const DV_DENSITY = '  density';
+const DV_AGGRO = 'aggression';
+const DV_HOARD = 'hoard';
+const DV_ECON = 'economy';
+const DV_SWARM = 'swarm';
+const DV_LEVERS = '다음 웨이브 레버';
+const DV_MIX = '  구성 검:궁:거';
+const DV_TEMPO = '  간격';
 const DV_WATER = '  water';
-const DV_TELE = '  telegraph';
 
-// 판 평가 축 이름과 조언. 상수라 루프에서 문자열을 만들지 않는다.
-const GRADE_AXIS = ['거리', '최고 콤보', '완벽 회피', '코인', '무피격'];
-const GRADE_ADVICE = [
-  '더 멀리 — 물과의 거리를 벌려라',
-  '콤보를 잇는다 — 한 번 부딪히면 처음부터다',
-  '자세의 정점을 장애물에 맞춰라 — 그게 완벽이다',
-  '코인을 이어 먹어라 — 다섯 개마다 보너스가 붙는다',
-  '부딪히지 않는 것이 가장 크다',
-];
-
-const BAN_PERFECT_TXT = '완벽';
-const BAN_BOOST_TXT = '돌파';
-const BAN_LINE_TXT = '연속';
-const LABEL_BOOST = '돌파';
-
-const TOGGLE_SIZE = 44;
-const RUNG_SPACING = 150;              // 속도감을 만드는 가로 눈금 간격
-const TRACK_HALF = C.LANE_W * 1.5 + 46;
+const TOGGLE_SIZE = 40;
 
 export class Renderer {
   constructor(canvas, ctx) {
@@ -75,57 +70,33 @@ export class Renderer {
     this.ctx = ctx;
     this.viewScale = 1;
     this.digits = new Uint8Array(12);
-    this.waterGrad = null;
 
-    // 하늘·지평선 위 격자. 논리 해상도가 고정이라 진짜 한 번만 만든다.
-    this.skyPath = new Path2D();
-    for (let y = C.UNIT * 6; y < C.HORIZON_Y; y += C.UNIT * 6) {
-      this.skyPath.moveTo(0, y);
-      this.skyPath.lineTo(C.VIEW_W, y);
+    // 배경 — 지평선 위 절벽 실루엣과 격자. 논리 해상도가 고정이라 한 번만 만든다.
+    this.bgPath = new Path2D();
+    for (let y = C.UNIT * 5; y < C.GROUND_Y; y += C.UNIT * 5) {
+      this.bgPath.moveTo(0, y);
+      this.bgPath.lineTo(C.VIEW_W, y);
     }
-    for (let x = 0; x <= C.VIEW_W; x += C.UNIT * 6) {
-      this.skyPath.moveTo(x, 0);
-      this.skyPath.lineTo(x, C.HORIZON_Y);
+    for (let x = 0; x <= C.VIEW_W; x += C.UNIT * 5) {
+      this.bgPath.moveTo(x, 0);
+      this.bgPath.lineTo(x, C.GROUND_Y);
     }
 
-    // 지평선 위 도시 실루엣 두 겹. 패럴랙스로 서로 다른 속도로 흐른다.
-    // **이미지 파일 0개 규칙은 그대로다** — 사각형 몇 개로 만든다.
-    // 화면 폭의 두 배를 만들어 두고 통째로 밀면 이음매 없이 반복된다.
-    this.cityFar = this.buildCity(41, 26, 74, 0.62);
-    this.cityNear = this.buildCity(23, 44, 118, 1.0);
-    this.cityPhaseFar = 0;
-    this.cityPhaseNear = 0;
+    // 협곡 벽 — 양쪽 끝이 솟아 있다. 물이 차오를 그릇을 눈으로 보여 준다.
+    this.cliffPath = new Path2D();
+    this.cliffPath.moveTo(0, C.VIEW_H);
+    this.cliffPath.lineTo(0, C.GROUND_Y - 150);
+    this.cliffPath.lineTo(38, C.GROUND_Y - 120);
+    this.cliffPath.lineTo(48, C.GROUND_Y);
+    this.cliffPath.lineTo(0, C.VIEW_H);
+    this.cliffPath.moveTo(C.VIEW_W, C.VIEW_H);
+    this.cliffPath.lineTo(C.VIEW_W, C.GROUND_Y - 150);
+    this.cliffPath.lineTo(C.VIEW_W - 38, C.GROUND_Y - 120);
+    this.cliffPath.lineTo(C.VIEW_W - 48, C.GROUND_Y);
+    this.cliffPath.lineTo(C.VIEW_W, C.VIEW_H);
   }
 
-  // 결정론적 스카이라인. Math.random 을 쓰면 프레임마다 바뀌므로 쓰지 않는다.
-  buildCity(n, minH, maxH, unused) {
-    const p = new Path2D();
-    const span = C.VIEW_W * 2;
-    let x = 0;
-    for (let i = 0; i < n; i++) {
-      // 해시 하나로 폭과 높이를 뽑는다. 같은 입력이면 언제나 같은 도시다.
-      const h1 = ((i * 2654435761) % 1000) / 1000;
-      const h2 = ((i * 40503 + 17) % 1000) / 1000;
-      const w = span / n * (0.6 + h1 * 0.9);
-      const h = minH + h2 * (maxH - minH);
-      p.rect(x, C.HORIZON_Y - h, w * 0.86, h);
-      x += w;
-    }
-    return p;
-  }
-
-  resize(viewScale) {
-    this.viewScale = viewScale;
-    // 물 근접 경고. 화면 좌표 고정이라 리사이즈 때만 만든다.
-    this.waterGrad = this.ctx.createLinearGradient(0, C.VIEW_H - 320, 0, C.VIEW_H);
-    this.waterGrad.addColorStop(0, C.RAMP_DANGER[0]);
-    this.waterGrad.addColorStop(1, C.RAMP_DANGER[C.rampIndex(0.5)]);
-  }
-
-  // ── 원근 투영 ───────────────────────────────────────────────
-  // 곱셈 두 번, 나눗셈 한 번. 폴리곤이 많아도 싸다.
-  scaleAt(z) { return C.ZNEAR / (C.ZNEAR + (z < 0 ? 0 : z)); }
-  groundY(s) { return C.HORIZON_Y + (C.GROUND_Y - C.HORIZON_Y) * s; }
+  resize(viewScale) { this.viewScale = viewScale; }
 
   // 숫자를 자리별로 고정 피치에 그린다. 문자열을 만들지 않는다.
   drawNumber(v, cx, y, pitch) {
@@ -151,23 +122,29 @@ export class Renderer {
     return count * pitch;
   }
 
-  drawFixed(v, x, y) {
+  drawFixed1(v, x, y) {
     const ctx = this.ctx;
-    const neg = v < 0;
-    const a = neg ? -v : v;
+    const a = v < 0 ? 0 : v;
     const whole = a | 0;
-    const frac = ((a - whole) * 100 + 0.5) | 0;
+    const frac = ((a - whole) * 10 + 0.5) | 0;
     const prev = ctx.textAlign;
     ctx.textAlign = 'left';
-    let cx = x;
-    if (neg) { ctx.fillText(SIGN_MINUS, cx, y); cx += 6; }
-    cx += this.drawLeft(whole, cx, y, 9);
+    let cx = x + this.drawLeft(whole, x, y, 9);
     ctx.fillText(DOT, cx, y); cx += 5;
-    ctx.fillText(DIGITS[(frac / 10) | 0], cx, y); cx += 9;
-    ctx.fillText(DIGITS[frac % 10], cx, y);
+    ctx.fillText(DIGITS[frac > 9 ? 9 : frac], cx, y);
     ctx.textAlign = prev;
+    return cx + 9 - x;
   }
 
+  // ── 히트테스트 — main 이 부른다 ─────────────────────────────
+  static hitButton(lx, ly) {
+    if (ly < C.BTN_Y || ly > C.BTN_Y + C.BTN_H) return -1;
+    for (let i = 0; i < C.BTN_COUNT; i++) {
+      const x = C.BTN_X0 + i * (C.BTN_W + C.BTN_GAP);
+      if (lx >= x && lx <= x + C.BTN_W) return i;
+    }
+    return -1;
+  }
   static hitToggle(lx, ly) {
     return lx >= C.VIEW_W - TOGGLE_SIZE - C.UNIT * 2 && lx <= C.VIEW_W
         && ly >= 0 && ly <= TOGGLE_SIZE + C.UNIT * 2;
@@ -176,14 +153,21 @@ export class Renderer {
     return lx >= 0 && lx <= TOGGLE_SIZE + C.UNIT * 2
         && ly >= 0 && ly <= TOGGLE_SIZE + C.UNIT * 2;
   }
+  // 드래프트 카드 — 세로로 셋
+  static hitCard(lx, ly) {
+    const cardH = 86, gap = C.UNIT * 2;
+    const top = HALF_H - (cardH * 3 + gap * 2) * 0.5;
+    for (let i = 0; i < C.TRAIT_OFFER; i++) {
+      const y = top + i * (cardH + gap);
+      if (ly >= y && ly <= y + cardH) return i;
+    }
+    return -1;
+  }
 
   // ── 한 프레임 ───────────────────────────────────────────────
   draw(game, feel, alpha, director, directorView, muted) {
     const ctx = this.ctx;
     const s = this.viewScale;
-
-    const px = game.prevWorldX + (game.worldX - game.prevWorldX) * alpha;
-    const foot = game.prevFootY + (game.footY - game.prevFootY) * alpha;
 
     ctx.setTransform(s, 0, 0, s, 0, 0);
     ctx.fillStyle = C.COL_BG;
@@ -195,402 +179,210 @@ export class Renderer {
       ctx.translate(-HALF_W, -HALF_H);
     }
 
-    // ── 하늘 격자 — 제도 감각. 지오메트리는 캐시돼 있다 ──
-    ctx.strokeStyle = C.COL_GRID;
-    ctx.lineWidth = C.STROKE;
-    ctx.stroke(this.skyPath);
-
-    this.drawCity(game, alpha);
-
-    if (game.state === S.STAIR) this.drawStairs(game, alpha);
-    else this.drawTrack(game);
-
-    this.drawPlayer(game, feel, px, foot);
+    this.drawField();
+    this.drawBase(game, SIDE_R);
+    this.drawBase(game, SIDE_L);
+    this.drawUnits(game, alpha);
+    this.drawParticles(feel);
+    this.drawRings(feel);
     this.drawWater(game, alpha);
-    this.drawStreaks(game, feel);
+    this.drawFloats(feel);
 
     ctx.setTransform(s, 0, 0, s, 0, 0);
     this.drawHud(game, feel, director, directorView, muted);
+    this.drawButtons(game);
     this.drawBanner(feel);
     if (game.state === S.DRAFT) this.drawDraft(game, feel, director);
-    if (game.state === S.DEAD) this.drawResult(game, feel, director);
+    if (game.state === S.OVER) this.drawResult(game, feel, director);
   }
 
-  // 지평선 위 도시. 두 겹이 다른 속도로 흘러 깊이가 생긴다.
-  // 러너의 화면을 2초 만에 이해시키는 건 트랙보다 이 배경이다.
-  drawCity(game, alpha) {
+  // ── 전장 ────────────────────────────────────────────────────
+  drawField() {
     const ctx = this.ctx;
-    // 속도에 비례해 흐른다. travelled 를 그대로 쓰면 결정론이 유지된다.
-    const t = game.travelled + game.speed / C.SIM_HZ * alpha;
-    const far = -((t * 0.012) % C.VIEW_W);
-    const near = -((t * 0.030) % C.VIEW_W);
-
-    ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.85)];
-    ctx.save();
-    ctx.translate(far, 0);
-    ctx.fill(this.cityFar);
-    ctx.restore();
-
-    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.92)];
-    ctx.save();
-    ctx.translate(near, 0);
-    ctx.fill(this.cityNear);
-    ctx.restore();
-
-    // 지평선 한 줄. 도시와 트랙을 갈라 준다
-    ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.35)];
+    ctx.strokeStyle = C.COL_GRID;
     ctx.lineWidth = C.STROKE;
+    ctx.stroke(this.bgPath);
+
+    // 협곡 바닥 — V자다. 가운데가 낮아서 전선이 먼저 잠긴다.
+    ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.9)];
     ctx.beginPath();
-    ctx.moveTo(0, C.HORIZON_Y);
-    ctx.lineTo(C.VIEW_W, C.HORIZON_Y);
-    ctx.stroke();
-  }
-
-  // 속도선 — 빠를 때만 보인다. 부스트에서 가장 강하다.
-  // 위치가 고정 배열이라 매 프레임 만드는 것이 없다.
-  drawStreaks(game, feel) {
-    const spd = game.speed / C.SPEED_MAX;
-    const boost = game.boostK();
-    const a = (spd - 0.55) * 1.4 + boost * 0.9;
-    if (a <= 0.02) return;
-    const ctx = this.ctx;
-    ctx.strokeStyle = boost > 0
-      ? C.RAMP_BONUS[C.rampIndex(a > 1 ? 0.75 : a * 0.75)]
-      : C.RAMP_PLAYER[C.rampIndex(a > 1 ? 0.28 : a * 0.28)];
-    ctx.lineWidth = boost > 0 ? C.STROKE * 1.5 : C.STROKE;
-    ctx.beginPath();
-    for (let i = 0; i < C.STREAK_MAX; i++) {
-      let y = feel.streakY[i] + feel.streakPhase;
-      if (y > 1) y -= 1;
-      const yy = C.HORIZON_Y + (C.VIEW_H - C.HORIZON_Y) * y;
-      const x = C.VP_X + feel.streakX[i] * C.VIEW_W;
-      ctx.moveTo(x, yy);
-      ctx.lineTo(x, yy + C.VIEW_H * feel.streakLen[i]);
-    }
-    ctx.stroke();
-  }
-
-  // 배너 — "완벽" 같은 짧은 글자가 떴다 사라진다.
-  // 문자열을 만들지 않는다. 코드로 상수를 고른다.
-  drawBanner(feel) {
-    if (feel.bannerFrames <= 0) return;
-    const ctx = this.ctx;
-    const t = 1 - feel.bannerFrames / feel.bannerTotal;
-    const rise = easeOutCubic(t < 1 ? t : 1);
-    const fade = t > 0.6 ? 1 - (t - 0.6) / 0.4 : 1;
-    const y = C.VIEW_H * 0.42 - rise * C.UNIT * 6;
-
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = FONT_MID;
-    if (feel.bannerCode === C.BAN_PERFECT) {
-      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(fade)];
-      ctx.fillText(BAN_PERFECT_TXT, HALF_W, y);
-    } else if (feel.bannerCode === C.BAN_BOOST) {
-      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(fade)];
-      ctx.fillText(BAN_BOOST_TXT, HALF_W, y);
-    } else {
-      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(fade)];
-      const w = this.drawNumber(feel.bannerVal, HALF_W - C.UNIT * 2, y, 22);
-      ctx.textAlign = 'left';
-      ctx.fillText(BAN_LINE_TXT, HALF_W - C.UNIT * 2 + w * 0.5 + 4, y);
-      ctx.textAlign = 'center';
-    }
-  }
-
-  // ── 러너 트랙 ───────────────────────────────────────────────
-  drawTrack(game) {
-    const ctx = this.ctx;
-    const far = game.drawZ();
-    const sFar = this.scaleAt(far);
-    const yFar = this.groundY(sFar);
-    const yNear = C.GROUND_Y;
-
-    // 바닥면
-    ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.75)];
-    ctx.beginPath();
-    ctx.moveTo(C.VP_X - TRACK_HALF * 1.8, C.VIEW_H);
-    ctx.lineTo(C.VP_X + TRACK_HALF * 1.8, C.VIEW_H);
-    ctx.lineTo(C.VP_X + TRACK_HALF * sFar, yFar);
-    ctx.lineTo(C.VP_X - TRACK_HALF * sFar, yFar);
+    ctx.moveTo(0, C.VIEW_H);
+    for (let x = 0; x <= C.VIEW_W; x += 16) ctx.lineTo(x, groundAt(x));
+    ctx.lineTo(C.VIEW_W, C.VIEW_H);
     ctx.closePath();
     ctx.fill();
-
-    // 가로 눈금 — 이게 속도를 만든다
-    ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.22)];
+    ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.4)];
     ctx.lineWidth = C.STROKE;
     ctx.beginPath();
-    let z = RUNG_SPACING - (game.travelled % RUNG_SPACING);
-    for (; z < far; z += RUNG_SPACING) {
-      const sc = this.scaleAt(z);
-      const gy = this.groundY(sc);
-      ctx.moveTo(C.VP_X - TRACK_HALF * sc, gy);
-      ctx.lineTo(C.VP_X + TRACK_HALF * sc, gy);
+    for (let x = 0; x <= C.VIEW_W; x += 16) {
+      if (x === 0) ctx.moveTo(x, groundAt(x)); else ctx.lineTo(x, groundAt(x));
     }
     ctx.stroke();
 
-    // 레인 경계 — 소실점으로 모인다
-    ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.4)];
-    ctx.beginPath();
-    for (let k = 0; k < 2; k++) {
-      const wx = (k === 0 ? -1 : 1) * C.LANE_W * 0.5;
-      ctx.moveTo(C.VP_X + wx * 1.8, C.VIEW_H);
-      ctx.lineTo(C.VP_X + wx * sFar, yFar);
-    }
-    ctx.stroke();
-    ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.7)];
-    ctx.beginPath();
-    ctx.moveTo(C.VP_X - TRACK_HALF * 1.8, C.VIEW_H);
-    ctx.lineTo(C.VP_X - TRACK_HALF * sFar, yFar);
-    ctx.moveTo(C.VP_X + TRACK_HALF * 1.8, C.VIEW_H);
-    ctx.lineTo(C.VP_X + TRACK_HALF * sFar, yFar);
-    ctx.stroke();
-
-    // ── 장애물과 코인 — 먼 것부터 그린다 ──
-    const firstRow = Math.max(0, Math.floor(game.travelled / C.ROW_SPACING));
-    const lastRow = Math.min(game.rowMade,
-      Math.ceil((game.travelled + far) / C.ROW_SPACING));
-
-    for (let i = lastRow; i >= firstRow; i--) {
-      const z = game.rowZ(i) - game.travelled;
-      if (z < -C.ROW_SPACING || z > far) continue;
-      const sc = this.scaleAt(z);
-      const gy = this.groundY(sc);
-      // 0.35 에서 시작하면 원경의 장애물이 트랙 바닥에 묻힌다.
-      // 바닥을 0.5 로 올려 멀어도 실루엣이 남게 한다.
-      const fade = C.rampIndex(0.5 + 0.5 * sc);
-      // 가까운 것에는 배경색 테두리를 두른다. **색을 늘리지 않고** 실루엣을 뗀다 —
-      // 팔레트 6색 규율을 지키면서 대비를 버는 유일한 방법이다.
-      const outline = sc > 0.4;
-
-      for (let l = 0; l < C.LANE_COUNT; l++) {
-        const ob = game.rowOb(i, l);
-        if (ob === C.OB_NONE) continue;
-        // 움직이는 기둥은 멀리서 다른 레인에 있다가 최종 레인으로 미끄러진다.
-        // **지금 자리가 아니라 도착할 자리를 봐야 한다** — 그게 이 종류의 전부다.
-        let wx = C.LANE_X[l];
-        if (ob === C.OB_DRIFT) {
-          const from = game.driftFrom(i, l);
-          const k = z > C.DRIFT_SPAN ? 1 : (z < 0 ? 0 : z / C.DRIFT_SPAN);
-          wx = C.LANE_X[l] + (C.LANE_X[from] - C.LANE_X[l]) * k;
-        }
-        const cx = C.VP_X + wx * sc;
-        const ow = ob === C.OB_LOW ? C.OB_W_LOW
-                 : (ob === C.OB_BEAM ? C.OB_W_BEAM
-                 : (ob === C.OB_DRIFT ? C.OB_W_DRIFT : C.OB_W_PILLAR));
-        const hw = ow * 0.5 * sc;
-
-        // 바닥 그림자 — 장애물이 공중에 뜬 것처럼 보이지 않게 붙들어 준다
-        ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.55 * sc)];
-        ctx.beginPath();
-        ctx.ellipse(cx, gy, hw * 1.15, 7 * sc, 0, 0, TAU);
-        ctx.fill();
-
-        ctx.fillStyle = C.RAMP_STRUCT[fade];
-        if (outline) { ctx.strokeStyle = C.COL_BG; ctx.lineWidth = C.STROKE; }
-        if (ob === C.OB_LOW) {
-          // 낮고 넓은 덩어리 — 넘으라는 뜻
-          ctx.fillRect(cx - hw, gy - C.OB_LOW_H * sc, hw * 2, C.OB_LOW_H * sc);
-          if (outline) ctx.strokeRect(cx - hw, gy - C.OB_LOW_H * sc, hw * 2, C.OB_LOW_H * sc);
-        } else if (ob === C.OB_BEAM) {
-          // 공중에 떠 있고 아래가 비어 있다 — 숙이라는 뜻
-          ctx.fillRect(cx - hw, gy - C.OB_BEAM_HI * sc,
-                       hw * 2, (C.OB_BEAM_HI - C.OB_BEAM_LO) * sc);
-          if (outline) ctx.strokeRect(cx - hw, gy - C.OB_BEAM_HI * sc,
-                                      hw * 2, (C.OB_BEAM_HI - C.OB_BEAM_LO) * sc);
-          // 기둥 두 개로 떠 있음을 명시한다
-          const leg = 7 * sc;
-          ctx.fillRect(cx - hw, gy - C.OB_BEAM_LO * sc, leg, C.OB_BEAM_LO * sc);
-          ctx.fillRect(cx + hw - leg, gy - C.OB_BEAM_LO * sc, leg, C.OB_BEAM_LO * sc);
-        } else if (ob === C.OB_DRIFT) {
-          // 움직이는 기둥 — 기둥보다 좁고, 도착할 레인에 표적선이 서 있다.
-          // 표적선이 없으면 "어디로 가는지"를 마지막 순간까지 알 수 없다.
-          const th = C.OB_DRIFT_H * sc;
-          ctx.fillRect(cx - hw, gy - th, hw * 2, th);
-          if (outline) ctx.strokeRect(cx - hw, gy - th, hw * 2, th);
-          const tx = C.VP_X + C.LANE_X[l] * sc;
-          if (Math.abs(tx - cx) > 2) {
-            ctx.strokeStyle = C.RAMP_DANGER[C.rampIndex(0.25 + 0.45 * sc)];
-            ctx.lineWidth = C.STROKE;
-            ctx.beginPath();
-            ctx.moveTo(tx - hw, gy);
-            ctx.lineTo(tx + hw, gy);
-            ctx.stroke();
-            if (outline) { ctx.strokeStyle = C.COL_BG; ctx.lineWidth = C.STROKE; }
-          }
-        } else {
-          // 위아래가 다 막힌 기둥 — 돌아가라는 뜻
-          ctx.fillRect(cx - hw, gy - C.OB_PILLAR_H * sc, hw * 2, C.OB_PILLAR_H * sc);
-          if (outline) ctx.strokeRect(cx - hw, gy - C.OB_PILLAR_H * sc, hw * 2, C.OB_PILLAR_H * sc);
-        }
-      }
-
-      for (let l = 0; l < C.LANE_COUNT; l++) {
-        if (!game.rowCoin(i, l) || game.rowTaken(i, l)) continue;
-        const cx = C.VP_X + C.LANE_X[l] * sc;
-        ctx.fillStyle = C.RAMP_BONUS[fade];
-        ctx.beginPath();
-        ctx.arc(cx, gy - C.COIN_H * sc, C.COIN_R * sc, 0, TAU);
-        ctx.fill();
-      }
-    }
+    ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.7)];
+    ctx.fill(this.cliffPath);
   }
 
-  // ── 계단 구간 — 규칙이 바뀐 걸 눈으로 안다 ──────────────────
-  drawStairs(game, alpha) {
+  // ── 기지 ────────────────────────────────────────────────────
+  drawBase(game, side) {
     const ctx = this.ctx;
-    const total = C.STAIR_STEPS;
-    ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.75)];
-    ctx.fillRect(0, C.HORIZON_Y, C.VIEW_W, C.VIEW_H - C.HORIZON_Y);
+    const mine = side === SIDE_L;
+    const cx = mine ? C.BASE_L_X : C.BASE_R_X;
+    const w = C.BASE_W, h = C.BASE_H;
+    const gy = groundAt(cx);
+    const x = cx - w * 0.5, y = gy - h;
+    const k = game.baseK(side);
+    const flash = game.baseFlash[side] > 0;
 
-    // 남은 칸을 위로 쌓아 보여준다. 좌우가 번갈아 나온다.
-    for (let k = total - 1; k >= 0; k--) {
-      const rel = k - game.stairStep;
-      if (rel < -1 || rel > 9) continue;
-      const z = rel * 190 + 40;
-      const sc = this.scaleAt(z < 0 ? 0 : z);
-      const gy = this.groundY(sc) - rel * 26 * sc;
-      const side = (k % 2 === 0) ? 0 : 1;
-      const cx = C.VP_X + (side === 0 ? -C.LANE_W : C.LANE_W) * sc;
-      const hw = C.OB_W * 0.75 * sc;
-      const next = rel === 0;
-      ctx.fillStyle = next ? C.COL_PLAYER : C.RAMP_STRUCT[C.rampIndex(0.3 + 0.5 * sc)];
-      ctx.fillRect(cx - hw, gy - 26 * sc, hw * 2, 26 * sc);
-    }
+    ctx.fillStyle = flash ? C.COL_DANGER
+      : (mine ? C.RAMP_PLAYER[C.rampIndex(0.85)] : C.RAMP_STRUCT[C.rampIndex(0.8)]);
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = C.COL_BG;
+    ctx.lineWidth = C.STROKE;
+    ctx.strokeRect(x, y, w, h);
 
-    // 다음에 눌러야 할 쪽을 화면 절반으로 크게 알려준다
-    const side = game.stairSide;
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(game.stairStall > 0 ? 0.03 : 0.07)];
-    ctx.fillRect(side === 0 ? 0 : HALF_W, C.HORIZON_Y, HALF_W, C.VIEW_H - C.HORIZON_Y);
+    // 성문 — 어느 쪽이 내 것인지 실루엣으로 구분된다
+    const gw = 30, gh = 46;
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.85)];
+    ctx.fillRect(cx - gw * 0.5 + (mine ? 12 : -12), gy - gh, gw, gh);
 
-    // 남은 시간 막대
-    const t = game.stairFrames / Math.round(C.STAIR_MS / C.SIM_DT);
-    ctx.fillStyle = t < 0.3 ? C.COL_DANGER : C.COL_BONUS;
-    ctx.fillRect(C.UNIT * 4, C.HORIZON_Y - C.UNIT * 3,
-                 (C.VIEW_W - C.UNIT * 8) * (t < 0 ? 0 : t), C.UNIT);
-
-    ctx.fillStyle = C.COL_PLAYER;
-    ctx.font = FONT_MID;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillText(LABEL_STAIR, HALF_W, C.HORIZON_Y - C.UNIT * 8);
-    ctx.font = FONT_SCORE;
-    this.drawNumber(total - game.stairStep, HALF_W, C.HORIZON_Y + C.UNIT * 2, 18);
+    // 체력 막대 — 기지 위에
+    const bw = w + 16, bh = 9;
+    const bx = cx - bw * 0.5, by = y - 18;
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.9)];
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = k > 0.3 ? (mine ? C.COL_PLAYER : C.COL_STRUCT) : C.COL_DANGER;
+    ctx.fillRect(bx, by, bw * k, bh);
+    ctx.strokeStyle = C.RAMP_BG[C.rampIndex(1)];
+    ctx.strokeRect(bx, by, bw, bh);
   }
 
-  // ── 플레이어 ────────────────────────────────────────────────
-  drawPlayer(game, feel, worldX, foot) {
+  // ── 유닛 ────────────────────────────────────────────────────
+  // 종류는 **실루엣만으로** 구분돼야 한다. 색으로 때우지 않는다.
+  //   검사  좁고 보통 키. 위에 짧은 날
+  //   궁수  더 좁고 낮다. 앞으로 활대가 나와 있다
+  //   거인  넓고 크다
+  drawUnits(game, alpha) {
     const ctx = this.ctx;
-    const sc = 1;                      // 플레이어는 z=0
-    const cx = C.VP_X + worldX;
-    const gy = C.GROUND_Y;
-    const h = game.height;
+    for (let i = 0; i < C.UNIT_MAX; i++) {
+      if (!game.uAlive[i]) continue;
+      const kind = game.uKind[i];
+      const side = game.uSide[i];
+      const mine = side === SIDE_L;
+      const x = game.uPrevX[i] + (game.uX[i] - game.uPrevX[i]) * alpha;
+      const era = game.uEra[i];
+      // 시대가 오르면 조금씩 커진다 — 진화가 눈에 보여야 한다
+      const grow = 1 + era * 0.09;
+      const w = C.U_W[kind] * grow;
+      const h = C.U_H[kind] * grow;
+      const gy = groundAt(x);
+      const y = gy - h;
+      const hit = game.uHitFlash[i] > 0;
 
-    // 그림자 — 점프·슬라이드가 읽히는 유일한 단서다
-    const lift = foot / C.JUMP_APEX;
-    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.55 - 0.3 * lift)];
-    ctx.beginPath();
-    ctx.ellipse(cx, gy + 6, C.PLAYER_W * 0.55 * (1 - lift * 0.35),
-                10 * (1 - lift * 0.4), 0, 0, TAU);
-    ctx.fill();
+      ctx.fillStyle = hit ? C.COL_DANGER
+        : (mine ? C.RAMP_PLAYER[C.rampIndex(0.9)] : C.RAMP_STRUCT[C.rampIndex(0.85)]);
 
-    // 트레일
-    for (let i = 0; i < C.TRAIL_MAX; i++) {
-      const age = feel.tAge[i];
-      if (age < 0) continue;
-      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex((1 - age / C.TRAIL_FRAMES) * 0.16)];
-      ctx.fillRect(C.VP_X + feel.tX[i] - C.PLAYER_W * 0.3,
-                   C.GROUND_Y - feel.tY[i] - C.PLAYER_H * 0.5,
-                   C.PLAYER_W * 0.6, C.PLAYER_H * 0.5);
-    }
-
-    // 콤보 후광 — shadowBlur 대신 반투명 겹치기
-    const tier = game.comboTier();
-    if (tier > 0) {
-      const rings = tier > 3 ? 3 : tier;
-      for (let k = rings; k >= 1; k--) {
-        ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(0.22 - k * 0.05)];
-        ctx.lineWidth = C.STROKE;
-        ctx.beginPath();
-        ctx.ellipse(cx + feel.shakeX, gy - foot - h * 0.5 + feel.shakeY,
-                    C.PLAYER_W * 0.62 + k * 9, h * 0.6 + k * 9, 0, 0, TAU);
-        ctx.stroke();
-      }
-    }
-
-    // 몸통 — 스쿼시 & 스트레치
-    const w = C.PLAYER_W * feel.sx;
-    const hh = h * feel.sy;
-    // 비틀거릴 때는 깜빡인다. 붉게 칠하지 않는다 —
-    // 붉은색은 "나를 죽이는 것"이고 플레이어는 "내가 통제하는 것"이다.
-    // 색 규칙을 깨면 화면 전체의 의미가 흐려진다.
-    ctx.fillStyle = (game.stumble > 0 && ((game.tick / 4) | 0) % 2 === 0)
-      ? C.RAMP_PLAYER[C.rampIndex(0.35)] : C.COL_PLAYER;
-    ctx.beginPath();
-    ctx.roundRect(cx - w * 0.5, gy - foot - hh, w, hh, C.RADIUS);
-    ctx.fill();
-
-    // 방패가 남아 있으면 테두리로 알려준다
-    if (game.shieldCharges > 0) {
-      ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(0.9)];
+      // 공격 모션 — 앞으로 살짝 튀어나온다
+      const lunge = game.uAttack[i] > 0 ? (mine ? 4 : -4) : 0;
+      ctx.fillRect(x - w * 0.5 + lunge, y, w, h);
+      ctx.strokeStyle = C.COL_BG;
       ctx.lineWidth = C.STROKE;
-      ctx.strokeRect(cx - w * 0.5 - 6, gy - foot - hh - 6, w + 12, hh + 12);
-    }
+      ctx.strokeRect(x - w * 0.5 + lunge, y, w, h);
 
-    // 파티클
+      const dir = mine ? 1 : -1;
+      if (kind === C.U_SWORD) {
+        // 날 — 위로 뻗는다
+        ctx.fillRect(x + dir * (w * 0.5) + lunge, y - 12 * grow, 4, 20 * grow);
+      } else if (kind === C.U_ARCHER) {
+        // 활대 — 앞으로 뻗는다
+        ctx.fillRect(x + dir * (w * 0.5) + lunge, y + h * 0.3, dir * 14 * grow, 3);
+      } else {
+        // 거인 — 어깨를 얹어 실루엣을 키운다
+        ctx.fillRect(x - w * 0.72, y - 7 * grow, w * 1.44, 8 * grow);
+      }
+
+      // 체력 — 남은 만큼만 밑줄. 가득 차 있으면 안 그린다 (선이 시끄러워진다)
+      const hk = game.uHp[i] / game.uHpMax[i];
+      if (hk < 0.999) {
+        ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.9)];
+        ctx.fillRect(x - w * 0.5, y - 8, w, 4);
+        ctx.fillStyle = hk > 0.35 ? (mine ? C.COL_PLAYER : C.COL_STRUCT) : C.COL_DANGER;
+        ctx.fillRect(x - w * 0.5, y - 8, w * hk, 4);
+      }
+    }
+  }
+
+  drawParticles(feel) {
+    const ctx = this.ctx;
     for (let i = 0; i < C.PARTICLE_MAX; i++) {
-      const life = feel.pLife[i];
-      if (life <= 0) continue;
-      const kind = feel.pKind[i];
-      const ramp = kind === 2 ? C.RAMP_DANGER : (kind === 1 ? C.RAMP_BONUS : C.RAMP_STRUCT);
-      ctx.fillStyle = ramp[C.rampIndex(life / feel.pMax[i])];
-      const sz = feel.pSize[i];
-      ctx.fillRect(C.VP_X + feel.pX[i] - sz, C.GROUND_Y - feel.pY[i] - sz, sz * 2, sz * 2);
+      if (feel.pLife[i] <= 0) continue;
+      const a = feel.pLife[i] / feel.pMax[i];
+      const ramp = feel.pKind[i] === 1 ? C.RAMP_BONUS
+        : (feel.pKind[i] === 2 ? C.RAMP_DANGER : C.RAMP_PLAYER);
+      ctx.fillStyle = ramp[C.rampIndex(a)];
+      const s = feel.pSize[i] * a;
+      ctx.fillRect(feel.pX[i] - s * 0.5, feel.pY[i] - s * 0.5, s, s);
     }
+  }
 
-    // 링
+  drawRings(feel) {
+    const ctx = this.ctx;
     ctx.lineWidth = C.STROKE;
     for (let i = 0; i < C.RING_MAX; i++) {
-      const st = feel.ringStep[i];
-      if (st < 0) continue;
-      const t = st / feel.ringSteps;
-      const r = C.RING_R0 + (C.RING_R1 - C.RING_R0) * easeOutCubic(t);
-      ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(1 - t)];
+      if (feel.ringStep[i] < 0) continue;
+      const t = feel.ringStep[i] / feel.ringSteps;
+      ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(1 - t)];
       ctx.beginPath();
-      ctx.arc(C.VP_X + feel.ringX[i], C.GROUND_Y - feel.ringY[i], r, 0, TAU);
+      ctx.arc(feel.ringX[i], feel.ringY[i], C.RING_R * easeOutCubic(t), 0, TAU);
       ctx.stroke();
     }
   }
 
-  // ── 물 — 뒤에서 차오른다 ────────────────────────────────────
+  // 떠오르는 숫자 — 피해와 수입이 어디서 났는지 눈으로 따라갈 수 있어야 한다
+  drawFloats(feel) {
+    const ctx = this.ctx;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = FONT_SMALL;
+    for (let i = 0; i < C.FLOAT_MAX; i++) {
+      if (feel.fStep[i] < 0) continue;
+      const t = feel.fStep[i] / feel.fSteps;
+      const ramp = feel.fKind[i] === 1 ? C.RAMP_BONUS : C.RAMP_DANGER;
+      ctx.fillStyle = ramp[C.rampIndex(1 - t)];
+      this.drawNumber(feel.fVal[i], feel.fX[i], feel.fY[i] - C.FLOAT_RISE * easeOutCubic(t), 9);
+    }
+  }
+
+  // ── 물 ──────────────────────────────────────────────────────
   drawWater(game, alpha) {
     const ctx = this.ctx;
-    const gap = game.prevGap + (game.gap - game.prevGap) * alpha;
-    const k = 1 - gap / C.CHASE_GAP_START;
-    const kk = k < 0 ? 0 : (k > 1 ? 1 : k);
-    if (kk <= 0.001) return;
+    const wy = game.prevWater + (game.water - game.prevWater) * alpha;
+    if (wy >= C.VIEW_H) return;
 
-    const top = C.VIEW_H - kk * (C.VIEW_H - C.GROUND_Y);
-    ctx.fillStyle = C.COL_DANGER;
+    // 수면 — 사인 두 개를 겹쳐 물결을 만든다. 문자열도 객체도 안 만든다.
+    const t = game.simTime * 0.0016;
+    // 0.82 로 뒀더니 물에 잠긴 유닛과 기지가 전부 붉은 덩어리로 뭉개져
+    // 판을 읽을 수가 없었다. 잠긴 것은 **잠긴 채로 보여야** 한다.
+    ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.4)];
     ctx.beginPath();
     ctx.moveTo(0, C.VIEW_H);
-    ctx.lineTo(0, top);
-    // 수면은 사인파로 일렁인다. 결정론적이다.
-    for (let x = 0; x <= C.VIEW_W; x += 30) {
-      const w = Math.sin(x * 0.02 + game.simTime * 0.004) * 7;
-      ctx.lineTo(x, top + w);
+    for (let x = 0; x <= C.VIEW_W; x += 24) {
+      const y = wy + Math.sin(x * 0.017 + t) * 4 + Math.sin(x * 0.041 - t * 1.7) * 2.5;
+      ctx.lineTo(x, y);
     }
     ctx.lineTo(C.VIEW_W, C.VIEW_H);
     ctx.closePath();
     ctx.fill();
 
-    const near = game.waterNear();
-    if (near > 0) {
-      ctx.globalAlpha = near * near;
-      ctx.fillStyle = this.waterGrad;
-      ctx.fillRect(0, C.VIEW_H - 320, C.VIEW_W, 320);
-      ctx.globalAlpha = 1;
+    // 수면선을 밝게 — 어디까지 찼는지가 한눈에 읽혀야 한다
+    ctx.strokeStyle = C.COL_DANGER;
+    ctx.lineWidth = C.STROKE;
+    ctx.beginPath();
+    for (let x = 0; x <= C.VIEW_W; x += 24) {
+      const y = wy + Math.sin(x * 0.017 + t) * 4 + Math.sin(x * 0.041 - t * 1.7) * 2.5;
+      if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
+    ctx.stroke();
   }
 
   // ── HUD ─────────────────────────────────────────────────────
@@ -598,78 +390,132 @@ export class Renderer {
     const ctx = this.ctx;
 
     if (feel.flashFrames > 0) {
-      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(feel.flashFrames / 3 * 0.3)];
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(feel.flashFrames / C.FLASH_FRAMES * 0.3)];
       ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
     }
 
-    ctx.fillStyle = C.COL_PLAYER;
-    ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
+
+    // 금 — 왼쪽 위. 가장 자주 보는 숫자다
+    ctx.textAlign = 'left';
     ctx.font = FONT_SCORE;
-    this.drawNumber(game.score, HALF_W, C.UNIT * 2, 18);
+    ctx.fillStyle = C.COL_BONUS;
+    const gx = C.UNIT * 7;
+    const gw = this.drawLeft(game.gold, gx, C.UNIT * 2, 15);
+    ctx.font = FONT_TINY;
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.6)];
+    ctx.fillText(LABEL_GOLD, gx + gw + 4, C.UNIT * 3.5);
 
+    // 시대와 경험치
     ctx.font = FONT_SMALL;
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.6)];
-    const wd = this.drawNumber(game.meters(), HALF_W - 10, C.UNIT * 7, 10);
-    ctx.fillText(LABEL_M, HALF_W - 10 + wd * 0.5 + 7, C.UNIT * 7);
-
-    if (game.combo > 0) {
-      ctx.font = FONT_MID;
-      ctx.fillStyle = game.combo >= C.COMBO_PUSH_AT ? C.COL_BONUS : C.COL_PLAYER;
-      this.drawNumber(game.combo, HALF_W, C.UNIT * 12, 13);
-    }
-    if (game.combo >= C.COMBO_HOLD_AT) {
-      ctx.font = FONT_SMALL;
-      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.85)];
-      ctx.fillText(game.combo >= C.COMBO_PUSH_AT ? LABEL_PUSH : LABEL_HOLD, HALF_W, C.UNIT * 16);
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.75)];
+    ctx.fillText(C.ERA_NAME[game.era], gx, C.UNIT * 6.5);
+    const need = game.eraNeed();
+    if (need > 0) {
+      const bw = 132, bh = 6, bx = gx + 40, by = C.UNIT * 7.6;
+      ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.25)];
+      ctx.fillRect(bx, by, bw, bh);
+      ctx.fillStyle = game.eraReady() ? C.COL_BONUS : C.RAMP_BONUS[C.rampIndex(0.6)];
+      ctx.fillRect(bx, by, bw * Math.min(1, game.xp / need), bh);
     }
 
-    this.drawBoostGauge(game);
+    // 시간 — 가운데 위
+    ctx.textAlign = 'center';
+    ctx.font = FONT_SMALL;
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.55)];
+    this.drawFixed1(game.elapsed(), HALF_W - 14, C.UNIT * 2.5);
 
-    // 획득 특성 — 우상단, AI 토글 아래. 트랙 위에 겹치지 않는다.
+    // 획득 특성 — 오른쪽 위, AI 토글 아래
     ctx.textAlign = 'right';
     ctx.font = FONT_TINY;
-    let ty = C.UNIT * 9;
+    let ty = C.UNIT * 8;
     for (let i = 0; i < C.TRAITS.length; i++) {
       if (!game.traits[i]) continue;
       ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.85)];
       ctx.fillText(C.TRAITS[i].name, C.VIEW_W - C.UNIT * 2, ty);
-      ty += C.UNIT * 2.2;
+      ty += C.UNIT * 2.1;
     }
-    ctx.textAlign = 'center';
 
     if (director && directorView) this.drawDirectorView(game, director);
     this.drawToggle(directorView);
     this.drawMute(muted);
   }
 
-  // 부스트 게이지 — 화면 아래 가장자리. 물과 같은 쪽에 둔다.
-  // **차오르는 것이 둘**이고 하나는 나를 죽이고 하나는 나를 살린다.
-  // 같은 자리에서 자라야 그 대비가 읽힌다.
-  drawBoostGauge(game) {
+  // ── 버튼 — 이 게임의 조작 전부 ──────────────────────────────
+  // 살 수 있는지 없는지가 **색이 아니라 밝기**로 읽혀야 한다.
+  // 쿨다운은 버튼 위를 덮는 막대로 보여 준다 — 숫자를 읽게 하지 않는다.
+  drawButtons(game) {
     const ctx = this.ctx;
-    const active = game.boostFrames > 0;
-    const k = active ? game.boostK() : game.boostFill();
-    if (k <= 0.001 && !active) return;
+    ctx.textBaseline = 'top';
+    for (let i = 0; i < C.BTN_COUNT; i++) {
+      const x = C.BTN_X0 + i * (C.BTN_W + C.BTN_GAP);
+      const y = C.BTN_Y;
 
-    const w = C.VIEW_W - C.UNIT * 8;
-    const x = C.UNIT * 4;
-    const y = C.VIEW_H - C.UNIT * 4;
-    const h = C.UNIT;
+      let ok = true, cd = 0, cost = 0, ready = true;
+      if (i <= C.B_GIANT) {
+        cost = game.cost(i);
+        ok = game.gold >= cost;
+        cd = game.spawnCd[i] / game.spawnCooldown(i);
+      } else if (i === C.B_ERA) {
+        ready = game.eraReady();
+        ok = ready;
+      } else {
+        cd = game.nukeCd / C.NUKE_CD;
+        ok = cd <= 0;
+      }
 
-    ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.18)];
-    ctx.fillRect(x, y, w, h);
-    ctx.fillStyle = active ? C.COL_BONUS : C.RAMP_BONUS[C.rampIndex(0.55 + 0.45 * k)];
-    ctx.fillRect(x, y, w * k, h);
+      const accent = i === C.B_ERA || i === C.B_NUKE;
+      const base = accent ? C.RAMP_BONUS : C.RAMP_PLAYER;
 
-    if (active) {
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'bottom';
+      ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.95)];
+      ctx.fillRect(x, y, C.BTN_W, C.BTN_H);
+      ctx.strokeStyle = base[C.rampIndex(ok ? 0.9 : 0.28)];
+      ctx.lineWidth = C.STROKE;
+      ctx.strokeRect(x, y, C.BTN_W, C.BTN_H);
+
+      // 쿨다운 — 아래에서 위로 차오른다
+      if (cd > 0) {
+        ctx.fillStyle = base[C.rampIndex(0.14)];
+        ctx.fillRect(x, y + C.BTN_H * (1 - cd), C.BTN_W, C.BTN_H * cd);
+      }
+
+      ctx.textAlign = 'left';
+      ctx.font = FONT_MID;
+      ctx.fillStyle = base[C.rampIndex(ok ? 1 : 0.35)];
+      ctx.fillText(BTN_NAME[i], x + C.UNIT * 1.5, y + C.UNIT);
+
       ctx.font = FONT_TINY;
-      ctx.fillStyle = C.COL_BONUS;
-      ctx.fillText(LABEL_BOOST, HALF_W, y - 3);
-      ctx.textBaseline = 'top';
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.4)];
+      ctx.fillText(C.KEY_HINT[i], x + C.BTN_W - C.UNIT * 2, y + C.UNIT);
+
+      ctx.font = FONT_SMALL;
+      if (i <= C.B_GIANT) {
+        ctx.fillStyle = ok ? C.COL_BONUS : C.RAMP_BONUS[C.rampIndex(0.35)];
+        this.drawLeft(cost, x + C.UNIT * 1.5, y + C.UNIT * 4.6, 9);
+      } else if (i === C.B_ERA) {
+        ctx.fillStyle = ready ? C.COL_BONUS : C.RAMP_PLAYER[C.rampIndex(0.35)];
+        ctx.fillText(ready ? READY : C.ERA_NAME[Math.min(C.ERA_COUNT - 1, game.era + 1)],
+                     x + C.UNIT * 1.5, y + C.UNIT * 4.6);
+      } else {
+        ctx.fillStyle = ok ? C.COL_BONUS : C.RAMP_PLAYER[C.rampIndex(0.35)];
+        if (ok) ctx.fillText(READY, x + C.UNIT * 1.5, y + C.UNIT * 4.6);
+        else this.drawLeft(Math.ceil(game.nukeCd / 1000), x + C.UNIT * 1.5, y + C.UNIT * 4.6, 9);
+      }
     }
+  }
+
+  drawBanner(feel) {
+    if (feel.bannerFrames <= 0) return;
+    const ctx = this.ctx;
+    const t = 1 - feel.bannerFrames / feel.bannerTotal;
+    const fade = t > 0.6 ? 1 - (t - 0.6) / 0.4 : 1;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = FONT_BIG;
+    ctx.fillStyle = feel.bannerCode === C.BAN_WATER
+      ? C.RAMP_DANGER[C.rampIndex(fade)] : C.RAMP_BONUS[C.rampIndex(fade)];
+    ctx.fillText(BAN_TXT[feel.bannerCode], HALF_W, C.GROUND_Y * 0.42 - easeOutCubic(t) * 24);
+    ctx.textBaseline = 'top';
   }
 
   drawToggle(on) {
@@ -686,33 +532,27 @@ export class Renderer {
     ctx.textBaseline = 'top';
   }
 
-  // 음소거 토글. 심사자가 사무실에서 열 수도 있다. 상태는 메모리에만.
-  drawMute(on) {
+  drawMute(muted) {
     const ctx = this.ctx;
-    const a = C.rampIndex(on ? 0.28 : 0.75);
+    const a = C.rampIndex(muted ? 0.28 : 0.75);
+    const x = C.UNIT, y = C.UNIT;
     ctx.strokeStyle = C.RAMP_PLAYER[a];
     ctx.lineWidth = C.STROKE;
-    ctx.strokeRect(C.UNIT, C.UNIT, TOGGLE_SIZE, TOGGLE_SIZE);
-    const cx = C.UNIT + TOGGLE_SIZE * 0.5;
-    const cy = C.UNIT + TOGGLE_SIZE * 0.5;
+    ctx.strokeRect(x, y, TOGGLE_SIZE, TOGGLE_SIZE);
     ctx.fillStyle = C.RAMP_PLAYER[a];
-    ctx.fillRect(cx - 9, cy - 4, 6, 8);
     ctx.beginPath();
-    ctx.moveTo(cx - 3, cy - 4);
-    ctx.lineTo(cx + 3, cy - 9);
-    ctx.lineTo(cx + 3, cy + 9);
-    ctx.lineTo(cx - 3, cy + 4);
+    ctx.moveTo(x + 13, y + 15); ctx.lineTo(x + 19, y + 15); ctx.lineTo(x + 25, y + 9);
+    ctx.lineTo(x + 25, y + 31); ctx.lineTo(x + 19, y + 25); ctx.lineTo(x + 13, y + 25);
     ctx.closePath();
     ctx.fill();
-    if (on) {
+    if (muted) {
       ctx.beginPath();
-      ctx.moveTo(cx - 10, cy - 10);
-      ctx.lineTo(cx + 10, cy + 10);
+      ctx.moveTo(x + 9, y + 31); ctx.lineTo(x + 31, y + 9);
       ctx.stroke();
     }
   }
 
-  // ── 특성 드래프트 — AI 디렉터의 전시장 ──────────────────────
+  // ── 특성 드래프트 ───────────────────────────────────────────
   drawDraft(game, feel, director) {
     const ctx = this.ctx;
     const t = Math.min(1, game.draftFrames / Math.round(C.DRAFT_UI_MS / C.SIM_DT));
@@ -726,18 +566,17 @@ export class Renderer {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = C.COL_PLAYER;
     ctx.font = FONT_MID;
-    ctx.fillText(LABEL_DRAFT, HALF_W, C.UNIT * 8);
+    ctx.fillText(LABEL_DRAFT, HALF_W, C.UNIT * 6);
 
-    const cardH = 132;
-    const gapY = C.UNIT * 3;
-    const top = HALF_H - (cardH * 3 + gapY * 2) * 0.5;
+    const cardH = 86, gap = C.UNIT * 2;
+    const top = HALF_H - (cardH * 3 + gap * 2) * 0.5;
 
     for (let i = 0; i < C.TRAIT_OFFER; i++) {
       const idx = game.draftIdx[i];
       if (idx < 0) continue;
       const tr = C.TRAITS[idx];
-      const y = top + i * (cardH + gapY);
-      const w = (C.VIEW_W - C.UNIT * 8) * e;
+      const y = top + i * (cardH + gap);
+      const w = (C.VIEW_W * 0.62) * e;
       const x = HALF_W - w * 0.5;
 
       ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
@@ -748,29 +587,30 @@ export class Renderer {
       ctx.fill();
       ctx.stroke();
 
-      // 계열 표시 — 공격/방어/조작
       ctx.textAlign = 'left';
       ctx.font = FONT_TINY;
       ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.9)];
-      ctx.fillText(KIND_NAME[tr.kind], x + C.UNIT * 2, y + C.UNIT * 3);
+      ctx.fillText(KIND_NAME[tr.kind], x + C.UNIT * 2, y + C.UNIT * 2.5);
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.45)];
+      ctx.fillText(C.KEY_HINT[i], x + w - C.UNIT * 2.5, y + C.UNIT * 2.5);
 
       ctx.font = FONT_MID;
       ctx.fillStyle = C.COL_PLAYER;
-      ctx.fillText(tr.name, x + C.UNIT * 2, y + cardH * 0.45);
+      ctx.fillText(tr.name, x + C.UNIT * 2, y + cardH * 0.5);
       ctx.font = FONT_SMALL;
       ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.6)];
-      ctx.fillText(tr.desc, x + C.UNIT * 2, y + cardH * 0.75);
-      ctx.textAlign = 'center';
+      ctx.fillText(tr.desc, x + C.UNIT * 2, y + cardH * 0.78);
     }
 
-    // 디렉터가 왜 이 셋을 골랐는가 — 문장보다 강한 증거
+    // **디렉터가 이 셋을 고른 이유** — 문장보다 강한 증거다
     if (director) {
+      ctx.textAlign = 'center';
       ctx.font = FONT_TINY;
-      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.45)];
-      ctx.fillText(LABEL_WHY, HALF_W, C.VIEW_H - C.UNIT * 11);
-      ctx.fillStyle = C.COL_BONUS;
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.4)];
+      ctx.fillText(LABEL_WHY, HALF_W, C.VIEW_H - C.UNIT * 7);
       ctx.font = FONT_SMALL;
-      ctx.fillText(director.draftReason || REASONS[0], HALF_W, C.VIEW_H - C.UNIT * 7);
+      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.85)];
+      ctx.fillText(director.draftReason, HALF_W, C.VIEW_H - C.UNIT * 4);
     }
     ctx.textBaseline = 'top';
   }
@@ -779,147 +619,106 @@ export class Renderer {
   drawResult(game, feel, director) {
     const ctx = this.ctx;
     if (feel.resultStep < 0) return;
-    const s = this.viewScale;
     const t = feel.resultStep / feel.resultSteps;
     const e = t >= 1 ? 1 : easeOutBack(t);
 
-    // 0.8 알파로 깔았더니 코앞의 기둥·코인이 글자 위로 비쳐서 점수를 읽기가
-    // 어려웠다. 드래프트 화면과 같은 규칙으로 맞춘다 — **결과는 완전 불투명이다.**
-    // 등장하는 동안만 비치고, 자리를 잡으면 뒤가 보이지 않는다.
     ctx.fillStyle = t >= 1 ? C.COL_BG : C.RAMP_BG[C.rampIndex(0.55 + 0.45 * t)];
     ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
 
-    ctx.setTransform(s * e, 0, 0, s * e, HALF_W * s, HALF_H * s);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    if (director && director.deathLine) {
+    const won = game.outcome === C.WIN_PLAYER;
+    ctx.font = FONT_BIG;
+    ctx.fillStyle = won ? C.COL_BONUS : C.COL_PLAYER;
+    ctx.fillText(won ? LABEL_WIN : (game.outcome === C.WIN_DROWN ? LABEL_DROWN : LABEL_LOSE),
+                 HALF_W, HALF_H - C.UNIT * 11);
+
+    if (director && director.deathLine && !won) {
       ctx.font = FONT_SMALL;
-      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.55)];
-      ctx.fillText(director.deathLine, 0, -C.UNIT * 17);
-    }
-
-    ctx.fillStyle = C.COL_PLAYER;
-    ctx.font = FONT_BIG;
-    this.drawNumber(game.score, 0, -C.UNIT * 10, 27);
-
-    ctx.font = FONT_SMALL;
-    ctx.textAlign = 'right';
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.6)];
-    ctx.fillText(LABEL_DIST, -C.UNIT * 2, -C.UNIT * 2);
-    ctx.fillText(LABEL_BEST, -C.UNIT * 2, C.UNIT * 2);
-    ctx.fillText(LABEL_COMBO, -C.UNIT * 2, C.UNIT * 6);
-    ctx.fillText(LABEL_PROFILE, -C.UNIT * 2, C.UNIT * 10);
-    ctx.textAlign = 'left';
-    ctx.fillStyle = C.COL_PLAYER;
-    const wd = this.drawLeft(game.meters(), C.UNIT * 2, -C.UNIT * 2, 10);
-    ctx.fillText(LABEL_M, C.UNIT * 2 + wd + 4, -C.UNIT * 2);
-    this.drawLeft(game.bestScore, C.UNIT * 2, C.UNIT * 2, 10);
-    this.drawLeft(game.bestCombo, C.UNIT * 2, C.UNIT * 6, 10);
-    ctx.fillText(director ? director.profileName : PROFILE_UNKNOWN, C.UNIT * 2, C.UNIT * 10);
-
-    this.drawGrade(game, e);
-
-    ctx.textAlign = 'center';
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.65)];
-    ctx.fillText(LABEL_RETRY, 0, C.UNIT * 34);
-
-    ctx.setTransform(s, 0, 0, s, 0, 0);
-    ctx.textBaseline = 'top';
-  }
-
-  // 판 평가 — 점수 옆에 등급 하나, 아래에 다섯 축 막대.
-  // **점수는 얼마나 버텼는지만 말하고, 등급은 어떻게 플레이했는지를 말한다.**
-  // 그래서 다음 판의 목표가 여기서 생긴다. 좌표계는 drawResult 의 중앙 원점 그대로다.
-  drawGrade(game, e) {
-    const ctx = this.ctx;
-    const gi = game.gradeIndex();
-
-    // 등급 한 글자. 점수 오른쪽에 크게.
-    ctx.textAlign = 'left';
-    ctx.font = FONT_BIG;
-    ctx.fillStyle = gi <= 1 ? C.COL_BONUS : C.RAMP_PLAYER[C.rampIndex(0.85)];
-    ctx.fillText(C.GRADE_NAME[gi], C.UNIT * 11, -C.UNIT * 10);
-
-    // 다섯 축 막대
-    const bw = C.UNIT * 16;
-    const bh = C.UNIT * 1.2;
-    const x0 = -C.UNIT * 2;
-    let y = C.UNIT * 15;
-    ctx.font = FONT_TINY;
-    for (let i = 0; i < 5; i++) {
-      const v = game.gradeAxis(i);
-      ctx.textAlign = 'right';
       ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
-      ctx.fillText(GRADE_AXIS[i], x0 - C.UNIT, y);
-      ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.2)];
-      ctx.fillRect(x0, y - bh * 0.5, bw, bh);
-      ctx.fillStyle = v >= 0.8 ? C.COL_BONUS : C.RAMP_PLAYER[C.rampIndex(0.35 + 0.5 * v)];
-      ctx.fillRect(x0, y - bh * 0.5, bw * v * e, bh);
-      y += C.UNIT * 3;
+      ctx.fillText(director.deathLine, HALF_W, HALF_H - C.UNIT * 5.5);
     }
 
-    // 가장 약한 축 — "다음엔 이걸 해라"
-    ctx.textAlign = 'center';
+    // 통계 넷 — 라벨은 오른쪽 정렬, 값은 왼쪽 정렬
     ctx.font = FONT_SMALL;
-    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.8)];
-    ctx.fillText(GRADE_ADVICE[game.weakestAxis()], 0, C.UNIT * 30);
+    const lx = HALF_W - C.UNIT * 2, vx = HALF_W + C.UNIT * 2;
+    let y = HALF_H - C.UNIT * 1;
+    const row = (label, drawVal) => {
+      ctx.textAlign = 'right';
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.55)];
+      ctx.fillText(label, lx, y);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = C.COL_PLAYER;
+      drawVal(vx, y);
+      y += C.UNIT * 3.4;
+    };
+    row(LABEL_TIME, (x, yy) => {
+      const w = this.drawFixed1(game.elapsed() * e, x, yy);
+      ctx.fillText(LABEL_S, x + w + 2, yy);
+    });
+    row(LABEL_KILL, (x, yy) => this.drawLeft(game.kills * e, x, yy, 9));
+    row(LABEL_LOST, (x, yy) => this.drawLeft(game.lost * e, x, yy, 9));
+    row(LABEL_SPAWN, (x, yy) => this.drawLeft(game.spawned * e, x, yy, 9));
+    row(LABEL_PROFILE, (x, yy) =>
+      ctx.fillText(director ? director.profileName : PROFILE_UNKNOWN, x, yy));
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.6)];
+    ctx.fillText(LABEL_RETRY, HALF_W, C.VIEW_H - C.UNIT * 5);
+    ctx.textBaseline = 'top';
   }
 
   // ── 디렉터 뷰 — 디버그 오버레이가 아니라 제품 기능이다 ───────
   drawDirectorView(game, d) {
     const ctx = this.ctx;
-    const lh = C.UNIT * 2.5;
-    const panelH = lh * 8 + C.UNIT * 2;
+    const lh = C.UNIT * 2.4;
+    const panelH = lh * 9 + C.UNIT * 2;
     const x = C.UNIT * 2;
-    // 지평선 위 하늘 영역에 둔다. 아래로 두면 플레이어와 트랙을 가린다 —
-    // 실제로 하단에 뒀다가 플레이어가 패널 뒤로 숨었다.
-    const top = C.UNIT * 9;
-    let y = top;
+    const y = C.UNIT * 12;
+    const w = 230;
 
     ctx.fillStyle = C.COL_BG;
-    ctx.fillRect(x - C.UNIT, y - C.UNIT, C.UNIT * 30, panelH);
-    ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(0.2)];
+    ctx.fillRect(x, y, w, panelH);
+    ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(0.35)];
     ctx.lineWidth = C.STROKE;
-    ctx.strokeRect(x - C.UNIT, y - C.UNIT, C.UNIT * 30, panelH);
+    ctx.strokeRect(x, y, w, panelH);
 
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     ctx.font = FONT_TINY;
+    let ly = y + C.UNIT;
 
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
-    ctx.fillText(DV_PROFILE, x, y);
-    ctx.fillStyle = d.observing ? C.COL_BONUS : C.COL_PLAYER;
-    ctx.fillText(d.observing ? DV_OBSERVING : d.profileName, x + C.UNIT * 9, y);
-    y += lh;
+    const line = (label, drawVal, color) => {
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.45)];
+      ctx.fillText(label, x + C.UNIT, ly);
+      if (drawVal) { ctx.fillStyle = color || C.COL_PLAYER; drawVal(x + w - C.UNIT * 9, ly); }
+      ly += lh;
+    };
 
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
-    ctx.fillText(DV_LANE, x, y);
-    ctx.fillStyle = C.COL_PLAYER; this.drawFixed(d.metricLane, x + C.UNIT * 11, y);
-    y += lh;
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
-    ctx.fillText(DV_GREED, x, y);
-    ctx.fillStyle = C.COL_PLAYER; this.drawFixed(d.metricGreed, x + C.UNIT * 11, y);
-    y += lh;
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
-    ctx.fillText(DV_REACT, x, y);
-    ctx.fillStyle = C.COL_PLAYER; this.drawFixed(d.metricReact, x + C.UNIT * 11, y);
-    y += lh + C.UNIT * 0.5;
+    line(DV_PROFILE, (vx, vy) => {
+      ctx.fillText(d.observing ? DV_OBSERVING : d.profileName, vx, vy);
+    }, C.COL_BONUS);
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.6)];
+    ctx.fillText(REASONS[d.observing ? 0 : d.reasonIdx], x + C.UNIT, ly);
+    ly += lh;
 
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
-    ctx.fillText(DV_LEVERS, x, y);
-    y += lh;
-    ctx.fillStyle = C.COL_PLAYER;
-    ctx.fillText(DV_DENSITY, x, y); this.drawFixed(d.levers.density, x + C.UNIT * 11, y);
-    y += lh;
-    ctx.fillText(DV_WATER, x, y); this.drawFixed(d.levers.waterMul, x + C.UNIT * 11, y);
-    y += lh;
-    ctx.fillText(DV_TELE, x, y); this.drawFixed(d.levers.telegraph, x + C.UNIT * 11, y);
+    line(DV_AGGRO, (vx, vy) => this.drawFixed1(d.metricAggro * 10, vx, vy));
+    line(DV_HOARD, (vx, vy) => this.drawFixed1(d.metricHoard * 10, vx, vy));
+    line(DV_ECON, (vx, vy) => this.drawFixed1(d.metricEcon * 10, vx, vy));
+    line(DV_SWARM, (vx, vy) => this.drawFixed1(d.metricSwarm * 10, vx, vy));
 
-    ctx.textAlign = 'right';
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.4)];
-    this.drawNumber(d.librarySize, C.UNIT * 30, top, 8);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.45)];
+    ctx.fillText(DV_LEVERS, x + C.UNIT, ly);
+    ly += lh;
+    const lv = d.levers;
+    line(DV_MIX, (vx, vy) => {
+      let cx = vx;
+      cx += this.drawLeft(lv.mix[0], cx, vy, 8) + 4;
+      cx += this.drawLeft(lv.mix[1], cx, vy, 8) + 4;
+      this.drawLeft(lv.mix[2], cx, vy, 8);
+    }, C.COL_BONUS);
+    line(DV_TEMPO, (vx, vy) => this.drawLeft(lv.tempo, vx, vy, 8), C.COL_BONUS);
+    line(DV_WATER, (vx, vy) => this.drawFixed1(lv.waterMul * 10, vx, vy), C.COL_BONUS);
   }
 }
