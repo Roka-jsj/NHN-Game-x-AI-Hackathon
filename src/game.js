@@ -166,6 +166,7 @@ export class Game {
     this.laneShiftTotal = 1;
     this.worldX = 0;
     this.prevWorldX = 0;
+    this.lastShiftTick = -999;
 
     this.vstate = V.GROUND;
     this.vFrames = 0;
@@ -277,6 +278,7 @@ export class Game {
     this.laneShiftTotal = this.has('inertia')
       ? 1 : Math.max(1, Math.round(C.LANE_SHIFT_MS / C.SIM_DT));
     this.laneShift = this.laneShiftTotal;
+    this.lastShiftTick = this.tick;
     this.emit(EV.MOVE, next, dir);
   }
 
@@ -540,7 +542,8 @@ export class Game {
           this._rowTaken[ci] = 1;
           this.coins++;
           this.score += (C.COIN_SCORE * (this.has('collector') ? 2 : 1) * this.mult()) | 0;
-          this.emit(EV.COIN, 0, 0);
+          // b = 바깥 레인에서 챙겼는가. 디렉터의 greed 지표가 이걸 본다.
+          this.emit(EV.COIN, 0, this.effLane() === 1 ? 0 : 1);
         }
       }
 
@@ -555,15 +558,30 @@ export class Game {
     const here = this.effLane();
     const ob = this._rowOb[slot * C.LANE_COUNT + here];
     if (ob === C.OB_NONE) {
-      // 옆 레인에 장애물이 있었다면 아슬아슬 회피로 친다
+      // 옆 레인이 막혀 있으면 점수는 준다 — 좁은 길을 지난 건 맞다.
+      // 하지만 **아슬아슬**로 세지는 않는다. 빈 레인에 가만히 서 있던 것도
+      // 옆이 막혔다는 이유만으로 배짱으로 집계되면, 지표가 플레이어가 아니라
+      // 트랙 밀도를 재게 된다. 아슬아슬은 **마지막 순간에 끼어들었을 때**다.
       let adjacent = 0;
       for (let l = 0; l < C.LANE_COUNT; l++) {
         if (l !== here && this._rowOb[slot * C.LANE_COUNT + l] !== C.OB_NONE) adjacent++;
       }
-      if (adjacent > 0) this.reward(adjacent);
+      const dove = this.tick - this.lastShiftTick <= C.NEAR_SHIFT_FRAMES;
+      if (adjacent > 0) this.reward(adjacent, dove ? 1 : 0);
       return;
     }
-    if (this.clears(ob)) { this.reward(1); return; }
+    // 내 레인이 막혀 있는데 자세로 넘었다.
+    // 자세의 **가장자리**로 지났으면 아슬아슬이고, 정점에 맞췄으면 실력이다.
+    // 너무 이른 것도 너무 늦은 것만큼 위험하므로 양쪽 끝을 다 본다.
+    if (this.clears(ob)) {
+      const phase = this.vTotal > 0 ? this.vFrames / this.vTotal : 0.5;
+      const edge = phase < C.NEAR_PHASE || phase > 1 - C.NEAR_PHASE;
+      // 직전에 이 레인으로 뛰어들어 온 것도 아슬아슬이다. 이 경우를 빼놓았더니
+      // 도박꾼의 **가장 도박다운 행동** — 넘어야 하는 레인에 코인 때문에
+      // 막판에 끼어드는 것 — 이 지표에 하나도 안 잡히고 있었다.
+      this.reward(1, (edge || this.tick - this.lastShiftTick <= C.NEAR_SHIFT_FRAMES) ? 1 : 0);
+      return;
+    }
     this.takeHit(ob);
   }
 
@@ -577,12 +595,12 @@ export class Game {
     return false;   // 기둥은 레인을 바꾸는 수밖에 없다
   }
 
-  reward(adjacent) {
+  reward(adjacent, daring) {
     this.combo++;
     if (this.combo > this.comboBest) this.comboBest = this.combo;
-    this.nearMisses += adjacent > 0 ? 1 : 0;
+    this.nearMisses += daring;
     this.score += (C.NEAR_MISS_SCORE * adjacent * this.mult()) | 0;
-    this.emit(EV.NEAR_MISS, adjacent, 0);
+    this.emit(EV.NEAR_MISS, adjacent, daring);
     this.emit(EV.COMBO, this.combo, this.comboTier());
   }
 

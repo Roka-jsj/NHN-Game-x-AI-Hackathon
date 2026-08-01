@@ -253,7 +253,7 @@ requestAnimationFrame(frame);
 // 합성 클록 위에서 60Hz/120Hz 동일성을 재려면 이벤트 timeStamp를 우리가 정해야 하고,
 // 브라우저가 만든 이벤트의 timeStamp는 가짜 클록과 다른 시간축을 쓴다. 그래서 필요하다.
 window.__rising = {
-  game, feel, director, audio, C, ACT,
+  game, feel, director, audio, renderer, C, ACT,
   inject(act, wallTs) { enqueue(act, wallTs); },
   setDirectorView(on) { directorView = !!on; },
   setMuted(on) { muted = !!on; audio.setMuted(muted); },

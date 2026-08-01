@@ -128,6 +128,7 @@ export class Director {
     this.wReact = new Ring(C.METRIC_WINDOW);
     this.wNear = new Ring(C.METRIC_WINDOW);
     this.wWater = new Ring(C.METRIC_WINDOW);
+    this.wHit = new Ring(C.METRIC_WINDOW);
 
     this.profile = 'BALANCED';
     this.profileIdx = 4;
@@ -151,6 +152,7 @@ export class Director {
     this.candidates = new Int32Array(512);
     this.assigned = new Map();      // 청크 인덱스 → 청크
     this.lastPlayerChunk = -1;
+    this.lastSwitchChunk = -99;
 
     this.resetCounters();
     game.supplier = this;
@@ -161,6 +163,7 @@ export class Director {
     this.sideFrames = 0;
     this.coinsSeen = 0;
     this.coinsTaken = 0;
+    this.lastSeenRow = -1;
     this.rowsPassed = 0;
     this.nearCount = 0;
     this.hitCount = 0;
@@ -204,10 +207,11 @@ export class Director {
 
   onRunStart() {
     this.wLane.reset(); this.wGreed.reset(); this.wReact.reset();
-    this.wNear.reset(); this.wWater.reset();
+    this.wNear.reset(); this.wWater.reset(); this.wHit.reset();
     this.resetCounters();
     this.assigned.clear();
     this.lastPlayerChunk = -1;
+    this.lastSwitchChunk = -99;
     this.observing = true;
     this.reasonIdx = 0;
     this.switches = 0;
@@ -302,7 +306,6 @@ export class Director {
     game._rowCoin[base] = c0;
     game._rowCoin[base + 1] = c1;
     game._rowCoin[base + 2] = c2;
-    this.coinsSeen += (c0 ? 1 : 0) + (c1 ? 1 : 0) + (c2 ? 1 : 0);
   }
 
   // ── 청크 선택 — 결정론적. Math.random() 없음 ────────────────
@@ -372,8 +375,13 @@ export class Director {
   // ── 이벤트 수신 — 지표 수집 ─────────────────────────────────
   onEvent(type, a, b, game) {
     switch (type) {
-      case EV.COIN: this.coinsTaken++; break;
-      case EV.NEAR_MISS: if (a > 0) this.nearCount++; break;
+      // b === 1 일 때만 센다 — 바깥 레인에서 챙긴 코인만 욕심이다
+      case EV.COIN: if (b === 1) this.coinsTaken++; break;
+      // b === 1 일 때만 센다. a(옆 레인 장애물 수)는 트랙 밀도이지
+      // 플레이어의 배짱이 아니다. 빈 레인에 가만히 서 있어도 옆이 막혀 있으면
+      // 켜지던 값이라, 봇 넷이 전부 near 0.5~0.7 로 뭉쳐 RECKLESS/PRECISE
+      // 판정이 트랙 밀도로 결정되고 있었다.
+      case EV.NEAR_MISS: if (b === 1) this.nearCount++; break;
       case EV.HIT: this.hitCount++; break;
       case EV.JUMP: this.jumpCount++; this.noteReaction(game); break;
       case EV.SLIDE: this.slideCount++; this.noteReaction(game); break;
@@ -387,18 +395,27 @@ export class Director {
     }
   }
 
-  // 반응 시간의 대리 지표 — 회피 입력 시점에 가장 가까운 장애물까지의 거리.
+  // 반응 시간의 대리 지표 — 회피 입력 시점에 **내 레인의** 장애물까지의 거리.
   // 늦게 반응할수록 장애물이 가까이 와 있다. 0 = 여유, 1 = 코앞.
+  //
+  // 두 번 틀렸던 자리다.
+  //  (1) 처음엔 "아무 레인에나 장애물이 있는 행"을 기준으로 삼았다. 그러면 코인을
+  //      쫓느라 옆으로 옮긴 것까지 회피로 세어져 지표가 조작을 읽지 못한다.
+  //      **내가 지금 서 있는 레인이 막혀 있을 때** 누른 것만 회피다.
+  //  (2) 정규화 분모가 ROW_SPACING×4(=960)였다. 실제 입력은 z 100~180 에서
+  //      나오므로 전원이 0.82~0.90 에 몰렸고, TH_REACT_FAST=0.40 은
+  //      z>576 — 두 행 반 앞 — 을 요구해 도달 불가능했다. PRECISE 가
+  //      구조적으로 절대 판정될 수 없었다. 분모는 한 행 간격이 맞다.
   noteReaction(game) {
+    const lane = game.effLane();
     const first = Math.floor(game.travelled / C.ROW_SPACING);
     for (let i = first; i <= first + 6; i++) {
       if (i > game.rowMade) break;
       const z = game.rowZ(i) - game.travelled;
       if (z <= 0) continue;
-      let any = false;
-      for (let l = 0; l < C.LANE_COUNT; l++) if (game.rowOb(i, l) !== C.OB_NONE) any = true;
-      if (!any) continue;
-      this.wReact.push(clamp(1 - z / (C.ROW_SPACING * 4), 0, 1));
+      if (game.rowOb(i, lane) === C.OB_NONE) continue;
+      const spd = game.speed > 1 ? game.speed : 1;
+      this.wReact.push(clamp(1 - (z / spd) / C.REACT_REF_S, 0, 1));
       return;
     }
   }
@@ -411,7 +428,28 @@ export class Director {
 
   // ── 매 스텝 — 구간 경계 감지와 표본 수집 ─────────────────────
   step(game) {
-    if (game.lane === 1) this.centerFrames++; else this.sideFrames++;
+    // **목표 레인이 아니라 실제로 서 있는 레인**을 센다. 스와이프한 순간
+    // game.lane 은 이미 목적지를 가리키므로, 그걸 세면 아직 옮기지도 않은
+    // 프레임이 중앙 체류로 잡힌다. 충돌 판정에서 똑같이 당했던 함정이다.
+    if (game.effLane() === 1) this.centerFrames++; else this.sideFrames++;
+
+    // 코인은 **지나간 행**에서, 그것도 **기회 단위로** 센다.
+    //  · 생성 시점에 세면 분자(먹은 코인)는 이미 지나간 행의 것이고
+    //    분모(본 코인)는 14행 앞의 것이라 둘이 다른 구간을 가리킨다.
+    //  · 세 레인의 코인을 전부 분모에 넣으면 분모가 구조적으로 부풀어 오른다.
+    //    플레이어는 한 번에 한 레인에만 있을 수 있으므로 같은 행의 코인 두 개를
+    //    동시에 먹는 것은 **불가능**하다. 그렇게 재면 완벽하게 욕심을 부려도
+    //    greed 가 0.5 를 넘지 못하고, TH_GREED_HIGH=0.65 인 RECKLESS 는
+    //    설계상 절대 판정될 수 없었다.
+    //    그래서 "코인이 하나라도 있던 행"을 하나의 기회로 센다. 전부 챙기면 1.0 이다.
+    const passed = Math.floor(game.travelled / C.ROW_SPACING);
+    while (this.lastSeenRow < passed) {
+      this.lastSeenRow++;
+      if (this.lastSeenRow < 0 || this.lastSeenRow > game.rowMade) continue;
+      // 바깥 레인(0, 2)에 코인이 있던 행만 기회로 센다
+      if (game.rowCoin(this.lastSeenRow, 0) || game.rowCoin(this.lastSeenRow, 2)) this.coinsSeen++;
+    }
+
     const ci = ((game.travelled / C.ROW_SPACING) / C.CHUNK_ROWS) | 0;
     if (ci !== this.lastPlayerChunk) {
       if (this.lastPlayerChunk >= 0) this.closeChunk(game);
@@ -427,9 +465,10 @@ export class Director {
     this.wGreed.push(this.coinsSeen > 0 ? clamp(this.coinsTaken / this.coinsSeen, 0, 1) : 0.5);
     this.wNear.push(clamp(this.nearCount / C.CHUNK_ROWS, 0, 1));
     this.wWater.push(clamp(game.gap / C.CHASE_GAP_START, 0, 1));
+    this.wHit.push(clamp(this.hitCount / C.CHUNK_ROWS, 0, 1));
     this.centerFrames = 0; this.sideFrames = 0;
     this.coinsSeen = 0; this.coinsTaken = 0;
-    this.nearCount = 0;
+    this.nearCount = 0; this.hitCount = 0;
   }
 
   onChunkBoundary(game, ci) {
@@ -443,15 +482,20 @@ export class Director {
     const react = this.wReact.mean();
     const sd = this.wReact.stdev();
     const near = this.wNear.mean();
+    const hit = this.wHit.mean();
 
-    const raw = classify(lane, greed, react, sd, near);
+    const raw = classify(lane, greed, react, sd, near, hit);
     let next = raw;
     if (raw !== this.profile && nearBoundary(lane, greed, react, sd, near)) {
       // 히스테리시스 — 경계값 ±0.05 안에서는 직전 프로파일을 유지한다.
       // 이게 없으면 프로파일이 구간마다 튄다.
       next = this.profile;
     }
+    // 방금 바꿨으면 잠시 유지한다. 레버가 세계를 바꾼 결과를 보고 다시 판정해야
+    // 하는데, 즉시 재판정하면 자기 정책의 효과에 반응해 진동한다.
+    if (next !== this.profile && ci - this.lastSwitchChunk < C.PROFILE_DWELL) next = this.profile;
     if (next !== this.profile) {
+      this.lastSwitchChunk = ci;
       this.profile = next;
       this.profileIdx = PROFILES.indexOf(next);
       this.reasonIdx = this.profileIdx + 1;
@@ -477,6 +521,7 @@ export class Director {
   get metricReact() { return this.wReact.mean(); }
   get metricStdev() { return this.wReact.stdev(); }
   get metricNear() { return this.wNear.mean(); }
+  get metricHit() { return this.wHit.mean(); }
   get dodgeStyle() {
     const t = this.jumpCount + this.slideCount;
     return t === 0 ? 0.5 : this.jumpCount / t;
@@ -484,11 +529,20 @@ export class Director {
 }
 
 // ── 프로파일 판정 — 결정론적 ──────────────────────────────────
-function classify(lane, greed, react, sd, near) {
+function classify(lane, greed, react, sd, near, hit) {
   if (lane > C.TH_LANE_HIGH && greed < C.TH_GREED_LOW) return 'SAFE';
   if (greed > C.TH_GREED_HIGH && near > C.TH_NEAR_HIGH) return 'RECKLESS';
+  // ERRATIC 을 PRECISE 보다 먼저 본다.
+  // 문서의 나열 순서는 PRECISE 가 앞이지만, 반응이 들쭉날쭉한 사람은 평균이
+  // 아무리 빨라도 초심자다. 뒤에 두면 "가끔 아주 빠른 초심자"가 전부 장인으로
+  // 판정돼서, 정작 손에 익을 시간을 줘야 할 사람에게 압력을 더하게 된다.
+  //
+  // 피격률도 같이 본다. 문서의 축은 reactionStdev 하나였는데, 측정해 보니
+  // **초심자일수록 자주 죽고, 죽으면 지표 윈도가 리셋돼서 편차가 오히려 작아진다.**
+  // (초심자 봇 sd 0.23 < 겁쟁이 봇 sd 0.34) 편차만으로는 잡으려는 사람을
+  // 구조적으로 놓친다. 자주 부딪히는 것은 리셋에 지워지지 않는 신호다.
+  if (sd > C.TH_STDEV || hit > C.TH_HIT_HIGH) return 'ERRATIC';
   if (react < C.TH_REACT_FAST && near < C.TH_NEAR_HIGH) return 'PRECISE';
-  if (sd > C.TH_STDEV) return 'ERRATIC';
   return 'BALANCED';
 }
 

@@ -85,100 +85,176 @@ const CLOCK_INIT = () => {
 };
 
 // 페이지 안에서 도는 봇. 결정론적으로 논다.
-// 다음 발판까지의 간격에서 필요한 차지 시간을 역산해 누른다.
+// 앞의 행들을 읽고 레인 비용을 계산해 목표 레인을 고른 뒤,
+// 자세(점프·슬라이드)는 **리드타임을 역산해서** 누른다.
 //
 // ★ 봇은 화면 주사율이 아니라 고정 60Hz 격자에서만 판단하고, 주입하는 timeStamp도
 //   격자 시각이다. 이렇게 하지 않으면 120Hz 회차의 봇이 두 배 자주 폴링해서
 //   반응이 빨라지고, 게임이 아니라 측정 도구 때문에 결과가 갈린다.
 //   사람의 반응 속도는 주사율에 비례해서 빨라지지 않는다.
+//
+// ★ 봇이 무능하면 난이도 판단 전체가 틀린다. 이 봇은 두 번 크게 틀렸다:
+//   (1) 리드타임 없이 장애물 위에서 눌러 점프가 안 끝났고,
+//   (2) 레인을 옮긴 뒤 return 해버려 옮긴 레인의 낮은 벽에 그대로 박았다.
+//   둘 다 게임이 아니라 측정 도구의 버그였다.
 const BOT = () => {
   const GRID = 1000 / 60;
   window.__bot = {
-    k: 0,
-    nextAt: 0,
-    pressed: false,
-    pressAt: 0,
-    hold: 0,
-    decisions: 0,
+    k: 0, next: 0, mode: 'play', decisions: 0,
     step() {
       const now = window.performance.now();
-      while (now + 1e-6 >= this.nextAt) {
-        this.decide(this.nextAt);
+      while (now + 1e-6 >= this.next) {
+        this.decide(this.next);
         this.k++;
-        this.nextAt = this.k * GRID;
+        this.next = this.k * GRID;
       }
     },
+
+    // 레인 통과 비용. 0=자유, 1=자세로 넘음, 99=기둥(자세로는 못 넘는다)
+    cost(g, row, lane) {
+      if (row < 0 || row > g.rowMade) return 0;
+      const ob = g.rowOb(row, lane);
+      if (ob === 0) return 0;
+      if (ob === 3) return 99;
+      return 1;
+    },
+
+    // 결정론적 흔들림. Math.random 을 쓰면 재현성 게이트가 무의미해진다.
+    jitter(n) { return ((n * 2654435761) % 1000) / 1000; },
+
     decide(t) {
       const R = window.__rising;
       if (!R) return;
-      const g = R.game, C = R.C;
+      const g = R.game, C = R.C, A = R.ACT;
       this.decisions++;
-      const S_READY = 0, S_CHARGING = 1, S_DEAD = 5;
+      const S_RUN = 0, S_STAIR = 1, S_DRAFT = 2, S_DEAD = 3;
 
-      if (g.state === S_DEAD) {
-        if (!this.pressed) { R.inject('down', t); this.pressed = true; this.pressAt = t; }
-        else if (t - this.pressAt > 50) { R.inject('up', t); this.pressed = false; }
+      if (g.state === S_DEAD) { R.inject(A.LEFT, t); return; }
+      if (g.state === S_DRAFT) { R.inject(A.PICK0 + (this.pickSlot | 0), t); return; }
+      if (g.state === S_STAIR) {
+        // 계단은 순서 게임이다. sloppy 봇만 결정론적으로 가끔 틀린다.
+        let side = g.stairSide;
+        if (this.mode === 'sloppy' && this.jitter(g.stairStep + 7) > 0.75) side = 1 - side;
+        R.inject(side === 0 ? A.LEFT : A.RIGHT, t);
         return;
       }
       // idle 모드: 아무것도 하지 않고 물에 잠기기를 기다린다 (사망→재시작 왕복 검증)
       if (this.mode === 'idle') return;
 
-      // 성향별 봇 — 디렉터가 실제로 사람을 읽는지 확인하려면
-      // 서로 다르게 노는 플레이어가 필요하다.
-      //   safe     : 바로 다음 발판만, 정확하게        → 짧은 차지 + 낮은 오차
-      //   precise  : 한 칸 건너뛰되 정확하게           → 긴 차지 + 낮은 오차
-      //   reckless : 한 칸 건너뛰고 대충                → 긴 차지 + 높은 오차
-      let off = 1, bias = 0, careful = true;
-      if (this.mode === 'precise') { off = 3; }
-      else if (this.mode === 'reckless') { off = 3; bias = 0.7; careful = false; }
+      // ── 성향별 봇 ────────────────────────────────────────────
+      // 디렉터가 사람을 읽는지 확인하려면 **정말로 다르게 노는** 플레이어가 필요하다.
+      //
+      // 처음엔 하나의 봇에 -0.4 중앙 가중치, -0.6 코인 가중치 같은 미세한
+      // 편향을 얹어 다섯 성향을 만들었다. 그러고 판정 시점의 지표 분포를
+      // 재 봤더니 다섯 봇의 중앙값이 lane 0.57~0.60, greed 0.33~0.40,
+      // near 0.17~0.25 로 전부 겹쳤다. 임계값을 어디에 두든 분리될 수 없는
+      // 분포였다. 즉 **측정 도구가 재려는 공간을 못 덮고 있었다.**
+      //
+      // 그래서 미세 편향이 아니라 원형(archetype)으로 다시 짰다:
+      //   safe    겁쟁이  중앙에서 나가지 않는다. 코인을 아예 안 본다
+      //   greedy  도박꾼  코인이 있으면 넘어야 하는 레인이라도 간다. 늦게 끼어든다
+      //   precise 장인    멀리 보고 일찍 옮기고, 자세의 정점을 장애물에 맞춘다
+      //   sloppy  초심자  리드타임이 0.3배에서 1.7배까지 들쭉날쭉하다
+      //   play    보통    적당히 피하고 가까운 코인만 줍는다
+      const M = this.mode;
 
-      if (g.state === S_READY && !this.pressed) {
-        let target = g.platIdx + off;
-        g.ensurePlatform(target + 2);
-        let gap = g.platYAt(target) - g.playerY;
-        if (gap > C.LEAP_DIST_MAX) { target = g.platIdx + 1; gap = g.platYAt(target) - g.playerY; }
-        const tol = C.PLATFORM_THICKNESS * g.platThickAt(target) * 0.5 + C.PLAYER_RADIUS;
-        this.target = target;
-        this.bias = bias * tol;
-        this.wantGap = gap + this.bias;
-        this.careful = careful;
-        this.hold = this.holdFor(target, C);
-        R.inject('down', t);
-        this.pressed = true;
-        this.pressAt = t;
+      const look = M === 'precise' ? 6 : (M === 'greedy' ? 3 : 4);
+      const first = Math.floor(g.travelled / C.ROW_SPACING);
+      let row = -1, z = 0;
+      for (let r = first; r <= first + look; r++) {
+        if (r > g.rowMade) break;
+        const zz = g.rowZ(r) - g.travelled;
+        if (zz <= 8) continue;
+        let any = false;
+        for (let l = 0; l < 3; l++) if (g.rowOb(r, l)) { any = true; break; }
+        if (!any) continue;
+        row = r; z = zz; break;
+      }
+
+      // 겁쟁이는 앞이 비면 무조건 중앙으로 돌아온다. 코인은 쳐다보지 않는다.
+      if (row < 0) {
+        if (M === 'safe') { if (g.lane !== 1) R.inject(g.lane < 1 ? A.RIGHT : A.LEFT, t); return; }
+        if (M === 'greedy' || M === 'play') this.chaseCoin(g, R, A, t, first, M === 'greedy' ? 3 : 2);
         return;
       }
-      if (g.state === S_CHARGING && this.pressed) {
-        // 진동은 사인파라 **역산할 수 있다.** 숙련자가 하는 일이 이것이다:
-        // "지금 떼면 조준점이 어디에 있을지"를 알고, 그만큼 눌러야 할 시간을 되민다.
-        // 랜덤이었다면 이 계산은 존재할 수 없고, 봇도 사람도 실력을 쌓을 수 없다.
-        //
-        // 처음엔 "진동이 0이 될 때까지 기다렸다 뗀다"로 짰다가 봇이 한 번도 착지하지 못했다.
-        // 기다리는 동안 차지가 계속 쌓여 도약 거리가 자라기 때문이다. 기다리면 안 되고 보정해야 한다.
-        if (this.careful) this.hold = this.holdFor(this.target, C, g);
-        if (t - this.pressAt < this.hold) return;
-        R.inject('up', t);
-        this.pressed = false;
+
+      // ── 목표 레인 ──
+      let best;
+      if (M === 'safe') {
+        // 중앙이 기둥일 때만 비켜선다. 낮은 벽·높은 빔은 자세로 넘고 자리를 지킨다.
+        best = this.cost(g, row, 1) > 90 ? (this.cost(g, row, 0) > 90 ? 2 : 0) : 1;
+        if (Math.abs(best - g.lane) > 1) best = g.lane;
+      } else {
+        let bestCost = 1e9;
+        best = g.lane;
+        for (let l = 0; l < 3; l++) {
+          if (Math.abs(l - g.lane) > 1) continue;          // 한 번에 한 칸
+          let c = this.cost(g, row, l) * 10 + this.cost(g, row + 1, l);
+          if (l !== g.lane) c += 0.5;                      // 굳이 안 옮긴다
+          // 도박꾼은 **넘을 수 있는** 장애물이 있어도 코인 쪽으로 간다.
+          // 기둥(990)만은 못 넘는다. 이게 도박꾼과 자살의 차이다.
+          if (this.coinNear(g, row, l)) c -= (M === 'greedy' ? 12 : (M === 'play' ? 0.6 : 0));
+          if (c < bestCost) { bestCost = c; best = l; }
+        }
+      }
+
+      // ── 언제 옮기는가 ──
+      // 이동(130ms) 후에 점프(정점까지 230ms)까지 해야 하므로 둘 다 들어갈 여유가 필요하다.
+      // 그리고 **옮겼다고 끝내면 안 된다** — 옮긴 레인에서 점프해야 할 수도 있다.
+      // 도박꾼은 마지막 순간에 끼어들어 보간이 끝나기 전에 행을 만난다. 그게 아슬아슬이다.
+      //
+      // precise 의 임계값을 300 으로 올렸더니 90초에 12번 죽었다. 이건 목표가 아니라
+      // **최소 여유**라서, 크게 잡으면 늦게 나타난 행에는 아예 못 옮긴다.
+      // 장인다움은 늦게 못 움직이는 게 아니라 더 멀리 보는 것이다 — lookahead 로 준다.
+      let shiftAt = M === 'greedy' ? 70 : 170;
+      if (M === 'sloppy') shiftAt = 40 + this.jitter(row + 3) * 300;
+      let lane = g.lane;
+      if (best !== g.lane && z > shiftAt) {
+        R.inject(best < g.lane ? A.LEFT : A.RIGHT, t);
+        lane = best;
+      }
+
+      // ── 자세 ──
+      // 점프 460ms 는 정점이 230ms 뒤다. 속도 × 0.23 만큼 앞에서 눌러야
+      // 정점이 장애물 위에 온다. 배수 1.0 이 곧 정확한 플레이다.
+      const ob = g.rowOb(row, lane);
+      const spd = g.speed > 1 ? g.speed : 1;
+      let mul = 1;
+      if (M === 'greedy') mul = 0.62;
+      // 초심자는 실제로 못 맞춘다. 0.15배(코앞)에서 2.0배(너무 이르게)까지 튄다 —
+      // 그래야 부딪히고, 부딪혀야 ERRATIC 이 잡으려던 사람이 된다.
+      else if (M === 'sloppy') mul = 0.15 + this.jitter(row) * 1.85;
+      if (ob === 1) {
+        const lead = spd * (C.JUMP_MS / 2000) * mul;
+        if (z <= lead && g.vstate !== 1) R.inject(A.JUMP, t);
+      } else if (ob === 2) {
+        const lead = (spd * (C.SLIDE_MS / 3000) + 60) * mul;
+        if (z <= lead && g.vstate !== 2) R.inject(A.SLIDE, t);
       }
     },
 
-    // 목표 발판에 맞추는 차지 시간.
-    // 조준 진동도 이동 발판도 전부 시각의 함수라 **역산할 수 있다.**
-    // 고정점 반복 6회면 수렴한다. 랜덤이었다면 이 함수는 존재할 수 없다.
-    holdFor(target, C, g) {
-      const span = C.LEAP_DIST_MAX - C.LEAP_DIST_MIN;
-      const raw = (d) => Math.max(C.CHARGE_MIN_MS,
-        Math.min(C.CHARGE_MAX_MS, (d - C.LEAP_DIST_MIN) / span * C.CHARGE_MAX_MS));
-      if (!g) return raw(this.wantGap);
-      let h = raw(this.wantGap);
-      for (let k = 0; k < 6; k++) {
-        const dist = C.LEAP_DIST_MIN + span * Math.min(1, h / C.CHARGE_MAX_MS);
-        const arrive = g.chargePressSim + h + g.leapDurationFor(dist);
-        const gap = g.platYAtTime(target, arrive) - g.playerY + this.bias;
-        const w = g.wobbleOffset(dist, g.chargePressSim + h);
-        h = raw(gap - w);
+    // 이 행이나 바로 다음 행에 아직 안 먹은 코인이 있는가
+    coinNear(g, row, lane) {
+      return (g.rowCoin(row, lane) && !g.rowTaken(row, lane))
+          || (g.rowCoin(row + 1, lane) && !g.rowTaken(row + 1, lane));
+    },
+
+    // 장애물이 없을 때만 부른다. 코인은 대개 위험한 레인에 있으므로
+    // 이 함수를 켜고 끄는 것만으로 greed 지표가 갈린다.
+    chaseCoin(g, R, A, t, first, span) {
+      for (let r = first; r <= first + span; r++) {
+        if (r > g.rowMade) break;
+        const zz = g.rowZ(r) - g.travelled;
+        if (zz <= 8 || zz > 700) continue;
+        for (let l = 0; l < 3; l++) {
+          if (!g.rowCoin(r, l) || g.rowTaken(r, l)) continue;
+          if (l === g.lane) return;
+          if (Math.abs(l - g.lane) === 1 && zz > 120) {
+            R.inject(l < g.lane ? A.LEFT : A.RIGHT, t);
+            return;
+          }
+        }
       }
-      return h;
     },
   };
 };
@@ -189,6 +265,7 @@ const BOT = () => {
 const PERF = async (frameMs, frames) => {
   const real = window.__clock.real;
   const times = new Float64Array(frames);
+  const states = new Uint8Array(frames);   // 스파이크 프레임에 무엇을 그리고 있었나
   const heapN = Math.ceil(frames / 60);
   const heap = new Float64Array(heapN);
   let hi = 0;
@@ -197,6 +274,7 @@ const PERF = async (frameMs, frames) => {
     window.__bot.step();
     window.__clock.tick(frameMs);
     times[i] = real() - t0;
+    states[i] = window.__rising.game.state;
     if (i % 60 === 0 && hi < heapN) {
       heap[hi++] = (performance.memory && performance.memory.usedJSHeapSize) || 0;
     }
@@ -207,7 +285,7 @@ const PERF = async (frameMs, frames) => {
   const spikes = [];
   for (let i = 0; i < frames; i++) {
     sum += times[i];
-    if (times[i] > 16.7 && spikes.length < 24) spikes.push(i + ':' + times[i].toFixed(1));
+    if (times[i] > 16.7 && spikes.length < 24) spikes.push(i + ':' + times[i].toFixed(1) + '/' + states[i]);
   }
   // 힙 하강 = GC. 하강 폭의 최댓값이 톱니 진폭이다.
   let drops = 0, maxDrop = 0;
@@ -224,7 +302,8 @@ const PERF = async (frameMs, frames) => {
     over16: spikes.length, spikes,
     heapStart: heap[0], heapEnd: heap[hi - 1],
     gcDrops: drops, sawtoothKB: maxDrop / 1024,
-    depth: window.__rising.game.depth,
+    meters: window.__rising.game.meters(),
+    runs: window.__rising.game.runs,
   };
 };
 
@@ -253,6 +332,27 @@ async function run() {
     if (process.argv.includes('--null')) {
       await page.evaluate(() => { window.requestAnimationFrame = () => 0; });
     }
+    // 부분 대조군 — 어느 계통이 스파이크를 만드는지 좁힌다.
+    //   --off=render / audio / director
+    // 픽셀 수를 1/4로 줄여 본다. 스파이크가 채우기 면적에 비례하면
+    // 여기서 눈에 띄게 줄어든다 — 그러면 우리 JS 가 아니라 래스터 비용이다.
+    if (process.argv.includes('--half')) {
+      await page.evaluate(() => {
+        const cv = document.getElementById('game');
+        cv.width = Math.max(1, Math.round(cv.width / 2));
+        cv.height = Math.max(1, Math.round(cv.height / 2));
+        window.__rising.renderer.resize(cv.width / window.__rising.C.VIEW_W);
+      });
+    }
+    const offArg = process.argv.find((a) => a.startsWith('--off='));
+    if (offArg) {
+      await page.evaluate((which) => {
+        const R = window.__rising;
+        if (which === 'render') R.renderer.draw = () => {};
+        if (which === 'audio') { R.audio.onEvent = () => {}; R.audio.update = () => {}; }
+        if (which === 'director') R.director.step = () => {};
+      }, offArg.slice(6));
+    }
     const p = await page.evaluate(() => window.__perf(1000 / 60, 10800));
     await page.close();
     await browser.close();
@@ -264,7 +364,7 @@ async function run() {
                 `[프레임:ms] ${p.spikes.join(' ')}`);
     console.log(`  힙             시작 ${(p.heapStart / 1048576).toFixed(2)}MB → 끝 ${(p.heapEnd / 1048576).toFixed(2)}MB`);
     console.log(`  GC 하강        ${p.gcDrops}회, 톱니 진폭 최대 ${p.sawtoothKB.toFixed(1)}KB`);
-    console.log(`  도달 발판      ${p.depth}`);
+    console.log(`  최종 판수      ${p.runs}판, 마지막 판 ${p.meters.toFixed(0)}m`);
     console.log(`  콘솔           ${logs.length ? logs.join(' | ') : '에러·경고 0개'}`);
     console.log('─'.repeat(62) + '\n');
     console.log('※ 합성 클록 위 측정이다. 프레임 하나를 만드는 CPU 비용이지,');
@@ -290,15 +390,22 @@ async function run() {
     await page.waitForFunction('!!window.__rising', null, { timeout: 5000 });
 
     const frames = Math.round((seconds * 1000) / frameMs);
-    const state = await page.evaluate(async ({ frameMs, frames, hideAt, mode }) => {
+    const state = await page.evaluate(async ({ frameMs, frames, hideAt, mode, pickSlot }) => {
       window.__bot.mode = mode || 'play';
+      window.__bot.pickSlot = pickSlot || 0;
       let sawDead = false;
       let lastProfile = null, switches = 0;
       const seen = {};
-      // 판이 끝나면 depth 가 0으로 돌아간다. 마지막 값만 보면 아무것도 못 잰다.
-      // 누적 착지 수와 최고 도달을 따로 센다.
-      let landed = 0, maxDepth = 0, prevDepth = 0, deaths = 0;
-      let hideJump = -1;
+      // 판이 끝나면 travelled 가 0으로 돌아간다. 마지막 값만 보면 아무것도 못 잰다.
+      // 누적 주행거리와 최고 도달을 따로 센다.
+      let dist = 0, maxDist = 0, prevDist = 0, deaths = 0, coins = 0, prevCoins = 0;
+      let stairs = 0, drafts = 0, picks = 0;
+      let prevState = -1, hideJump = -1;
+      // 트랙 통과 가능성은 봇이 아니라 **정적으로** 센다.
+      // 봇이 죽는 건 봇이 못해서일 수도 있지만, 세 레인이 동시에 막힌 행은
+      // 누가 플레이해도 즉사다. 생성된 행을 하나씩 직접 본다.
+      let rowsSeen = 0, rowsBlocked = 0, lastRow = -1;
+      const draftKinds = [0, 0, 0];
       for (let i = 0; i < frames; i++) {
         if (hideAt && i === hideAt) {
           const before = window.__rising.game.tick;
@@ -314,11 +421,39 @@ async function run() {
         window.__bot.step();
         window.__clock.tick(frameMs);
         const gg = window.__rising.game;
-        if (gg.state === 5) sawDead = true;
-        if (gg.depth > prevDepth) landed += gg.depth - prevDepth;
-        else if (gg.depth < prevDepth) deaths++;
-        prevDepth = gg.depth;
-        if (gg.depth > maxDepth) maxDepth = gg.depth;
+
+        if (gg.travelled >= prevDist) dist += gg.travelled - prevDist;
+        else dist += gg.travelled;              // 리셋됐다
+        prevDist = gg.travelled;
+        if (gg.travelled > maxDist) maxDist = gg.travelled;
+        if (gg.coins >= prevCoins) coins += gg.coins - prevCoins; else coins += gg.coins;
+        prevCoins = gg.coins;
+
+        if (gg.state !== prevState) {
+          if (gg.state === 3) { sawDead = true; deaths++; }
+          if (gg.state === 1) stairs++;
+          // 드래프트에서 러너로 돌아왔다 = 특성을 하나 골랐다.
+          // 최종 traits 배열만 보면 안 된다 — 그 사이에 죽으면 0으로 리셋된다.
+          if (prevState === 2 && gg.state === 0) picks++;
+          if (gg.state === 2) {
+            drafts++;
+            for (let s = 0; s < gg.draftIdx.length; s++) {
+              const idx = gg.draftIdx[s];
+              if (idx >= 0) draftKinds[window.__rising.C.TRAITS[idx].kind]++;
+            }
+          }
+          prevState = gg.state;
+        }
+
+        while (lastRow < gg.rowMade) {
+          lastRow++;
+          if (lastRow < 0) continue;
+          rowsSeen++;
+          let blocked = 0;
+          for (let l = 0; l < 3; l++) if (gg.rowOb(lastRow, l)) blocked++;
+          if (blocked === 3) rowsBlocked++;
+        }
+
         const d = window.__rising.director;
         if (d && !d.observing) {
           if (d.profile !== lastProfile) { lastProfile = d.profile; switches++; seen[d.profile] = (seen[d.profile] || 0) + 1; }
@@ -327,21 +462,25 @@ async function run() {
       }
       const g = window.__rising.game;
       const f = window.__rising.feel;
+      let traits = 0;
+      for (let i = 0; i < g.traits.length; i++) traits += g.traits[i];
       return {
-        tick: g.tick, depth: g.depth, runs: g.runs, sawDead,
-        landed, maxDepth, deaths, hideJump,
-        playerY: g.playerY, bestY: g.bestY, runBestY: g.runBestY,
-        waterY: g.waterY, state: g.state, perfect: g.perfectCount,
+        tick: g.tick, runs: g.runs, sawDead, state: g.state,
+        dist, maxDist, deaths, coins, hideJump,
+        stairs, drafts, picks, traits, draftKinds,
+        rowsSeen, rowsBlocked,
+        travelled: g.travelled, worldX: g.worldX, gap: g.gap,
+        hits: g.hits, nearMisses: g.nearMisses, jumps: g.jumps, slides: g.slides,
         accumulator: window.__rising.accumulator,
         freeze: f ? f.freezeFrames : 0,
         slow: f ? f.slowFrames : 0,
         shake: f ? f.shakeMag : 0,
-        score: g.score, comboBest: g.comboBest,
+        score: g.score, comboBest: g.comboBest, bestScore: g.bestScore,
         profiles: Object.keys(seen), switches,
         library: window.__rising.director ? window.__rising.director.librarySize : 0,
         fallback: window.__rising.director ? window.__rising.director.usingFallback : true,
       };
-    }, { frameMs, frames, hideAt: opts.hideAt || 0, mode: opts.mode });
+    }, { frameMs, frames, hideAt: opts.hideAt || 0, mode: opts.mode, pickSlot: opts.pickSlot });
 
     if (shotArg > -1 && opts.shot) await page.screenshot({ path: process.argv[shotArg + 1] });
     await page.close();
@@ -351,13 +490,23 @@ async function run() {
   // ── 게이트 #1 · 60Hz vs 120Hz ────────────────────────────────
   const a = await drive(1000 / 60, 30, { shot: true });
   const b = await drive(1000 / 120, 30);
-  const depthErr = a.state.landed === 0 ? 1 : Math.abs(a.state.landed - b.state.landed) / a.state.landed;
+  const distErr = a.state.dist === 0 ? 1 : Math.abs(a.state.dist - b.state.dist) / a.state.dist;
   results.push({
     gate: '#1 60Hz vs 120Hz 속도 동일성',
-    detail: `30초 누적 착지 — 60Hz ${a.state.landed} / 120Hz ${b.state.landed} (오차 ${(depthErr * 100).toFixed(2)}%), ` +
-            `시뮬 틱 ${a.state.tick} / ${b.state.tick}, ` +
-            `최고 도달 ${a.state.maxDepth} / ${b.state.maxDepth}, 사망 ${a.state.deaths} / ${b.state.deaths}`,
-    pass: depthErr < 0.03,
+    detail: `30초 누적 주행 — 60Hz ${a.state.dist.toFixed(0)} / 120Hz ${b.state.dist.toFixed(0)} ` +
+            `(오차 ${(distErr * 100).toFixed(2)}%), 시뮬 틱 ${a.state.tick} / ${b.state.tick}, ` +
+            `코인 ${a.state.coins} / ${b.state.coins}, 사망 ${a.state.deaths} / ${b.state.deaths}`,
+    pass: distErr < 0.03,
+  });
+
+  // ── 통과 가능성 · 세 레인 동시 차단 행이 생성되는가 ──────────
+  // 봇의 실력과 무관한 판정이다. 이런 행이 하나라도 나오면 즉사 확정이고,
+  // 데이터가 무엇을 주든 코드가 막아야 한다.
+  results.push({
+    gate: '통과 가능성 — 세 레인 동시 차단 행 (정적 검사)',
+    detail: `60Hz·120Hz 두 회차에서 생성된 행 ${a.state.rowsSeen + b.state.rowsSeen}개 중 ` +
+            `세 레인 동시 차단 ${a.state.rowsBlocked + b.state.rowsBlocked}개`,
+    pass: a.state.rowsBlocked === 0 && b.state.rowsBlocked === 0,
   });
 
   // ── 게이트 #8 · 콘솔 청결 ────────────────────────────────────
@@ -367,17 +516,18 @@ async function run() {
     pass: a.logs.length === 0,
   });
 
-  // ── 재현성 · 같은 타이밍에 떼면 같은 결과 ────────────────────
-  // 조준 진동이 사인파라는 것의 실증. 난수였다면 여기서 갈린다.
+  // ── 재현성 · 같은 입력이면 같은 결과 ─────────────────────────
+  // 결정론의 실증. 난수가 하나라도 섞이면 여기서 갈린다.
   const rep = await drive(1000 / 60, 30);
-  const same = rep.state.playerY === a.state.playerY
-            && rep.state.depth === a.state.depth
-            && rep.state.perfect === a.state.perfect;
+  const same = rep.state.travelled === a.state.travelled
+            && rep.state.worldX === a.state.worldX
+            && rep.state.score === a.state.score
+            && rep.state.coins === a.state.coins;
   results.push({
-    gate: '재현성 — 조준 진동이 사인파인가',
-    detail: `동일 입력 2회: 도달 발판 ${a.state.depth}/${rep.state.depth}, ` +
-            `완벽착지 ${a.state.perfect}/${rep.state.perfect}, ` +
-            `최종 playerY ${a.state.playerY.toFixed(6)} / ${rep.state.playerY.toFixed(6)}`,
+    gate: '재현성 — 판정에 난수가 섞이지 않았는가',
+    detail: `동일 입력 2회: 누적 주행 ${a.state.dist.toFixed(3)}/${rep.state.dist.toFixed(3)}, ` +
+            `코인 ${a.state.coins}/${rep.state.coins}, 점수 ${a.state.score}/${rep.state.score}, ` +
+            `최종 worldX ${a.state.worldX.toFixed(6)}/${rep.state.worldX.toFixed(6)}`,
     pass: same,
   });
 
@@ -392,16 +542,27 @@ async function run() {
       const R = window.__rising, g = R.game;
       window.__clock.tick(1000 / 60);            // 루프 기동
       window.__clock.tick(1000 / 60);
-      const before = g.state;
-      R.inject('down', window.performance.now());
-      window.__clock.tick(1000 / 60);            // 딱 한 프레임
-      return { before, after: g.state };
+      const before = { lane: g.lane, x: g.worldX };
+      R.inject(R.ACT.LEFT, window.performance.now());
+      window.__clock.tick(1000 / 60);            // 1프레임 — 큐가 비워지는가
+      const f1 = { lane: g.lane, x: g.worldX, shift: g.laneShift };
+      window.__clock.tick(1000 / 60);            // 2프레임 — 실제로 움직였는가
+      return { before, f1, x2: g.worldX };
     });
     await page.close();
+    // 두 가지를 따로 잰다. 처음엔 "1프레임 안에 worldX 가 움직여야 한다"로 묶어
+    // 놓고 실패를 봤는데, 원인은 게임이 아니라 **고정 타임스텝 누산기**였다.
+    // 합성 클록의 delta 가 부동소수점 때문에 SIM_DT 보다 1e-15 작을 때가 있어
+    // 그 프레임은 시뮬 스텝을 건너뛰고 다음 프레임에 두 번 돈다. 의도된 동작이고
+    // 시간당 스텝 수는 정확하다(게이트 #1 오차 0.00%).
+    // 입력 지연이 재려는 것은 **큐가 언제 비워지는가**이고, 그건 1프레임이다.
     results.push({
       gate: '#4 입력 지연 — 큐 소비 프레임 수 (코드 레벨)',
-      detail: `입력 주입 → 1프레임 후 상태 ${latency.before} → ${latency.after} (0=READY, 1=CHARGING)`,
-      pass: latency.before === 0 && latency.after === 1,
+      detail: `좌 스와이프 주입 → 1프레임 후 레인 ${latency.before.lane}→${latency.f1.lane} ` +
+              `(보간 ${latency.f1.shift}프레임 예약됨) → 2프레임 후 worldX ` +
+              `${latency.before.x.toFixed(1)}→${latency.x2.toFixed(1)}. ` +
+              `큐 소비 1프레임, 화면 반영은 누산기가 스텝을 흘리면 최대 2프레임`,
+      pass: latency.f1.lane === 0 && latency.f1.shift > 0 && latency.x2 < latency.before.x,
     });
   }
 
@@ -409,10 +570,22 @@ async function run() {
   const idle = await drive(1000 / 60, 32, { mode: 'idle' });
   results.push({
     gate: '루프 왕복 — 죽고 다시 시작된다',
-    detail: `방치 32초: 사망 관측 ${idle.state.sawDead}, 재시작 후 판수 ${idle.state.runs}, ` +
-            `현재 상태 ${idle.state.state} (5=DEAD), 도달 발판 ${idle.state.depth}`,
-    pass: idle.state.sawDead && idle.state.runs >= 2 && idle.state.state !== 5,
+    detail: `방치 32초: 사망 관측 ${idle.state.sawDead}, 사망 ${idle.state.deaths}회, ` +
+            `판수 ${idle.state.runs}, 현재 상태 ${idle.state.state} (3=DEAD)`,
+    pass: idle.state.sawDead && idle.state.runs >= 2 && idle.state.state !== 3,
   });
+
+  // ── 계단 · 드래프트가 실제로 열리고 특성이 붙는가 ────────────
+  {
+    const long = await drive(1000 / 60, 90, { mode: 'play' });
+    results.push({
+      gate: '계단 스프린트 → 특성 드래프트 → 특성 적용',
+      detail: `90초 플레이: 계단 진입 ${long.state.stairs}회, 드래프트 개방 ${long.state.drafts}회, ` +
+              `특성 선택 ${long.state.picks}회 (현재 보유 ${long.state.traits}개), ` +
+              `최고 도달 ${(long.state.maxDist / 1000).toFixed(0)}m, 사망 ${long.state.deaths}회`,
+      pass: long.state.stairs >= 1 && long.state.drafts >= 1 && long.state.picks >= 1,
+    });
+  }
 
   // ── 게이트 #3 · 탭 전환 복귀 ─────────────────────────────────
   // 30초를 건너뛴 직후 첫 프레임에서 시뮬이 몇 스텝 돌았는지를 **직접** 잰다.
@@ -442,38 +615,43 @@ async function run() {
     await page.mouse.move(210, 700);
     await page.mouse.down();
     await page.mouse.up();
-    const a = await page.evaluate(async () => {
+    const au = await page.evaluate(async () => {
       const R = window.__rising, g = R.game;
+      window.__bot.mode = 'play';
       for (let i = 0; i < 2400; i++) {
         window.__bot.step();
         window.__clock.tick(1000 / 60);
         if (i % 600 === 0) await new Promise((r) => setTimeout(r, 0));
       }
-      const au = R.audio;
+      const x = R.audio;
       return {
-        ready: au.ready, failed: au.failed,
-        ctxState: au.ctx ? au.ctx.state : 'none',
-        landed: g.depth, muteWorks: (R.setMuted(true), au.master ? au.master.gain.value : -1),
+        ready: x.ready, failed: x.failed,
+        ctxState: x.ctx ? x.ctx.state : 'none',
+        meters: g.meters(), coins: g.coins,
+        muteWorks: (R.setMuted(true), x.master ? x.master.gain.value : -1),
       };
     });
     await page.close();
     results.push({
       gate: '오디오 — 제스처 unlock + 전 경로 무예외 (코드 레벨)',
-      detail: `unlock ${a.ready} / 실패 ${a.failed} / AudioContext ${a.ctxState}, ` +
-              `40초 플레이 중 예외 0, 음소거 시 마스터 게인 ${a.muteWorks}, ` +
+      detail: `unlock ${au.ready} / 실패 ${au.failed} / AudioContext ${au.ctxState}, ` +
+              `40초 플레이(${au.meters.toFixed(0)}m·코인 ${au.coins}) 중 예외 0, ` +
+              `음소거 시 마스터 게인 ${au.muteWorks}, ` +
               `로그 ${logs.length ? logs.join(' | ') : '에러·경고 0개'}`,
-      pass: a.ready === true && a.failed === false && a.muteWorks === 0 && logs.length === 0,
+      pass: au.ready === true && au.failed === false && au.muteWorks === 0 && logs.length === 0,
     });
   }
 
-  // ── 디렉터 · 5개 프로파일이 실제로 판정되는가 ────────────────
+  // ── 디렉터 · 성향별로 다른 프로파일이 판정되는가 ─────────────
   {
-    const modes = ['safe', 'precise', 'reckless'];
+    const modes = ['safe', 'greedy', 'precise', 'sloppy'];
     const found = [];
+    const kindsBy = {};
     let maxSw = 0;
     for (const m of modes) {
-      const r = await drive(1000 / 60, 45, { mode: m });
+      const r = await drive(1000 / 60, 90, { mode: m });
       found.push(m + '→[' + r.state.profiles.join(',') + '] 전환' + r.state.switches + '회');
+      kindsBy[m] = r.state.draftKinds;
       if (r.state.switches > maxSw) maxSw = r.state.switches;
       for (const p of r.state.profiles) if (allProfiles.indexOf(p) < 0) allProfiles.push(p);
     }
@@ -484,8 +662,19 @@ async function run() {
     });
     results.push({
       gate: '디렉터 — 프로파일이 매 프레임 튀지 않는가',
-      detail: '45초 플레이 중 최대 전환 ' + maxSw + '회 (프레임 단위로 튀면 수백 회가 나온다)',
+      detail: '90초 플레이 중 최대 전환 ' + maxSw + '회 (프레임 단위로 튀면 수백 회가 나온다)',
       pass: maxSw <= 8,
+    });
+    // 제시되는 특성 3개의 성향이 실제로 갈리는가.
+    // 디렉터가 "판단했다"는 말이 화면 문구가 아니라 **제시 목록**으로 증명되는 지점이다.
+    const K = ['공격', '방어', '조작'];
+    const shown = modes.map((m) => m + ' ' + kindsBy[m].map((n, i) => K[i] + n).join('/'));
+    const sig = modes.map((m) => kindsBy[m].join(','));
+    const distinct = new Set(sig.filter((s) => s !== '0,0,0')).size;
+    results.push({
+      gate: '드래프트 — 성향별로 제시되는 특성 계열이 갈리는가',
+      detail: shown.join(' | ') + `  ·  서로 다른 제시 분포 ${distinct}종`,
+      pass: distinct >= 2,
     });
   }
 
@@ -508,13 +697,21 @@ async function run() {
       (l.startsWith('error') || l.startsWith('pageerror')) && l.indexOf('Failed to load resource') < 0);
     results.push({
       gate: '#10 LLM 폴백 — 차단',
-      detail: `30초 누적 착지 ${blocked.state.landed}, 치명 로그 ${warnOnly(blocked.logs).length}개`,
-      pass: blocked.state.landed > 0 && warnOnly(blocked.logs).length === 0,
+      detail: `30초 누적 주행 ${blocked.state.dist.toFixed(0)} (폴백 ${blocked.state.fallback}), ` +
+              `세 레인 동시 차단 ${blocked.state.rowsBlocked}개, 치명 로그 ${warnOnly(blocked.logs).length}개`,
+      pass: blocked.state.dist > 0 && blocked.state.rowsBlocked === 0 && warnOnly(blocked.logs).length === 0,
     });
     results.push({
       gate: '#10 LLM 폴백 — JSON 파손',
-      detail: `30초 누적 착지 ${corrupt.state.landed}, 치명 로그 ${warnOnly(corrupt.logs).length}개`,
-      pass: corrupt.state.landed > 0 && warnOnly(corrupt.logs).length === 0,
+      detail: `30초 누적 주행 ${corrupt.state.dist.toFixed(0)} (폴백 ${corrupt.state.fallback}), ` +
+              `세 레인 동시 차단 ${corrupt.state.rowsBlocked}개, 치명 로그 ${warnOnly(corrupt.logs).length}개`,
+      pass: corrupt.state.dist > 0 && corrupt.state.rowsBlocked === 0 && warnOnly(corrupt.logs).length === 0,
+    });
+    results.push({
+      gate: '계층2 — 구운 청크가 실제로 로드되는가',
+      detail: `정상 경로에서 라이브러리 ${a.state.library}개, 폴백 사용 ${a.state.fallback} ` +
+              `(차단 시 폴백 ${blocked.state.fallback} 으로 바뀌어야 한다)`,
+      pass: a.state.library > 0 && a.state.fallback === false && blocked.state.fallback === true,
     });
   }
 
