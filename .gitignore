@@ -2,3 +2,7 @@
 .env.*
 node_modules/
 .DS_Store
+
+# 스크린샷 하네스가 경로를 잘못 잡으면 여기 생긴다
+undefined/
+*.png
