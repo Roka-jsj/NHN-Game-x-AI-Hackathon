@@ -50,6 +50,21 @@ const DV_DENSITY = '  density';
 const DV_WATER = '  water';
 const DV_TELE = '  telegraph';
 
+// 판 평가 축 이름과 조언. 상수라 루프에서 문자열을 만들지 않는다.
+const GRADE_AXIS = ['거리', '최고 콤보', '완벽 회피', '코인', '무피격'];
+const GRADE_ADVICE = [
+  '더 멀리 — 물과의 거리를 벌려라',
+  '콤보를 잇는다 — 한 번 부딪히면 처음부터다',
+  '자세의 정점을 장애물에 맞춰라 — 그게 완벽이다',
+  '코인을 이어 먹어라 — 다섯 개마다 보너스가 붙는다',
+  '부딪히지 않는 것이 가장 크다',
+];
+
+const BAN_PERFECT_TXT = '완벽';
+const BAN_BOOST_TXT = '돌파';
+const BAN_LINE_TXT = '연속';
+const LABEL_BOOST = '돌파';
+
 const TOGGLE_SIZE = 44;
 const RUNG_SPACING = 150;              // 속도감을 만드는 가로 눈금 간격
 const TRACK_HALF = C.LANE_W * 1.5 + 46;
@@ -72,6 +87,31 @@ export class Renderer {
       this.skyPath.moveTo(x, 0);
       this.skyPath.lineTo(x, C.HORIZON_Y);
     }
+
+    // 지평선 위 도시 실루엣 두 겹. 패럴랙스로 서로 다른 속도로 흐른다.
+    // **이미지 파일 0개 규칙은 그대로다** — 사각형 몇 개로 만든다.
+    // 화면 폭의 두 배를 만들어 두고 통째로 밀면 이음매 없이 반복된다.
+    this.cityFar = this.buildCity(41, 26, 74, 0.62);
+    this.cityNear = this.buildCity(23, 44, 118, 1.0);
+    this.cityPhaseFar = 0;
+    this.cityPhaseNear = 0;
+  }
+
+  // 결정론적 스카이라인. Math.random 을 쓰면 프레임마다 바뀌므로 쓰지 않는다.
+  buildCity(n, minH, maxH, unused) {
+    const p = new Path2D();
+    const span = C.VIEW_W * 2;
+    let x = 0;
+    for (let i = 0; i < n; i++) {
+      // 해시 하나로 폭과 높이를 뽑는다. 같은 입력이면 언제나 같은 도시다.
+      const h1 = ((i * 2654435761) % 1000) / 1000;
+      const h2 = ((i * 40503 + 17) % 1000) / 1000;
+      const w = span / n * (0.6 + h1 * 0.9);
+      const h = minH + h2 * (maxH - minH);
+      p.rect(x, C.HORIZON_Y - h, w * 0.86, h);
+      x += w;
+    }
+    return p;
   }
 
   resize(viewScale) {
@@ -160,16 +200,102 @@ export class Renderer {
     ctx.lineWidth = C.STROKE;
     ctx.stroke(this.skyPath);
 
+    this.drawCity(game, alpha);
+
     if (game.state === S.STAIR) this.drawStairs(game, alpha);
     else this.drawTrack(game);
 
     this.drawPlayer(game, feel, px, foot);
     this.drawWater(game, alpha);
+    this.drawStreaks(game, feel);
 
     ctx.setTransform(s, 0, 0, s, 0, 0);
     this.drawHud(game, feel, director, directorView, muted);
+    this.drawBanner(feel);
     if (game.state === S.DRAFT) this.drawDraft(game, feel, director);
     if (game.state === S.DEAD) this.drawResult(game, feel, director);
+  }
+
+  // 지평선 위 도시. 두 겹이 다른 속도로 흘러 깊이가 생긴다.
+  // 러너의 화면을 2초 만에 이해시키는 건 트랙보다 이 배경이다.
+  drawCity(game, alpha) {
+    const ctx = this.ctx;
+    // 속도에 비례해 흐른다. travelled 를 그대로 쓰면 결정론이 유지된다.
+    const t = game.travelled + game.speed / C.SIM_HZ * alpha;
+    const far = -((t * 0.012) % C.VIEW_W);
+    const near = -((t * 0.030) % C.VIEW_W);
+
+    ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.85)];
+    ctx.save();
+    ctx.translate(far, 0);
+    ctx.fill(this.cityFar);
+    ctx.restore();
+
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.92)];
+    ctx.save();
+    ctx.translate(near, 0);
+    ctx.fill(this.cityNear);
+    ctx.restore();
+
+    // 지평선 한 줄. 도시와 트랙을 갈라 준다
+    ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.35)];
+    ctx.lineWidth = C.STROKE;
+    ctx.beginPath();
+    ctx.moveTo(0, C.HORIZON_Y);
+    ctx.lineTo(C.VIEW_W, C.HORIZON_Y);
+    ctx.stroke();
+  }
+
+  // 속도선 — 빠를 때만 보인다. 부스트에서 가장 강하다.
+  // 위치가 고정 배열이라 매 프레임 만드는 것이 없다.
+  drawStreaks(game, feel) {
+    const spd = game.speed / C.SPEED_MAX;
+    const boost = game.boostK();
+    const a = (spd - 0.55) * 1.4 + boost * 0.9;
+    if (a <= 0.02) return;
+    const ctx = this.ctx;
+    ctx.strokeStyle = boost > 0
+      ? C.RAMP_BONUS[C.rampIndex(a > 1 ? 0.75 : a * 0.75)]
+      : C.RAMP_PLAYER[C.rampIndex(a > 1 ? 0.28 : a * 0.28)];
+    ctx.lineWidth = boost > 0 ? C.STROKE * 1.5 : C.STROKE;
+    ctx.beginPath();
+    for (let i = 0; i < C.STREAK_MAX; i++) {
+      let y = feel.streakY[i] + feel.streakPhase;
+      if (y > 1) y -= 1;
+      const yy = C.HORIZON_Y + (C.VIEW_H - C.HORIZON_Y) * y;
+      const x = C.VP_X + feel.streakX[i] * C.VIEW_W;
+      ctx.moveTo(x, yy);
+      ctx.lineTo(x, yy + C.VIEW_H * feel.streakLen[i]);
+    }
+    ctx.stroke();
+  }
+
+  // 배너 — "완벽" 같은 짧은 글자가 떴다 사라진다.
+  // 문자열을 만들지 않는다. 코드로 상수를 고른다.
+  drawBanner(feel) {
+    if (feel.bannerFrames <= 0) return;
+    const ctx = this.ctx;
+    const t = 1 - feel.bannerFrames / feel.bannerTotal;
+    const rise = easeOutCubic(t < 1 ? t : 1);
+    const fade = t > 0.6 ? 1 - (t - 0.6) / 0.4 : 1;
+    const y = C.VIEW_H * 0.42 - rise * C.UNIT * 6;
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = FONT_MID;
+    if (feel.bannerCode === C.BAN_PERFECT) {
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(fade)];
+      ctx.fillText(BAN_PERFECT_TXT, HALF_W, y);
+    } else if (feel.bannerCode === C.BAN_BOOST) {
+      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(fade)];
+      ctx.fillText(BAN_BOOST_TXT, HALF_W, y);
+    } else {
+      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(fade)];
+      const w = this.drawNumber(feel.bannerVal, HALF_W - C.UNIT * 2, y, 22);
+      ctx.textAlign = 'left';
+      ctx.fillText(BAN_LINE_TXT, HALF_W - C.UNIT * 2 + w * 0.5 + 4, y);
+      ctx.textAlign = 'center';
+    }
   }
 
   // ── 러너 트랙 ───────────────────────────────────────────────
@@ -456,7 +582,8 @@ export class Renderer {
       ctx.fillText(game.combo >= C.COMBO_PUSH_AT ? LABEL_PUSH : LABEL_HOLD, HALF_W, C.UNIT * 16);
     }
 
-    // 획득한 특성 — 좌하단에 이름만
+    this.drawBoostGauge(game);
+
     // 획득 특성 — 우상단, AI 토글 아래. 트랙 위에 겹치지 않는다.
     ctx.textAlign = 'right';
     ctx.font = FONT_TINY;
@@ -472,6 +599,35 @@ export class Renderer {
     if (director && directorView) this.drawDirectorView(game, director);
     this.drawToggle(directorView);
     this.drawMute(muted);
+  }
+
+  // 부스트 게이지 — 화면 아래 가장자리. 물과 같은 쪽에 둔다.
+  // **차오르는 것이 둘**이고 하나는 나를 죽이고 하나는 나를 살린다.
+  // 같은 자리에서 자라야 그 대비가 읽힌다.
+  drawBoostGauge(game) {
+    const ctx = this.ctx;
+    const active = game.boostFrames > 0;
+    const k = active ? game.boostK() : game.boostFill();
+    if (k <= 0.001 && !active) return;
+
+    const w = C.VIEW_W - C.UNIT * 8;
+    const x = C.UNIT * 4;
+    const y = C.VIEW_H - C.UNIT * 4;
+    const h = C.UNIT;
+
+    ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.18)];
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = active ? C.COL_BONUS : C.RAMP_BONUS[C.rampIndex(0.55 + 0.45 * k)];
+    ctx.fillRect(x, y, w * k, h);
+
+    if (active) {
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.font = FONT_TINY;
+      ctx.fillStyle = C.COL_BONUS;
+      ctx.fillText(LABEL_BOOST, HALF_W, y - 3);
+      ctx.textBaseline = 'top';
+    }
   }
 
   drawToggle(on) {
@@ -620,12 +776,52 @@ export class Renderer {
     this.drawLeft(game.bestCombo, C.UNIT * 2, C.UNIT * 6, 10);
     ctx.fillText(director ? director.profileName : PROFILE_UNKNOWN, C.UNIT * 2, C.UNIT * 10);
 
+    this.drawGrade(game, e);
+
     ctx.textAlign = 'center';
     ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.65)];
-    ctx.fillText(LABEL_RETRY, 0, C.UNIT * 16);
+    ctx.fillText(LABEL_RETRY, 0, C.UNIT * 34);
 
     ctx.setTransform(s, 0, 0, s, 0, 0);
     ctx.textBaseline = 'top';
+  }
+
+  // 판 평가 — 점수 옆에 등급 하나, 아래에 다섯 축 막대.
+  // **점수는 얼마나 버텼는지만 말하고, 등급은 어떻게 플레이했는지를 말한다.**
+  // 그래서 다음 판의 목표가 여기서 생긴다. 좌표계는 drawResult 의 중앙 원점 그대로다.
+  drawGrade(game, e) {
+    const ctx = this.ctx;
+    const gi = game.gradeIndex();
+
+    // 등급 한 글자. 점수 오른쪽에 크게.
+    ctx.textAlign = 'left';
+    ctx.font = FONT_BIG;
+    ctx.fillStyle = gi <= 1 ? C.COL_BONUS : C.RAMP_PLAYER[C.rampIndex(0.85)];
+    ctx.fillText(C.GRADE_NAME[gi], C.UNIT * 11, -C.UNIT * 10);
+
+    // 다섯 축 막대
+    const bw = C.UNIT * 16;
+    const bh = C.UNIT * 1.2;
+    const x0 = -C.UNIT * 2;
+    let y = C.UNIT * 15;
+    ctx.font = FONT_TINY;
+    for (let i = 0; i < 5; i++) {
+      const v = game.gradeAxis(i);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
+      ctx.fillText(GRADE_AXIS[i], x0 - C.UNIT, y);
+      ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.2)];
+      ctx.fillRect(x0, y - bh * 0.5, bw, bh);
+      ctx.fillStyle = v >= 0.8 ? C.COL_BONUS : C.RAMP_PLAYER[C.rampIndex(0.35 + 0.5 * v)];
+      ctx.fillRect(x0, y - bh * 0.5, bw * v * e, bh);
+      y += C.UNIT * 3;
+    }
+
+    // 가장 약한 축 — "다음엔 이걸 해라"
+    ctx.textAlign = 'center';
+    ctx.font = FONT_SMALL;
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.8)];
+    ctx.fillText(GRADE_ADVICE[game.weakestAxis()], 0, C.UNIT * 30);
   }
 
   // ── 디렉터 뷰 — 디버그 오버레이가 아니라 제품 기능이다 ───────

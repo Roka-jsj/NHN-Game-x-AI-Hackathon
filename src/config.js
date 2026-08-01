@@ -119,6 +119,57 @@ export const COMBO_MULT_CAP = 6;
 export const NEAR_MISS_Z = 90;                // 이 거리 안으로 스치면 아슬아슬 회피
 export const NEAR_MISS_SCORE = 15;
 
+// ─── 부스트 게이지 ────────────────────────────────────────────
+// 서브웨이 서퍼의 호버보드, 템플런의 부스트가 하는 일을 이 게임의 문법으로 옮긴다.
+// **모으는 행위가 곧 위험을 감수하는 행위여야 한다.** 그래서 코인과 아슬아슬로만 찬다.
+// 거리로 차면 가만히 있어도 차오르고, 그러면 보상이 아니라 배급이 된다.
+//
+// 가득 차면 **자동으로 터진다.** 버튼을 하나 더 만들지 않는다 —
+// 이 게임의 동사는 좌/우/위/아래 넷뿐이고, 다섯 번째를 만드는 순간
+// 계단 구간과 충돌한다.
+export const BOOST_MAX = 100;
+export const BOOST_PER_COIN = 7;
+export const BOOST_PER_NEAR = 5;
+export const BOOST_PER_PERFECT = 9;
+export const BOOST_MS = 2600;                 // 지속
+export const BOOST_SPEED_MUL = 1.55;
+export const BOOST_WATER_PUSH = 260;          // 발동 순간 물이 이만큼 밀린다
+export const BOOST_SCORE_MUL = 2;
+export const BOOST_HIT_FREE = true;           // 부스트 중에는 부딪혀도 부서지고 지나간다
+
+// ─── 완벽 회피 ────────────────────────────────────────────────
+// 자세의 정점(0.5)에 장애물을 맞추면 완벽이다. 아슬아슬(가장자리)의 반대편이고,
+// **같은 행동의 숙련도 축**이다 — 초심자는 넘기만 하고 숙련자는 정점에 맞춘다.
+// 이게 있어야 "잘 피했다"와 "겨우 피했다"가 손에서 갈린다.
+export const PERFECT_WINDOW = 0.14;           // |phase − 0.5| 가 이 안이면 완벽
+export const PERFECT_SCORE = 60;
+
+// ─── 코인 라인 ────────────────────────────────────────────────
+// 연속으로 코인을 먹으면 보너스. 한 번 놓치면 끊긴다.
+// 코인을 "줍는 것"에서 "잇는 것"으로 바꾼다.
+export const COIN_LINE_AT = 5;
+export const COIN_LINE_SCORE = 120;
+
+// ─── 판 평가 (인게임 평론가) ──────────────────────────────────
+// 결과 화면에서 **그 판이 어땠는지**를 다섯 축으로 채점한다.
+// 점수는 "얼마나 오래 버텼나"만 말하는데, 그건 잘한 것과 운 좋은 것을 구분하지 못한다.
+// 등급은 **어떻게 플레이했는가**를 말한다 — 그래서 다음 판의 목표가 생긴다.
+//
+// 각 축은 0~1로 정규화한 뒤 가중 평균한다. 만점 기준은 봇 3분 측정에서 잡았다.
+export const GRADE_DIST_FULL = 2000;          // 이 거리(월드 단위/40=m)면 거리 만점
+export const GRADE_COMBO_FULL = 24;
+export const GRADE_PERFECT_FULL = 14;
+export const GRADE_COIN_FULL = 40;
+export const GRADE_W_DIST = 0.30;
+export const GRADE_W_COMBO = 0.22;
+export const GRADE_W_PERFECT = 0.22;
+export const GRADE_W_COIN = 0.16;
+export const GRADE_W_CLEAN = 0.10;            // 무피격 — 부딪힐수록 깎인다
+export const GRADE_CLEAN_PENALTY = 0.18;      // 피격 1회당
+// 등급 경계. S 는 흔하면 의미가 없다.
+export const GRADE_CUTS = [0.82, 0.66, 0.50, 0.32];   // S / A / B / C, 그 아래 D
+export const GRADE_NAME = ['S', 'A', 'B', 'C', 'D'];
+
 // ─── 게임필 ───────────────────────────────────────────────────
 // 전부 "시뮬레이션 프레임" 단위다. 렌더 프레임이 아니다.
 // 시뮬은 주사율과 무관하게 60Hz 고정이므로, 프레임 수로 세면
@@ -128,6 +179,8 @@ export const HITSTOP_NEAR = 3;
 export const HITSTOP_HIT = 8;
 export const HITSTOP_STAIR = 3;
 export const HITSTOP_DEATH = 8;
+export const HITSTOP_PERFECT = 4;
+export const HITSTOP_BOOST = 6;
 
 export const DEATH_SLOW_FRAMES = 24;          // 400ms
 export const DEATH_SLOW_RATE = 0.15;
@@ -138,6 +191,7 @@ export const SHAKE_NEAR = 3;
 export const SHAKE_HIT = 12;
 export const SHAKE_STAIR = 4;
 export const SHAKE_DEATH = 14;
+export const SHAKE_BOOST = 9;
 export const SHAKE_DECAY = 0.85;
 export const SHAKE_ROT_DEATH = 0.02;
 export const SHAKE_WATER_MAX = 1.6;
@@ -160,6 +214,8 @@ export const PART_COIN = 6;
 export const PART_NEAR = 4;
 export const PART_HIT = 16;
 export const PART_DEATH = 24;
+export const PART_PERFECT = 8;
+export const PART_BOOST = 20;
 export const PART_GRAVITY = 0.42;
 
 export const TRAIL_MAX = 32;
@@ -181,6 +237,15 @@ export const STAIR_STEP_SCORE = 40;
 // **어떤 3개를 제시할지가 곧 디렉터의 판단이다.**
 export const TRAIT_OFFER = 3;
 export const DRAFT_UI_MS = 260;
+
+// ─── 배너 · 속도선 ────────────────────────────────────────────
+// 배너는 문자열을 만들지 않는다. 코드만 넘기고 렌더가 상수 문자열을 고른다.
+export const BANNER_MS = 800;
+export const BAN_PERFECT = 0;
+export const BAN_LINE = 1;
+export const BAN_BOOST = 2;
+export const STREAK_MAX = 14;
+export const FLASH_FRAMES = 4;
 
 // 계열: 0 = 공격, 1 = 방어, 2 = 조작
 export const TRAITS = [

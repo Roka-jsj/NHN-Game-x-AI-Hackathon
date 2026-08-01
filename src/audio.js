@@ -24,6 +24,9 @@ export class Audio {
     this.waterGain = null;
     this.runOsc = null;
     this.runGain = null;
+
+    // BGM 층. 전부 지속 노드다 — 만들고 나면 게인·주파수만 만진다.
+    this.bgm = null;
   }
 
   // 첫 사용자 제스처에서 반드시 불려야 한다.
@@ -41,6 +44,7 @@ export class Audio {
         this.buildNoise();
         this.buildWaterLoop();
         this.buildRunDrone();
+        this.buildMusic();
         // 전화 수신 등으로 다시 suspended 로 돌아가는 경우도 처리한다
         this.ctx.onstatechange = () => {
           if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
@@ -95,6 +99,102 @@ export class Audio {
     this.runGain = g;
   }
 
+  // ── 배경음악 ────────────────────────────────────────────────
+  // **오디오 파일 0개 규칙을 지키면서** 음악을 만든다. 그런데 박자를 내려면
+  // 보통 박마다 노드를 만들어야 하고, 그건 "루프 안에서 노드를 만들지 않는다"는
+  // 규칙과 정면으로 부딪힌다.
+  //
+  // 그래서 **박자를 LFO로 만든다.** 저주파 오실레이터가 게인을 여닫으면
+  // 음이 끊겨 들리고, 그게 곧 리듬이다. 노드는 unlock 에서 한 번 만들고 끝이며
+  // 이후로는 주파수와 게인만 연속 제어한다. 매 프레임 할당이 0이다.
+  //
+  // 층은 넷이다. **음악이 곧 상태 표시가 된다** — 눈으로 보기 전에 귀로 안다.
+  //   0 베이스   항상. 템포가 속도를 따라간다
+  //   1 아르페지오 콤보 티어가 오르면 열린다
+  //   2 긴장 패드 물이 가까워지면 열린다 (불협 5도)
+  //   3 리드     계단·부스트 구간에서만
+  buildMusic() {
+    const ctx = this.ctx;
+    const bus = ctx.createGain();
+    bus.gain.value = 0;
+    bus.connect(this.master);
+
+    const layer = (type, freq, cut) => {
+      const osc = ctx.createOscillator();
+      osc.type = type;
+      osc.frequency.value = freq;
+      const lfo = ctx.createOscillator();     // 박자를 만드는 저주파
+      lfo.type = 'square';
+      lfo.frequency.value = 2;
+      const lfoAmp = ctx.createGain();
+      lfoAmp.gain.value = 0.5;
+      const gate = ctx.createGain();
+      gate.gain.value = 0.5;                  // LFO 가 ±0.5 로 흔들어 0~1 이 된다
+      lfo.connect(lfoAmp); lfoAmp.connect(gate.gain);
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = cut;
+      const out = ctx.createGain();
+      out.gain.value = 0;
+      osc.connect(gate); gate.connect(lp); lp.connect(out); out.connect(bus);
+      osc.start(0); lfo.start(0);
+      return { osc, lfo, out, lp };
+    };
+
+    this.bgm = {
+      bus,
+      // 단조 5음 위에 쌓는다. 물에 잠기는 게임에 장조는 어울리지 않는다.
+      bass: layer('triangle', 82.41, 400),      // E2
+      arp:  layer('square', 329.63, 1600),      // E4
+      pad:  layer('sawtooth', 246.94, 700),     // B3
+      lead: layer('triangle', 493.88, 2400),    // B4
+      step: 0,
+    };
+    // 아르페지오와 리드는 베이스보다 잘게 쪼갠다 — 층이 겹칠수록 촘촘해진다
+    this.bgm.arp.lfo.frequency.value = 8;
+    this.bgm.pad.lfo.frequency.value = 0.5;
+    this.bgm.lead.lfo.frequency.value = 6;
+  }
+
+  // 음악 층을 상태에 맞춘다. 매 프레임 불리지만 노드를 만들지 않는다.
+  updateMusic(game, t) {
+    const m = this.bgm;
+    if (!m) return;
+    const S_STAIR = 1, S_DRAFT = 2, S_DEAD = 3;
+    const dead = game.state === S_DEAD;
+    const draft = game.state === S_DRAFT;
+    const stair = game.state === S_STAIR;
+
+    // 전체 볼륨 — 죽으면 내리고, 드래프트에서는 반쯤 낮춰 생각할 여지를 준다
+    m.bus.gain.setTargetAtTime(dead ? 0 : (draft ? 0.10 : 0.20), t, 0.25);
+
+    // 템포는 속도를 따라간다. 빨라지는 것이 귀로 먼저 들린다.
+    const spd = game.speed / C.SPEED_MAX;
+    const beat = 2.2 + 2.2 * spd;
+    m.bass.lfo.frequency.setTargetAtTime(beat, t, 0.3);
+    m.arp.lfo.frequency.setTargetAtTime(beat * 4, t, 0.3);
+    m.lead.lfo.frequency.setTargetAtTime(beat * 3, t, 0.3);
+
+    // 층 0 — 베이스는 항상. 부스트 중에는 한 옥타브 올라간다
+    const boost = game.boostFrames > 0;
+    m.bass.osc.frequency.setTargetAtTime(boost ? 164.81 : 82.41, t, 0.08);
+    m.bass.out.gain.setTargetAtTime(dead ? 0 : 0.16, t, 0.2);
+
+    // 층 1 — 콤보 티어가 오르면 열린다. 잘 하고 있으면 음악이 두꺼워진다
+    const tier = Math.min(4, game.comboTier());
+    m.arp.out.gain.setTargetAtTime(dead ? 0 : 0.03 * tier, t, 0.25);
+    m.arp.lp.frequency.setTargetAtTime(900 + 500 * tier, t, 0.3);
+
+    // 층 2 — 물이 가까워지면 불협 5도가 깔린다. 시각 경고보다 먼저 느껴져야 한다
+    const near = game.waterNear();
+    m.pad.out.gain.setTargetAtTime(dead ? 0 : near * near * 0.13, t, 0.2);
+    m.pad.osc.frequency.setTargetAtTime(246.94 * (1 - 0.03 * near), t, 0.3);
+
+    // 층 3 — 계단과 부스트에서만. 규칙이 바뀐 것을 귀로도 안다
+    m.lead.out.gain.setTargetAtTime((stair || boost) && !dead ? 0.09 : 0, t, 0.12);
+    m.lead.osc.frequency.setTargetAtTime(stair ? 587.33 : 493.88, t, 0.1);
+  }
+
   setMuted(m) {
     this.muted = m;
     if (this.master) this.master.gain.value = m ? 0 : MASTER_CAP;
@@ -106,6 +206,7 @@ export class Audio {
     const t = this.ctx.currentTime;
     this.runGain.gain.setTargetAtTime(0, t, 0.02);
     this.waterGain.gain.setTargetAtTime(0, t, 0.02);
+    if (this.bgm) this.bgm.bus.gain.setTargetAtTime(0, t, 0.02);
   }
 
   // 같은 소리를 연속 재생할 때 ±3% 피치 변화. 안 하면 기계처럼 들린다.
@@ -161,6 +262,8 @@ export class Audio {
     // 물 근접 — 0 → 0.16 을 근접도에 비례해 연속 제어
     const near = game.waterNear();
     this.waterGain.gain.setTargetAtTime(near * near * 0.16, t, 0.08);
+
+    this.updateMusic(game, t);
   }
 
   // ── 상태 전이에 붙는다. 전이 타이밍을 바꾸지 않는다 ──────────
@@ -251,6 +354,31 @@ export class Audio {
       case EV.DEATH:
         // 화이트노이즈 + 로우패스 800 → 80Hz 스윕, 800ms
         this.noise(800, 0.22, 800, 80, 'lowpass');
+        break;
+
+      case EV.PERFECT:
+        // 완벽 — 맑은 5도. 아슬아슬의 마찰음과 정반대의 질감이어야 한다
+        this.blip('sine', 1046.5, 1046.5, 70, 0.09, 0);
+        this.blip('sine', 1568, 1568, 110, 0.08, 0.05);
+        break;
+
+      case EV.COIN_LINE:
+        this.blip('sine', 1318.5, 1975.5, 160, 0.11, 0);
+        break;
+
+      case EV.BOOST_START:
+        // 상승 스윕 — 뭔가 열렸다는 신호
+        this.blip('sawtooth', 160, 880, 420, 0.13, 0);
+        this.noise(420, 0.10, 400, 5000, 'highpass');
+        break;
+
+      case EV.BOOST_SMASH:
+        this.noise(120, 0.14, 3000, 600, 'bandpass');
+        this.blip('square', 260, 120, 90, 0.10, 0);
+        break;
+
+      case EV.BOOST_END:
+        this.blip('sine', 660, 330, 260, 0.07, 0);
         break;
 
       case EV.RESET:

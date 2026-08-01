@@ -36,6 +36,12 @@ export const EV = {
   RECORD: 16,
   DEATH: 17,
   RESET: 18,
+  PERFECT: 19,      // 자세의 정점으로 넘었다
+  BOOST_READY: 20,  // 게이지가 찼다
+  BOOST_START: 21,
+  BOOST_END: 22,
+  BOOST_SMASH: 23,  // 부스트 중 장애물을 부수고 지나갔다
+  COIN_LINE: 24,    // a = 이어 먹은 개수
 };
 
 // 디렉터가 없을 때 쓰는 고정 트랙 패턴. 12행이 반복된다.
@@ -75,6 +81,7 @@ export class Game {
     this.bestScore = 0;
     this.bestDist = 0;
     this.bestCombo = 0;
+    this.bestGrade = 4;
     this.runs = 0;
 
     // main 이 프레임 시작에서 심어주는 시각 기준점
@@ -111,6 +118,7 @@ export class Game {
         if (this.supplier) this.supplier.fillRow(this, n, base);
         else this.fallbackRow(n, base);
         this.enforceActionSpacing(n, base);
+        this.enforceLaneContinuity(n, base);
       }
       this.rowMade = n;
     }
@@ -141,6 +149,31 @@ export class Game {
         if (po === C.OB_LOW || po === C.OB_BEAM) { this._rowOb[base + l] = 0; break; }
       }
     }
+  }
+
+  // 기둥은 자세로 못 넘는다 — 레인을 바꾸는 수밖에 없다.
+  // 그런데 연속한 두 행이 각각 레인 이동을 강요하면, 최고 속도에서 행 간격은
+  // 316ms 인데 이동 하나가 130ms 라 두 번을 연달아 넣을 수가 없다.
+  //
+  // 실제로 그렇게 됐다. 봇의 3분 피격 8건이 **전부 동일했다** —
+  // 288m, 최고속 760, 기둥, 레인 2, 이동 중이 아님. 앞 행이 레인 2를 강요하고
+  // 다음 행이 레인 2를 막은 배치였다. 어떻게 눌러도 못 지나간다.
+  //
+  // 그래서 **머무를 수 있는 길을 규칙으로 보장한다** — 직전 행에서 서 있을 수
+  // 있었던 레인 중 최소 하나는 이번 행에서도 기둥이 아니어야 한다.
+  // 점프·슬라이드 간격을 MIN_ACTION_ROWS 로 막은 것과 같은 종류의 안전판이고,
+  // 기둥만 이 규칙에서 빠져 있었다.
+  enforceLaneContinuity(n, base) {
+    if (n <= 0) return;
+    const pbase = ((n - 1) % C.ROW_POOL) * C.LANE_COUNT;
+    for (let l = 0; l < C.LANE_COUNT; l++) {
+      if (this._rowOb[pbase + l] !== C.OB_PILLAR && this._rowOb[base + l] !== C.OB_PILLAR) return;
+    }
+    // 없다 — 직전 행에서 통과 가능했던 레인 하나를 연다
+    for (let l = 0; l < C.LANE_COUNT; l++) {
+      if (this._rowOb[pbase + l] !== C.OB_PILLAR) { this._rowOb[base + l] = C.OB_NONE; return; }
+    }
+    this._rowOb[base] = C.OB_NONE;
   }
 
   // 계단 구간 진입 직전·직후는 비운다
@@ -189,8 +222,20 @@ export class Game {
     this.coins = 0;
     this.hits = 0;
     this.nearMisses = 0;
+    this.perfects = 0;
     this.jumps = 0;
     this.slides = 0;
+    this.smashed = 0;
+
+    // 부스트 — 코인과 아슬아슬로만 찬다
+    this.boost = 0;
+    this.boostFrames = 0;
+    this.boostTotal = Math.round(C.BOOST_MS / C.SIM_DT);
+    this.boosts = 0;
+
+    // 코인 라인 — 연속으로 이어 먹은 개수. 코인이 있던 행을 그냥 지나치면 끊긴다
+    this.coinLine = 0;
+    this.coinLineBest = 0;
 
     // 계단
     this.nextStairDist = C.STAIR_FIRST_DIST;
@@ -379,6 +424,7 @@ export class Game {
     const step = C.COMBO_MULT_STEP * (this.has('chain') ? 1.5 : 1);
     let m = 1 + this.combo * step;
     if (m > C.COMBO_MULT_CAP) m = C.COMBO_MULT_CAP;
+    if (this.boostFrames > 0) m *= C.BOOST_SCORE_MUL;
     if (this.has('gambler')) m *= 2;
     return m;
   }
@@ -388,7 +434,80 @@ export class Game {
     const t = clamp(this.travelled / C.SPEED_RAMP_DIST, 0, 1);
     let s = C.SPEED_BASE + (C.SPEED_MAX - C.SPEED_BASE) * t;
     if (this.has('sprint')) s *= 1.15;
+    if (this.boostFrames > 0) s *= C.BOOST_SPEED_MUL;
     return s;
+  }
+
+  // ── 부스트 ──────────────────────────────────────────────────
+  // 코인과 아슬아슬로만 찬다. 거리로 차면 가만히 있어도 차오르고,
+  // 그러면 보상이 아니라 배급이 된다.
+  //
+  // 발동은 자동이다. 이 게임의 동사는 좌/우/위/아래 넷뿐이고,
+  // 다섯 번째를 만드는 순간 계단 구간의 좌/우와 충돌한다.
+  addBoost(v) {
+    if (this.boostFrames > 0) return;          // 쓰는 동안에는 안 찬다
+    this.boost += v;
+    if (this.boost < C.BOOST_MAX) return;
+    this.boost = C.BOOST_MAX;
+    this.startBoost();
+  }
+
+  startBoost() {
+    this.boost = 0;
+    this.boostFrames = this.boostTotal;
+    this.boosts++;
+    this.stumble = 0;                          // 비틀거림을 끊고 튀어나간다
+    this.gap += C.BOOST_WATER_PUSH;            // 발동 순간 물이 밀린다
+    this.emit(EV.BOOST_START, 0, 0);
+  }
+
+  stepBoost() {
+    if (this.boostFrames <= 0) return;
+    this.boostFrames--;
+    if (this.boostFrames === 0) this.emit(EV.BOOST_END, 0, 0);
+  }
+
+  boostK() { return this.boostFrames > 0 ? this.boostFrames / this.boostTotal : 0; }
+  boostFill() { return this.boost / C.BOOST_MAX; }
+
+  // ── 판 평가 ─────────────────────────────────────────────────
+  // 점수는 "얼마나 오래 버텼나"만 말한다. 그건 잘한 것과 운 좋은 것을 구분하지 못한다.
+  // 등급은 **어떻게 플레이했는가**를 말하고, 그래서 다음 판의 목표가 된다.
+  //
+  // 다섯 축 전부 결정론적이다. 같은 판이면 같은 등급이 나온다.
+  gradeAxis(i) {
+    switch (i) {
+      case 0: return clamp(this.meters() / C.GRADE_DIST_FULL, 0, 1);
+      case 1: return clamp(this.comboBest / C.GRADE_COMBO_FULL, 0, 1);
+      case 2: return clamp(this.perfects / C.GRADE_PERFECT_FULL, 0, 1);
+      case 3: return clamp(this.coins / C.GRADE_COIN_FULL, 0, 1);
+      default: return clamp(1 - this.hits * C.GRADE_CLEAN_PENALTY, 0, 1);
+    }
+  }
+
+  gradeScore() {
+    return this.gradeAxis(0) * C.GRADE_W_DIST
+         + this.gradeAxis(1) * C.GRADE_W_COMBO
+         + this.gradeAxis(2) * C.GRADE_W_PERFECT
+         + this.gradeAxis(3) * C.GRADE_W_COIN
+         + this.gradeAxis(4) * C.GRADE_W_CLEAN;
+  }
+
+  // 0=S … 4=D
+  gradeIndex() {
+    const g = this.gradeScore();
+    for (let i = 0; i < C.GRADE_CUTS.length; i++) if (g >= C.GRADE_CUTS[i]) return i;
+    return C.GRADE_CUTS.length;
+  }
+
+  // 가장 약한 축. "다음엔 이걸 해라"가 된다.
+  weakestAxis() {
+    let worst = 0, wv = 2;
+    for (let i = 0; i < 5; i++) {
+      const v = this.gradeAxis(i);
+      if (v < wv) { wv = v; worst = i; }
+    }
+    return worst;
   }
 
   comboWaterMul() {
@@ -430,6 +549,8 @@ export class Game {
 
     if (this.state === S.DRAFT) { this.draftFrames++; return; }
     if (this.state === S.DEAD) return;
+
+    this.stepBoost();
 
     const base = this.baseSpeed();
     let moveSpeed = base;
@@ -544,12 +665,27 @@ export class Game {
           this.score += (C.COIN_SCORE * (this.has('collector') ? 2 : 1) * this.mult()) | 0;
           // b = 바깥 레인에서 챙겼는가. 디렉터의 greed 지표가 이걸 본다.
           this.emit(EV.COIN, 0, this.effLane() === 1 ? 0 : 1);
+          this.addBoost(C.BOOST_PER_COIN);
+          this.coinLine++;
+          if (this.coinLine > this.coinLineBest) this.coinLineBest = this.coinLine;
+          if (this.coinLine % C.COIN_LINE_AT === 0) {
+            this.score += (C.COIN_LINE_SCORE * this.mult()) | 0;
+            this.emit(EV.COIN_LINE, this.coinLine, 0);
+          }
         }
       }
 
       // 장애물 판정은 행이 플레이어 평면을 지나는 순간 한 번만
       if (z > 0) continue;
       this._rowDone[slot] = 1;
+      // 코인이 있었는데 하나도 못 먹었으면 라인이 끊긴다.
+      // 줍는 것이 아니라 **잇는 것**이 되게 하는 규칙이다.
+      let had = 0, got = 0;
+      for (let l = 0; l < C.LANE_COUNT; l++) {
+        const ci = slot * C.LANE_COUNT + l;
+        if (this._rowCoin[ci]) { had++; if (this._rowTaken[ci]) got++; }
+      }
+      if (had > 0 && got === 0) this.coinLine = 0;
       this.resolveRow(slot);
     }
   }
@@ -580,6 +716,23 @@ export class Game {
       // 도박꾼의 **가장 도박다운 행동** — 넘어야 하는 레인에 코인 때문에
       // 막판에 끼어드는 것 — 이 지표에 하나도 안 잡히고 있었다.
       this.reward(1, (edge || this.tick - this.lastShiftTick <= C.NEAR_SHIFT_FRAMES) ? 1 : 0);
+      // 정점(0.5)에 맞췄으면 완벽이다. 아슬아슬의 반대편이고 **같은 행동의 숙련도 축**이다.
+      // 이게 있어야 "잘 피했다"와 "겨우 피했다"가 손에서 갈린다.
+      if (Math.abs(phase - 0.5) <= C.PERFECT_WINDOW) {
+        this.perfects++;
+        this.score += (C.PERFECT_SCORE * this.mult()) | 0;
+        this.addBoost(C.BOOST_PER_PERFECT);
+        this.emit(EV.PERFECT, ob, 0);
+      }
+      return;
+    }
+    // 부스트 중에는 부딪히지 않는다. 뚫고 지나간다 — 그게 부스트의 값어치다.
+    if (C.BOOST_HIT_FREE && this.boostFrames > 0) {
+      this.smashed++;
+      this.combo++;
+      if (this.combo > this.comboBest) this.comboBest = this.combo;
+      this.score += (C.NEAR_MISS_SCORE * 2 * this.mult()) | 0;
+      this.emit(EV.BOOST_SMASH, ob, 0);
       return;
     }
     this.takeHit(ob);
@@ -599,6 +752,7 @@ export class Game {
     this.combo++;
     if (this.combo > this.comboBest) this.comboBest = this.combo;
     this.nearMisses += daring;
+    if (daring) this.addBoost(C.BOOST_PER_NEAR);
     this.score += (C.NEAR_MISS_SCORE * adjacent * this.mult()) | 0;
     this.emit(EV.NEAR_MISS, adjacent, daring);
     this.emit(EV.COMBO, this.combo, this.comboTier());
@@ -613,6 +767,8 @@ export class Game {
     this.hits++;
     if (this.combo > 0) this.emit(EV.COMBO_BREAK, this.combo, 0);
     this.combo = 0;
+    this.coinLine = 0;
+    this.boost = 0;              // 부딪히면 모아둔 것을 잃는다
     this.stumble = Math.round(C.STUMBLE_MS / C.SIM_DT);
     this.vstate = V.GROUND;
     this.footY = 0;
@@ -622,6 +778,7 @@ export class Game {
 
   die() {
     this.deathTick = this.tick;
+    if (this.gradeIndex() < this.bestGrade) this.bestGrade = this.gradeIndex();
     if (this.score > this.bestScore) this.bestScore = this.score;
     if (this.travelled > this.bestDist) this.bestDist = this.travelled;
     if (this.comboBest > this.bestCombo) this.bestCombo = this.comboBest;

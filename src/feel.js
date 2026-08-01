@@ -65,6 +65,25 @@ export class Feel {
     this.resultSteps = Math.max(1, Math.round(C.RESULT_UI_MS / C.SIM_DT));
     this.flashFrames = 0;
     this.lastTier = 0;
+
+    // 배너 — "완벽" · "5연속" 처럼 짧게 떴다 사라지는 글자.
+    // 문자열을 만들지 않기 위해 **코드만** 들고 있고 그리기는 렌더가 고른다.
+    this.bannerCode = -1;
+    this.bannerVal = 0;
+    this.bannerFrames = 0;
+    this.bannerTotal = Math.max(1, Math.round(C.BANNER_MS / C.SIM_DT));
+
+    // 속도선 — 부스트·고속에서 화면 가장자리를 스치는 선.
+    // 위치는 고정 배열이고 매 프레임 세로로만 흐른다. 할당 0.
+    this.streakY = new Float32Array(C.STREAK_MAX);
+    this.streakX = new Float32Array(C.STREAK_MAX);
+    this.streakLen = new Float32Array(C.STREAK_MAX);
+    for (let i = 0; i < C.STREAK_MAX; i++) {
+      this.streakX[i] = (i % 2 === 0 ? -1 : 1) * (0.32 + 0.16 * ((i * 7 % 5) / 5));
+      this.streakY[i] = (i / C.STREAK_MAX);
+      this.streakLen[i] = 0.05 + 0.09 * ((i * 3 % 7) / 7);
+    }
+    this.streakPhase = 0;
   }
 
   // 탭 전환 복귀 시 호출. 히트스톱·셰이크가 누적되어 터지는 걸 막는다.
@@ -75,6 +94,13 @@ export class Feel {
     this.shakeMag = 0; this.shakeRotMag = 0;
     this.shakeX = 0; this.shakeY = 0; this.shakeA = 0;
     this.flashFrames = 0;
+    this.bannerFrames = 0;
+  }
+
+  banner(code, val) {
+    this.bannerCode = code;
+    this.bannerVal = val;
+    this.bannerFrames = this.bannerTotal;
   }
 
   reset() {
@@ -123,6 +149,12 @@ export class Feel {
   step(game) {
     this.decayShake();
     if (this.flashFrames > 0) this.flashFrames--;
+    if (this.bannerFrames > 0) this.bannerFrames--;
+
+    // 속도선은 속도와 부스트에 비례해 흐른다
+    const spd = game.speed / C.SPEED_MAX;
+    this.streakPhase += 0.012 + 0.05 * spd + (game.boostFrames > 0 ? 0.06 : 0);
+    if (this.streakPhase > 1) this.streakPhase -= 1;
 
     if (this.tweenStep < this.tweenSteps) {
       this.tweenStep++;
@@ -260,6 +292,33 @@ export class Feel {
         this.addShake(C.SHAKE_DEATH, C.SHAKE_ROT_DEATH);
         this.burst(game.worldX, game.footY + 50, C.PART_DEATH, 2);
         this.resultStep = 0;
+        break;
+
+      case EV.PERFECT:
+        // 완벽 — 충돌과 정반대의 감촉이어야 한다. 짧고 가볍고 흰색.
+        this.freezeFrames = C.HITSTOP_PERFECT;
+        this.ring(game.worldX, game.footY + C.PLAYER_H * 0.5);
+        this.burst(game.worldX, game.footY + 40, C.PART_PERFECT, 0);
+        this.banner(C.BAN_PERFECT, 0);
+        break;
+
+      case EV.COIN_LINE:
+        this.burst(game.worldX, C.COIN_H, C.PART_COIN * 2, 1);
+        this.banner(C.BAN_LINE, a);
+        break;
+
+      case EV.BOOST_START:
+        this.freezeFrames = C.HITSTOP_BOOST;
+        this.addShake(C.SHAKE_BOOST, 0);
+        this.flashFrames = C.FLASH_FRAMES;
+        this.ring(game.worldX, game.footY + C.PLAYER_H * 0.5);
+        this.burst(game.worldX, game.footY + 40, C.PART_BOOST, 0);
+        this.banner(C.BAN_BOOST, 0);
+        break;
+
+      case EV.BOOST_SMASH:
+        this.addShake(C.SHAKE_NEAR * 1.6, 0);
+        this.burst(game.worldX, game.footY + 60, C.PART_HIT, 2);
         break;
 
       case EV.RESET:
