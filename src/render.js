@@ -130,13 +130,18 @@ export class Renderer {
     return total;
   }
 
-  // 논리 좌표가 디렉터 뷰 토글 안에 있는가. main 의 포인터 핸들러가 쓴다.
+  // 논리 좌표가 토글 안에 있는가. main 의 포인터 핸들러가 쓴다.
+  // 토글 입력은 게임 입력 큐로 들어가지 않는다 — 누른다고 점프하면 안 된다.
   static hitToggle(lx, ly) {
     return lx >= C.VIEW_W - TOGGLE_SIZE - C.UNIT * 2 && lx <= C.VIEW_W
         && ly >= 0 && ly <= TOGGLE_SIZE + C.UNIT * 2;
   }
+  static hitMute(lx, ly) {
+    return lx >= 0 && lx <= TOGGLE_SIZE + C.UNIT * 2
+        && ly >= 0 && ly <= TOGGLE_SIZE + C.UNIT * 2;
+  }
 
-  draw(game, feel, alpha, director, directorView) {
+  draw(game, feel, alpha, director, directorView, muted) {
     const ctx = this.ctx;
     const s = this.viewScale;
 
@@ -429,6 +434,7 @@ export class Renderer {
 
     if (director && directorView) this.drawDirectorView(game, director);
     this.drawToggle(directorView);
+    this.drawMute(muted);
 
     if (game.state === S.DEAD && feel.resultStep >= 0) {
       const t = feel.resultStep / feel.resultSteps;
@@ -482,6 +488,35 @@ export class Renderer {
     ctx.textBaseline = 'middle';
     ctx.fillText(LABEL_AI, C.VIEW_W - TOGGLE_SIZE * 0.5 - C.UNIT, C.UNIT + TOGGLE_SIZE * 0.5);
     ctx.textBaseline = 'top';
+  }
+
+  // 음소거 토글 — 좌상단. 심사자가 사무실에서 열 수도 있다.
+  // 상태는 메모리에만 둔다 (localStorage 금지).
+  drawMute(on) {
+    const ctx = this.ctx;
+    const a = on ? 0.28 : 0.75;
+    ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(a)];
+    ctx.lineWidth = C.STROKE;
+    ctx.strokeRect(C.UNIT, C.UNIT, TOGGLE_SIZE, TOGGLE_SIZE);
+    const cx = C.UNIT + TOGGLE_SIZE * 0.5;
+    const cy = C.UNIT + TOGGLE_SIZE * 0.5;
+    // 스피커 — 사각형 하나와 삼각형 하나. 도형만으로 만든다
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(a)];
+    ctx.fillRect(cx - 9, cy - 4, 6, 8);
+    ctx.beginPath();
+    ctx.moveTo(cx - 3, cy - 4);
+    ctx.lineTo(cx + 3, cy - 9);
+    ctx.lineTo(cx + 3, cy + 9);
+    ctx.lineTo(cx - 3, cy + 4);
+    ctx.closePath();
+    ctx.fill();
+    if (on) {
+      // 음소거 상태는 사선 하나로 표시한다
+      ctx.beginPath();
+      ctx.moveTo(cx - 10, cy - 10);
+      ctx.lineTo(cx + 10, cy + 10);
+      ctx.stroke();
+    }
   }
 
   // ── 디렉터 뷰 ──────────────────────────────────────────────

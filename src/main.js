@@ -11,6 +11,7 @@ import { Game } from './game.js';
 import { Feel } from './feel.js';
 import { Renderer } from './render.js';
 import { Director } from './director.js';
+import { Audio } from './audio.js';
 
 const stage = document.getElementById('stage');
 const canvas = document.getElementById('game');
@@ -20,11 +21,14 @@ const game = new Game();
 const feel = new Feel();
 const renderer = new Renderer(canvas, ctx);
 const director = new Director(game);
+const audio = new Audio();
 let directorView = false;
+let muted = false;
 
 game.onEvent = (type, a, b) => {
   feel.onEvent(type, a, b, game);
   director.onEvent(type, a, b, game);
+  audio.onEvent(type, a, b, game);
 };
 
 // Game 은 생성자에서 이미 한 판을 차렸다. 그때는 디렉터가 없었으므로
@@ -57,13 +61,18 @@ function clearQueue() { qHead = 0; qTail = 0; qCount = 0; }
 // click 은 쓰지 않는다. 지연이 있다.
 stage.addEventListener('pointerdown', (e) => {
   e.preventDefault();
-  // 디렉터 뷰 토글은 게임 입력이 아니다. 큐에 넣지 않고 여기서 걸러낸다.
+  // iOS 는 첫 사용자 제스처 안에서 resume() 해야 소리가 난다.
+  // 핸들러 밖(프레임 루프)에서 부르면 제스처 문맥이 아니라 무음이 된다.
+  audio.unlock();
+
+  // 토글은 게임 입력이 아니다. 큐에 넣지 않고 여기서 걸러낸다.
   // getBoundingClientRect 는 입력 순간에만 부른다 — 루프 안이 아니다.
   const r = canvas.getBoundingClientRect();
   if (r.width > 0 && r.height > 0) {
     const lx = (e.clientX - r.left) / r.width * C.VIEW_W;
     const ly = (e.clientY - r.top) / r.height * C.VIEW_H;
     if (Renderer.hitToggle(lx, ly)) { directorView = !directorView; return; }
+    if (Renderer.hitMute(lx, ly)) { muted = !muted; audio.setMuted(muted); return; }
   }
   enqueue(IN_DOWN, e.timeStamp);
 }, { passive: false });
@@ -141,6 +150,7 @@ document.addEventListener('visibilitychange', () => {
     clearQueue();
     game.cancelCharge();      // 복귀 시 30분짜리 차지가 되지 않게
     feel.clearTransient();    // 히트스톱·셰이크가 누적되어 터지지 않게
+    audio.stopCharge();       // 차지 톤이 배경에서 계속 울리지 않게
   } else {
     paused = false;
     needsTimeReset = true;    // 누산기 리셋은 다음 프레임에서
@@ -155,7 +165,7 @@ function frame(nowWall) {
     accumulator = 0;
     firstFrame = false;
     needsTimeReset = false;
-    renderer.draw(game, feel, 0, director, directorView);
+    renderer.draw(game, feel, 0, director, directorView, muted);
     return;
   }
   if (paused) { lastWall = nowWall; return; }
@@ -195,7 +205,8 @@ function frame(nowWall) {
     if (++steps >= C.MAX_STEPS_PER_FRAME) { accumulator = 0; break; }
   }
 
-  renderer.draw(game, feel, accumulator / C.SIM_DT, director, directorView);
+  audio.update(game);   // 연속 파라미터만 만진다. 노드를 만들지 않는다
+  renderer.draw(game, feel, accumulator / C.SIM_DT, director, directorView, muted);
 }
 
 requestAnimationFrame(frame);
@@ -205,9 +216,10 @@ requestAnimationFrame(frame);
 // 합성 클록 위에서 60Hz/120Hz 동일성을 재려면 이벤트 timeStamp를 우리가 정해야 하고,
 // 브라우저가 만든 PointerEvent의 timeStamp는 가짜 클록과 다른 시간축을 쓴다. 그래서 필요하다.
 window.__rising = {
-  game, feel, director, C,
+  game, feel, director, audio, C,
   inject(type, wallTs) { enqueue(type === 'down' ? IN_DOWN : IN_UP, wallTs); },
   setDirectorView(on) { directorView = !!on; },
+  setMuted(on) { muted = !!on; audio.setMuted(muted); },
   get directorView() { return directorView; },
   get accumulator() { return accumulator; },
 };

@@ -427,6 +427,45 @@ async function run() {
     pass: c.state.hideJump >= 0 && c.state.hideJump <= 2 && c.state.freeze <= 8 && c.state.slow <= 24,
   });
 
+  // ── 오디오 · 실제 제스처로 unlock 되고, 모든 소리 경로가 예외 없이 도는가 ──
+  // iOS 사파리 실기기 확인(게이트 #6)은 대체하지 못한다. 코드가 터지지 않는지만 본다.
+  {
+    const page = await browser.newPage({ viewport: { width: 420, height: 900 } });
+    const logs = [];
+    page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') logs.push(m.type() + ': ' + m.text()); });
+    page.on('pageerror', (e) => logs.push('pageerror: ' + e.message));
+    await page.addInitScript(CLOCK_INIT);
+    await page.addInitScript(BOT);
+    await page.goto(url, { waitUntil: 'load' });
+    await page.waitForFunction('!!window.__rising', null, { timeout: 5000 });
+    // 진짜 포인터 제스처. unlock() 은 핸들러 안에서만 불린다.
+    await page.mouse.move(210, 700);
+    await page.mouse.down();
+    await page.mouse.up();
+    const a = await page.evaluate(async () => {
+      const R = window.__rising, g = R.game;
+      for (let i = 0; i < 2400; i++) {
+        window.__bot.step();
+        window.__clock.tick(1000 / 60);
+        if (i % 600 === 0) await new Promise((r) => setTimeout(r, 0));
+      }
+      const au = R.audio;
+      return {
+        ready: au.ready, failed: au.failed,
+        ctxState: au.ctx ? au.ctx.state : 'none',
+        landed: g.depth, muteWorks: (R.setMuted(true), au.master ? au.master.gain.value : -1),
+      };
+    });
+    await page.close();
+    results.push({
+      gate: '오디오 — 제스처 unlock + 전 경로 무예외 (코드 레벨)',
+      detail: `unlock ${a.ready} / 실패 ${a.failed} / AudioContext ${a.ctxState}, ` +
+              `40초 플레이 중 예외 0, 음소거 시 마스터 게인 ${a.muteWorks}, ` +
+              `로그 ${logs.length ? logs.join(' | ') : '에러·경고 0개'}`,
+      pass: a.ready === true && a.failed === false && a.muteWorks === 0 && logs.length === 0,
+    });
+  }
+
   // ── 디렉터 · 5개 프로파일이 실제로 판정되는가 ────────────────
   {
     const modes = ['safe', 'precise', 'reckless'];
