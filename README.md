@@ -8,9 +8,7 @@ NAN 2026 사전과제 · 2인 팀 · 순수 HTML + CSS + JavaScript + Canvas 2D
 
 ## 배포 URL
 
-```
-(미정) — GitHub Pages 활성화 후 이 자리에 기입한다
-```
+https://roka-jsj.github.io/NHN-Game-x-AI-Hackathon/
 
 **활성화 절차 (사람이 해야 함):**
 
