@@ -1,230 +1,216 @@
-// 시뮬레이션 — 물리 · 충돌 · 물 · 발판.
+// 시뮬레이션 — 레인 이동 · 점프 · 슬라이드 · 충돌 · 물 추격 · 계단 · 특성.
 // 이 파일은 시각·청각·입력장치를 모른다. 순수하게 상태만 굴린다.
 //
 // 규칙 1: 고정 스텝이다. 이 파일 어디에도 deltaTime을 곱하는 코드가 없다.
-//         초당 값은 config에서 per-step 상수로 이미 나눠져 들어온다.
 // 규칙 2: 상태 전이는 setState() 한 곳에서만 일어난다.
 // 규칙 3: 판정에 Math.random()을 쓰지 않는다. 재현 가능해야 한다.
 
 import * as C from './config.js';
 
-export const S = {
-  READY: 0, CHARGING: 1, LEAPING: 2, LANDED: 3, FALLING: 4, DEAD: 5,
-};
-export const STATE_NAME = ['READY', 'CHARGING', 'LEAPING', 'LANDED', 'FALLING', 'DEAD'];
+export const S = { RUN: 0, STAIR: 1, DRAFT: 2, DEAD: 3 };
+export const STATE_NAME = ['RUN', 'STAIR', 'DRAFT', 'DEAD'];
 
-// 상위 레이어(게임필·오디오)가 붙는 지점. 숫자 코드라 객체를 만들지 않는다.
+// 수직 자세
+export const V = { GROUND: 0, JUMP: 1, SLIDE: 2 };
+
+// 입력 행동. 좌/우는 두 모드가 공유하는 하나의 동사다.
+export const ACT = { LEFT: 0, RIGHT: 1, JUMP: 2, SLIDE: 3, PICK0: 4, PICK1: 5, PICK2: 6 };
+
 export const EV = {
-  CHARGE_START: 0,
-  OVERCHARGE: 1,
-  FIRE: 2,
+  MOVE: 0,          // a = 새 레인
+  JUMP: 1,
+  SLIDE: 2,
   LAND: 3,
-  PERFECT: 4,
-  MISS: 5,
-  COYOTE: 6,
-  BONUS: 7,
-  RECORD: 8,
-  DEATH: 9,
-  RESET: 10,
-  COMBO: 11,        // a = 새 콤보 값, b = 티어
-  COMBO_BREAK: 12,  // a = 끊긴 콤보 값
-  SKIP: 13,         // a = 건너뛴 발판 수
-  GATE: 14,         // a = 통과한 발판 수
-  CRUMBLE: 15,      // 발 밑이 무너졌다
+  COIN: 4,
+  NEAR_MISS: 5,     // a = 스친 거리
+  HIT: 6,           // a = 장애물 종류
+  SHIELD: 7,
+  COMBO: 8,         // a = 콤보, b = 티어
+  COMBO_BREAK: 9,
+  STAIR_ENTER: 10,
+  STAIR_STEP: 11,   // a = 오른 칸 수
+  STAIR_MISS: 12,
+  STAIR_CLEAR: 13,  // a = 정확도 0~1
+  DRAFT_OPEN: 14,
+  DRAFT_PICK: 15,   // a = 특성 인덱스, b = 계열
+  RECORD: 16,
+  DEATH: 17,
+  RESET: 18,
 };
 
-const TAU = Math.PI * 2;
+// 디렉터가 없을 때 쓰는 고정 트랙 패턴. 12행이 반복된다.
+// 행마다 [장애물 3레인, 코인 3레인]. 0=없음 1=낮은벽 2=높은빔 3=기둥.
+// **세 레인이 동시에 막힌 행은 없다.** 있으면 어떻게 해도 못 지나가고, 그건 플레이어 탓이 아니다.
+export const FALLBACK_PATTERN = new Uint8Array([
+  0, 0, 0,   0, 1, 0,
+  1, 0, 0,   0, 1, 0,
+  0, 0, 1,   0, 1, 0,
+  0, 2, 0,   1, 0, 1,
+  3, 0, 0,   0, 0, 1,
+  0, 0, 3,   1, 0, 0,
+  1, 1, 0,   0, 0, 1,
+  0, 0, 0,   1, 1, 1,
+  0, 3, 0,   1, 0, 1,
+  2, 0, 2,   0, 1, 0,
+  0, 1, 1,   1, 0, 0,
+  3, 0, 3,   0, 1, 0,
+]);
 
 function easeOutQuad(t) { return t * (2 - t); }
+function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 export class Game {
   constructor() {
-    // ─ 발판 링버퍼. 루프 안에서 객체를 만들지 않기 위해 타입배열로 둔다 ─
-    this._platY = new Float64Array(C.PLAT_POOL);
-    this._platSide = new Uint8Array(C.PLAT_POOL);
-    this._platThick = new Float32Array(C.PLAT_POOL);
-    this._platFlags = new Uint8Array(C.PLAT_POOL);
-    // 부서지는 발판의 남은 프레임. 0 = 멀쩡, >0 = 무너지는 중, -1 = 사라짐
-    this._platCrumble = new Int16Array(C.PLAT_POOL);
+    // ─ 트랙 행 링버퍼. 루프 안에서 객체를 만들지 않기 위해 타입배열로 둔다 ─
+    this._rowZ = new Float64Array(C.ROW_POOL);
+    this._rowOb = new Uint8Array(C.ROW_POOL * C.LANE_COUNT);
+    this._rowCoin = new Uint8Array(C.ROW_POOL * C.LANE_COUNT);
+    this._rowTaken = new Uint8Array(C.ROW_POOL * C.LANE_COUNT);  // 이미 먹은 코인
+    this._rowDone = new Uint8Array(C.ROW_POOL);                  // 판정이 끝난 행
 
-    // 발판 공급자. 패스 1은 고정 패턴, 패스 4에서 디렉터가 갈아끼운다.
-    this.supplier = null;
+    this.supplier = null;     // 디렉터가 붙는다. 없으면 빈 트랙
+    this.onEvent = null;
 
-    this.onEvent = null;       // (type, a, b) => void
-    this.coyoteFrames = 5;     // 패스 4에서 디렉터가 5~8로 조정한다
-    this.waterRisePerStep = C.WATER_RISE_PER_STEP;
-    this.aimWobbleScale = 1;
-
-    // 최고 기록. 전부 메모리에만 둔다 (localStorage 금지)
-    this.bestY = 0;            // 높이 — 화면의 점선 기록선
+    // 세션 기록. 전부 메모리에만 둔다 (localStorage 금지)
     this.bestScore = 0;
+    this.bestDist = 0;
     this.bestCombo = 0;
     this.runs = 0;
 
-    // main이 프레임 시작에서 심어주는 시각 기준점. 판 리셋과 무관하므로 여기서만 잡는다.
+    // main 이 프레임 시작에서 심어주는 시각 기준점
     this.frameWall = 0;
     this.frameSimBase = 0;
+
+    // 특성 (판마다 초기화)
+    this.traits = new Uint8Array(C.TRAITS.length);
 
     this.reset();
   }
 
-  // ── 발판 접근 ───────────────────────────────────────────────
-  platBaseY(i)   { return this._platY[i % C.PLAT_POOL]; }
-  platSideAt(i)  { return this._platSide[i % C.PLAT_POOL]; }
-  platThickAt(i) { return this._platThick[i % C.PLAT_POOL]; }
-  platFlagsAt(i) { return this._platFlags[i % C.PLAT_POOL]; }
-  platBonusAt(i) { return this._platFlags[i % C.PLAT_POOL] & C.F_BONUS; }
-  platGone(i)    { return this._platCrumble[i % C.PLAT_POOL] === -1; }
-  crumbleLeft(i) { return this._platCrumble[i % C.PLAT_POOL]; }
+  // ── 행 접근 ─────────────────────────────────────────────────
+  rowZ(i)          { return this._rowZ[i % C.ROW_POOL]; }
+  rowOb(i, lane)   { return this._rowOb[(i % C.ROW_POOL) * C.LANE_COUNT + lane]; }
+  rowCoin(i, lane) { return this._rowCoin[(i % C.ROW_POOL) * C.LANE_COUNT + lane]; }
+  rowTaken(i, lane){ return this._rowTaken[(i % C.ROW_POOL) * C.LANE_COUNT + lane]; }
 
-  // 이동 발판의 위치는 시각의 함수다. 사인파라 **미래를 계산할 수 있다.**
-  // 판정·조준·렌더가 전부 이 함수 하나를 쓴다. 보이는 것과 맞는 것이 같아야 한다.
-  platYAtTime(i, t) {
-    const slot = i % C.PLAT_POOL;
-    const base = this._platY[slot];
-    if ((this._platFlags[slot] & C.F_MOVING) === 0) return base;
-    return base + C.MOVE_AMP * Math.sin(TAU * t / C.MOVE_PERIOD_MS + i * 1.7);
-  }
-  platYAt(i) { return this.platYAtTime(i, this.simTime); }
-
-  leapDurationFor(dist) {
-    const span = (dist - C.LEAP_DIST_MIN) / (C.LEAP_DIST_MAX - C.LEAP_DIST_MIN);
-    const k = span < 0 ? 0 : (span > 1 ? 1 : span);
-    return C.LEAP_TIME_MIN + (C.LEAP_TIME_MAX - C.LEAP_TIME_MIN) * k;
-  }
-
-  // 지금 떼면 어느 발판을 노리게 되는가, 그리고 도착 시각은 언제인가.
-  // 렌더가 이걸로 "발판이 도착 순간에 있을 자리"를 그린다.
-  // 이동 발판을 도착 시점에 판정하면서 미래를 안 보여주면 그건 불공정한 게임이다.
-  previewTarget(nowSim) {
-    const dist = this.aimPreview(nowSim);
-    const landingY = this.playerY + dist + this.wobbleOffset(dist, nowSim);
-    const arrive = nowSim + this.leapDurationFor(dist);
-    const targetSide = 1 - this.side;
-    let best = -1, bestD = Infinity;
-    for (let i = this.platIdx + 1; i <= this.platIdx + C.LOOKAHEAD; i++) {
-      this.ensurePlatform(i);
-      if (this._platSide[i % C.PLAT_POOL] !== targetSide) continue;
-      if (this.platGone(i)) continue;
-      const d = Math.abs(this.platYAtTime(i, arrive) - landingY);
-      if (d < bestD) { bestD = d; best = i; }
-    }
-    this.previewIdx = best;
-    this.previewArrive = arrive;
-    this.previewLandingY = landingY;
-    return best;
-  }
-
-  // 착지 허용폭 = 발판 반두께 + 플레이어 반지름
-  toleranceAt(i) {
-    return C.PLATFORM_THICKNESS * this.platThickAt(i) * 0.5 + C.PLAYER_RADIUS;
-  }
-
-  ensurePlatform(i) {
-    while (this.platMade < i) {
-      const n = this.platMade + 1;
-      const slot = n % C.PLAT_POOL;
-      this._platCrumble[slot] = 0;
-      if (n === 0) {
-        this._platY[slot] = 0;
-        this._platSide[slot] = 0;
-        this._platThick[slot] = 1;
-        this._platFlags[slot] = 0;      // 시작 발판은 언제나 멀쩡한 발판이다
-      } else {
-        const prev = (n - 1) % C.PLAT_POOL;
-        // supplier가 없으면 패스 1의 고정 패턴. 랜덤 0.
-        let gap = this.supplier
-          ? this.supplier.gapFor(n)
-          : C.GAP_PATTERN[(n - 1) % C.GAP_PATTERN.length];
-        // 직전 발판이 무너지는 발판이면 오래 겨눌 시간이 없다.
-        // 먼 간격을 붙이면 어떻게 눌러도 못 넘는 배치가 된다.
-        if ((this._platFlags[prev] & C.F_CRUMBLE) && gap > C.CRUMBLE_NEXT_GAP_MAX) {
-          gap = C.CRUMBLE_NEXT_GAP_MAX;
-        }
-        this._platY[slot] = this._platY[prev] + gap;
-        this._platSide[slot] = n % 2;
-        this._platThick[slot] = this.supplier ? this.supplier.thickFor(n) : 1;
-        this._platFlags[slot] = this.supplier ? this.supplier.flagsFor(n) : 0;
+  ensureRow(i) {
+    while (this.rowMade < i) {
+      const n = this.rowMade + 1;
+      const slot = n % C.ROW_POOL;
+      const base = slot * C.LANE_COUNT;
+      this._rowZ[slot] = n * C.ROW_SPACING;
+      this._rowDone[slot] = 0;
+      for (let l = 0; l < C.LANE_COUNT; l++) {
+        this._rowOb[base + l] = 0;
+        this._rowCoin[base + l] = 0;
+        this._rowTaken[base + l] = 0;
       }
-      this.platMade = n;
+      // 계단 구간과 그 앞뒤로는 트랙을 비운다. 규칙이 바뀌는 구간을 장애물로 어지럽히지 않는다.
+      const z = this._rowZ[slot];
+      if (!this.nearStairZone(z) && n > 4) {
+        if (this.supplier) this.supplier.fillRow(this, n, base);
+        else this.fallbackRow(n, base);
+        this.enforceActionSpacing(n, base);
+      }
+      this.rowMade = n;
     }
   }
 
-  wallX(side) {
-    return side === 0
-      ? C.WALL_INSET + C.PLAYER_RADIUS
-      : C.VIEW_W - C.WALL_INSET - C.PLAYER_RADIUS;
+  // 디렉터가 없을 때 쓰는 고정 패턴. 랜덤 0.
+  // 세 레인이 동시에 막히는 행은 하나도 없다 — 있으면 즉사 확정이고 그건 플레이어 탓이 아니다.
+  fallbackRow(n, base) {
+    const p = (n % 12) * 6;
+    for (let l = 0; l < C.LANE_COUNT; l++) {
+      this._rowOb[base + l] = FALLBACK_PATTERN[p + l];
+      this._rowCoin[base + l] = FALLBACK_PATTERN[p + 3 + l];
+    }
+  }
+
+  // 같은 레인에서 자세를 요구하는 장애물이 너무 촘촘하면
+  // 점프가 끝나기 전에 다음 것이 도착한다 — 어떻게 눌러도 못 넘는 배치다.
+  // 청크 데이터가 뭘 주든, 레버가 뭘 하든 여기서 잘라낸다.
+  // **데이터가 아니라 규칙으로 막는다.**
+  enforceActionSpacing(n, base) {
+    for (let l = 0; l < C.LANE_COUNT; l++) {
+      const ob = this._rowOb[base + l];
+      if (ob !== C.OB_LOW && ob !== C.OB_BEAM) continue;
+      for (let k = 1; k <= C.MIN_ACTION_ROWS; k++) {
+        const pn = n - k;
+        if (pn < 0) break;
+        const po = this._rowOb[(pn % C.ROW_POOL) * C.LANE_COUNT + l];
+        if (po === C.OB_LOW || po === C.OB_BEAM) { this._rowOb[base + l] = 0; break; }
+      }
+    }
+  }
+
+  // 계단 구간 진입 직전·직후는 비운다
+  nearStairZone(z) {
+    const next = this.nextStairDist;
+    return z > next - C.ROW_SPACING * 2 && z < next + C.ROW_SPACING * 2;
   }
 
   // ── 리셋 ────────────────────────────────────────────────────
   reset() {
     this.tick = 0;
     this.simTime = 0;
-    this.state = S.READY;
+    this.state = S.RUN;
     this.stateTick = 0;
 
-    this.platMade = -1;
+    this.rowMade = -1;
     if (this.supplier && this.supplier.onRunStart) this.supplier.onRunStart();
-    this.ensurePlatform(C.LOOKAHEAD + 2);
 
-    this.platIdx = 0;
-    this.side = 0;
-    this.playerX = this.wallX(0);
-    this.playerY = 0;
-    this.prevPlayerX = this.playerX;
-    this.prevPlayerY = this.playerY;
+    this.travelled = 0;
+    this.lane = 1;
+    this.laneFrom = 1;
+    this.laneShift = 0;          // 남은 프레임
+    this.laneShiftTotal = 1;
+    this.worldX = 0;
+    this.prevWorldX = 0;
 
-    this.waterY = -C.WATER_START_GAP;
-    this.prevWaterY = this.waterY;
+    this.vstate = V.GROUND;
+    this.vFrames = 0;
+    this.vTotal = 1;
+    this.footY = 0;              // 발밑 높이
+    this.prevFootY = 0;
+    this.height = C.PLAYER_H;
 
-    this.camY = this.playerY;
-    this.prevCamY = this.camY;
+    this.stumble = 0;
+    this.speed = C.SPEED_BASE;
 
-    this.fallVel = 0;
-    this.coyoteLeft = 0;
+    // 물 — 뒤에서 따라온다. gap 이 0이 되면 죽는다.
+    this.gap = C.CHASE_GAP_START;
+    this.prevGap = this.gap;
+    this.chaseGap = C.CHASE_GAP_START;
 
-    // 차지
-    this.chargePressSim = 0;
-    this.chargePressWall = 0;
-    this.overchargeFlagged = false;
-
-    // 입력 버퍼 (패스 2)
-    this.bufferTick = -1;
-    this.bufferWall = 0;
-    this.bufferReleased = false;
-    this.bufferReleaseWall = 0;
-
-    // 도약
-    this.leapFromX = 0; this.leapFromY = 0;
-    this.leapToX = 0;   this.leapToY = 0;
-    this.leapStep = 0;  this.leapSteps = 1;
-    this.aimDist = 0;
-    this.landedResolveTo = S.READY;
-
-    // 판정 결과 (디렉터가 읽는다)
-    this.pendingTarget = -1;
-    this.pendingHit = false;
-    this.pendingPerfect = false;
-    this.lastAimError = 0;
-    this.lastAimSigned = 0;
-    this.lastChargeRatio = 0;
-    this.lastChargeMs = 0;
-
-    // 기록
-    this.depth = 0;
-    this.perfectCount = 0;
-    this.runBestY = 0;
-    this.recordPassed = this.bestY <= 0;
-    this.deathTick = -1;
-
-    // 콤보 · 점수
     this.combo = 0;
     this.comboBest = 0;
     this.score = 0;
-    this.lastSkip = 0;
-    this.chaseMargin = C.CHASE_MARGIN_START;
-    this.rideOffset = 0;
+    this.coins = 0;
+    this.hits = 0;
+    this.nearMisses = 0;
+    this.jumps = 0;
+    this.slides = 0;
 
+    // 계단
+    this.nextStairDist = C.STAIR_FIRST_DIST;
+    this.stairStep = 0;
+    this.stairSide = 0;          // 다음에 눌러야 할 쪽 (0=좌 1=우)
+    this.stairFrames = 0;
+    this.stairStall = 0;
+    this.stairHit = 0;
+    this.stairTry = 0;
+
+    // 드래프트
+    this.draftIdx = new Int8Array(C.TRAIT_OFFER);
+    this.draftOpen = false;
+    this.draftFrames = 0;
+    this.traits.fill(0);
+    this.shieldCharges = 0;
+
+    this.recordPassed = this.bestDist <= 0;
+    this.deathTick = -1;
+
+    this.ensureRow(Math.ceil(C.ZFAR / C.ROW_SPACING) + 2);
     this.runs++;
     this.emit(EV.RESET, 0, 0);
   }
@@ -237,378 +223,389 @@ export class Game {
     this.stateTick = 0;
   }
 
-  // ── 입력 진입점 — main.js의 입력 큐만 이걸 부른다 ─────────────
-  press(simTs, wallTs) {
-    if (this.state === S.DEAD) { this.reset(); return true; }
-    if (this.state === S.READY) {
-      this.beginCharge(simTs, wallTs);
-      return true;
+  nowWall() { return this.frameWall + (this.simTime - this.frameSimBase); }
+
+  // ── 특성 ────────────────────────────────────────────────────
+  has(id) {
+    for (let i = 0; i < C.TRAITS.length; i++) {
+      if (C.TRAITS[i].id === id) return this.traits[i] === 1;
     }
-    // 착지 직전 입력을 기억한다. "눌렀는데 안 먹었다"를 제거한다.
-    this.bufferTick = this.tick;
-    this.bufferWall = wallTs;
-    this.bufferReleased = false;
     return false;
   }
 
-  // 착지 직후 READY 로 넘어올 때만 불린다.
-  tryBufferedCharge() {
-    if (this.bufferTick < 0) return;
-    if (this.tick - this.bufferTick > C.INPUT_BUFFER_FRAMES) { this.bufferTick = -1; return; }
-
-    // 차지 시작 시각은 "착지한 순간"이다. 버퍼에 머문 시간만큼 차지가 부풀면 안 된다.
-    const startWall = this.nowWall();
-    this.beginCharge(this.simTime, startWall);
-    this.bufferTick = -1;
-
-    // 착지 전에 이미 손을 뗐다면, 플레이어가 실제로 누른 만큼을 그대로 재현한다.
-    // 그러지 않으면 짧은 탭이 무한 차지로 남는다.
-    if (this.bufferReleased) {
-      const held = this.bufferReleaseWall - this.bufferWall;
-      this.fire(this.simTime + held, held, false);
-    }
+  applyTrait(idx) {
+    this.traits[idx] = 1;
+    if (C.TRAITS[idx].id === 'shield') this.shieldCharges++;
   }
 
-  // 시뮬 시각 → 벽시계 시각. 프레임 시작에서 main이 기준점을 심어준다.
-  nowWall() {
-    return this.frameWall + (this.simTime - this.frameSimBase);
-  }
-
-  beginCharge(simTs, wallTs) {
-    this.chargePressSim = simTs;
-    this.chargePressWall = wallTs;
-    this.overchargeFlagged = false;
-    this.setState(S.CHARGING);
-    this.emit(EV.CHARGE_START, 0, 0);
-  }
-
-  // 탭이 숨겨지면 차지를 취소한다. 복귀 시 30분짜리 차지가 되면 안 된다.
-  cancelCharge() {
-    if (this.state === S.CHARGING) this.setState(S.READY);
-  }
-
-  release(wallTs) {
-    if (this.state !== S.CHARGING) {
-      // 버퍼에 들어간 입력의 릴리스. 착지 시점에 그대로 재현하기 위해 기억한다.
-      if (this.bufferTick >= 0 && !this.bufferReleased) {
-        this.bufferReleased = true;
-        this.bufferReleaseWall = wallTs;
-      }
+  // ── 입력 진입점 — main 의 입력 큐만 이걸 부른다 ──────────────
+  input(act, simTs, wallTs) {
+    if (this.state === S.DEAD) {
+      // 결과 화면에서는 아무 입력이나 재시작이다
+      this.reset();
       return;
     }
-    const rawMs = wallTs - this.chargePressWall;
-    // 조준 진동은 "실제로 뗀 순간"의 위상으로 판정한다. 보이는 것과 판정이 어긋나지 않게.
-    this.fire(this.chargePressSim + rawMs, rawMs, false);
-  }
-
-  // 매 프레임 입력 소비 직후 호출. 무한 차지를 봉쇄한다.
-  checkOvercharge(nowWall) {
-    if (this.state !== S.CHARGING) return;
-    const held = nowWall - this.chargePressWall;
-    if (!this.overchargeFlagged && held >= C.OVERCHARGE_WARN_MS) {
-      this.overchargeFlagged = true;
-      this.emit(EV.OVERCHARGE, 0, 0);
+    if (this.state === S.DRAFT) {
+      if (act >= ACT.PICK0 && act <= ACT.PICK2) this.pickTrait(act - ACT.PICK0);
+      // 계단·러너 동사도 그대로 선택에 매핑한다 — 좌/우로 고르고 위로 확정하지 않는다.
+      else if (act === ACT.LEFT) this.pickTrait(0);
+      else if (act === ACT.RIGHT) this.pickTrait(2);
+      else if (act === ACT.JUMP) this.pickTrait(1);
+      return;
     }
-    if (held >= C.OVERCHARGE_FIRE_MS) {
-      // 강제 발사 시각을 정확히 1200ms 지점에 고정한다.
-      // 프레임 지터가 판정 결과를 흔들면 실패가 플레이어 탓이 아니게 된다.
-      this.fire(this.chargePressSim + C.OVERCHARGE_FIRE_MS, C.OVERCHARGE_FIRE_MS, true);
+    if (this.state === S.STAIR) {
+      if (act === ACT.LEFT) this.stairInput(0);
+      else if (act === ACT.RIGHT) this.stairInput(1);
+      return;
+    }
+    // RUN
+    switch (act) {
+      case ACT.LEFT:  this.shiftLane(-1); break;
+      case ACT.RIGHT: this.shiftLane(1); break;
+      case ACT.JUMP:  this.beginJump(); break;
+      case ACT.SLIDE: this.beginSlide(); break;
+      default: break;
     }
   }
 
-  // ── 발사 ────────────────────────────────────────────────────
-  fire(releaseSim, rawChargeMs, forced) {
-    let ms = rawChargeMs;
-    if (ms < C.CHARGE_MIN_MS) ms = C.CHARGE_MIN_MS;          // 오발 구제
-    if (ms > C.CHARGE_MAX_MS) ms = C.CHARGE_MAX_MS;
-    const ratio = ms / C.CHARGE_MAX_MS;
+  shiftLane(dir) {
+    const next = this.lane + dir;
+    if (next < 0 || next >= C.LANE_COUNT) return;
+    this.laneFrom = this.lane;
+    this.lane = next;
+    // 관성 특성은 이동을 즉시 끝낸다
+    this.laneShiftTotal = this.has('inertia')
+      ? 1 : Math.max(1, Math.round(C.LANE_SHIFT_MS / C.SIM_DT));
+    this.laneShift = this.laneShiftTotal;
+    this.emit(EV.MOVE, next, dir);
+  }
 
-    let dist = C.LEAP_DIST_MIN + (C.LEAP_DIST_MAX - C.LEAP_DIST_MIN) * ratio;
-    if (forced) dist *= C.OVERCHARGE_PENALTY;
+  beginJump() {
+    if (this.vstate === V.JUMP) return;
+    this.vstate = V.JUMP;
+    this.vTotal = Math.max(1, Math.round(
+      C.JUMP_MS * (this.has('glide') ? 1.4 : 1) / C.SIM_DT));
+    this.vFrames = 0;
+    this.jumps++;
+    this.emit(EV.JUMP, 0, 0);
+  }
 
-    const wob = this.wobbleOffset(dist, releaseSim);
-    const landingY = this.playerY + dist + wob;
+  beginSlide() {
+    if (this.vstate === V.JUMP) return;   // 공중에서는 슬라이드하지 않는다
+    this.vstate = V.SLIDE;
+    this.vTotal = Math.max(1, Math.round(
+      C.SLIDE_MS * (this.has('brake') ? 1.5 : 1) / C.SIM_DT));
+    this.vFrames = 0;
+    this.slides++;
+    this.emit(EV.SLIDE, 0, 0);
+  }
 
-    // 착지 후보: 반대편 벽의 발판 중 조준점에 가장 가까운 것.
-    // 이동 발판은 **도착 시점의 위치**로 고른다 — 조준 중에 화면에 그려준 예측선과 같은 기준이다.
-    // 멀리 뛰어 한 칸 건너뛰는 플레이가 성립한다.
-    const arrive = releaseSim + this.leapDurationFor(dist);
-    const targetSide = 1 - this.side;
-    let best = -1, bestDist = Infinity;
-    for (let i = this.platIdx + 1; i <= this.platIdx + C.LOOKAHEAD; i++) {
-      this.ensurePlatform(i);
-      if (this._platSide[i % C.PLAT_POOL] !== targetSide) continue;
-      if (this.platGone(i)) continue;
-      const d = Math.abs(this.platYAtTime(i, arrive) - landingY);
-      if (d < bestDist) { bestDist = d; best = i; }
+  // ── 계단 구간 ───────────────────────────────────────────────
+  enterStair() {
+    this.setState(S.STAIR);
+    this.stairStep = 0;
+    this.stairSide = 0;
+    this.stairStall = 0;
+    this.stairHit = 0;
+    this.stairTry = 0;
+    this.stairFrames = Math.round(C.STAIR_MS / C.SIM_DT);
+    this.vstate = V.GROUND;
+    this.footY = 0;
+    this.emit(EV.STAIR_ENTER, 0, 0);
+  }
+
+  stairInput(side) {
+    if (this.stairStall > 0) return;
+    this.stairTry++;
+    if (side !== this.stairSide) {
+      // 순서를 틀렸다. 비틀거리며 멈춘다 — 그동안 물이 붙는다.
+      this.stairStall = C.STAIR_MISS_STALL;
+      this.combo = 0;
+      this.emit(EV.STAIR_MISS, 0, 0);
+      return;
     }
-
-    // 한 칸 건너뛰기. 같은 벽의 발판은 한 칸 걸러 있으므로 차이를 2로 나눈다.
-    this.lastSkip = best > this.platIdx + 1 ? ((best - this.platIdx - 1) / 2) | 0 : 0;
-
-    // 착지 판정은 여기서 하지 않는다. **도착하는 순간**에 한다.
-    // 이동 발판은 도약하는 동안 움직이고, 부서지는 발판은 사라질 수 있다.
-    // "내가 내려앉은 자리에 발판이 있었는가"가 플레이어가 이해하는 규칙이다.
-    this.pendingTarget = best;
-    this.lastChargeRatio = ratio;
-    this.lastChargeMs = ms;
-
-    this.leapFromX = this.playerX;
-    this.leapFromY = this.playerY;
-    this.leapToX = this.wallX(targetSide);
-    this.leapToY = landingY;
-
-    const span = (dist - C.LEAP_DIST_MIN) / (C.LEAP_DIST_MAX - C.LEAP_DIST_MIN);
-    const clamped = span < 0 ? 0 : (span > 1 ? 1 : span);
-    const durMs = C.LEAP_TIME_MIN + (C.LEAP_TIME_MAX - C.LEAP_TIME_MIN) * clamped;
-    // 프레임 수로 고정한다 → 60Hz와 120Hz에서 소요 시간이 같다
-    this.leapSteps = Math.max(1, Math.round(durMs / C.SIM_DT));
-    this.leapStep = 0;
-    this.aimDist = dist;
-
-    this.setState(S.LEAPING);
-    this.emit(EV.FIRE, dist, forced ? 1 : 0);
+    this.stairHit++;
+    this.stairStep++;
+    this.stairSide = 1 - this.stairSide;
+    this.laneFrom = this.lane;
+    this.lane = side === 0 ? 0 : 2;
+    this.laneShiftTotal = 5;    // 짧게. 계단은 리듬이라 즉각적이어야 한다
+    this.laneShift = 5;
+    // 오른 만큼 물이 밀린다. 이 구간이 유일한 회복 기회다.
+    this.gap += C.STAIR_STEP_PUSH * (this.has('recover') ? 1.6 : 1);
+    this.score += (C.STAIR_STEP_SCORE * this.mult()) | 0;
+    this.emit(EV.STAIR_STEP, this.stairStep, 0);
+    if (this.stairStep >= C.STAIR_STEPS) this.clearStair();
   }
 
-  // 사인파다. 랜덤이 아니다. 읽을 수 있으면 실력이 된다.
-  wobbleOffset(dist, t) {
-    const amp = dist * C.WOBBLE_RATIO * this.aimWobbleScale;
-    return amp * Math.sin(TAU * t / C.WOBBLE_PERIOD_MS);
+  clearStair() {
+    const acc = this.stairTry > 0 ? this.stairHit / this.stairTry : 0;
+    this.emit(EV.STAIR_CLEAR, acc, 0);
+    this.nextStairDist = this.travelled + C.STAIR_EVERY_DIST;
+    this.lane = 1;
+    this.laneFrom = 1;
+    this.laneShift = 0;
+    this.openDraft();
   }
 
-  // 렌더가 조준점 위치를 물어보는 지점. 판정과 같은 함수를 쓴다 (WYSIWYG).
-  aimPreview(nowSim) {
-    const held = nowSim - this.chargePressSim;
-    let ms = held < C.CHARGE_MIN_MS ? C.CHARGE_MIN_MS : held;
-    if (ms > C.CHARGE_MAX_MS) ms = C.CHARGE_MAX_MS;
-    const ratio = ms / C.CHARGE_MAX_MS;
-    return C.LEAP_DIST_MIN + (C.LEAP_DIST_MAX - C.LEAP_DIST_MIN) * ratio;
+  // ── 특성 드래프트 ───────────────────────────────────────────
+  openDraft() {
+    // 디렉터가 3개를 고른다. 없으면 앞에서부터 3개.
+    if (this.supplier && this.supplier.draftOffer) {
+      this.supplier.draftOffer(this, this.draftIdx);
+    } else {
+      for (let i = 0; i < C.TRAIT_OFFER; i++) this.draftIdx[i] = i;
+    }
+    this.draftOpen = true;
+    this.draftFrames = 0;
+    this.setState(S.DRAFT);
+    this.emit(EV.DRAFT_OPEN, 0, 0);
+  }
+
+  pickTrait(slot) {
+    if (!this.draftOpen) return;
+    const idx = this.draftIdx[clamp(slot, 0, C.TRAIT_OFFER - 1)];
+    if (idx < 0) return;
+    this.applyTrait(idx);
+    this.draftOpen = false;
+    this.emit(EV.DRAFT_PICK, idx, C.TRAITS[idx].kind);
+    this.setState(S.RUN);
+  }
+
+  // ── 파생값 ──────────────────────────────────────────────────
+  mult() {
+    const step = C.COMBO_MULT_STEP * (this.has('chain') ? 1.5 : 1);
+    let m = 1 + this.combo * step;
+    if (m > C.COMBO_MULT_CAP) m = C.COMBO_MULT_CAP;
+    if (this.has('gambler')) m *= 2;
+    return m;
+  }
+
+  // 스턴 없는 기준 속도. 물은 이걸 따라간다 — 플레이어가 비틀거려도 물은 안 느려진다.
+  baseSpeed() {
+    const t = clamp(this.travelled / C.SPEED_RAMP_DIST, 0, 1);
+    let s = C.SPEED_BASE + (C.SPEED_MAX - C.SPEED_BASE) * t;
+    if (this.has('sprint')) s *= 1.15;
+    return s;
+  }
+
+  comboWaterMul() {
+    if (this.combo >= C.COMBO_PUSH_AT) return C.COMBO_PUSH_MUL;
+    if (this.combo >= C.COMBO_HOLD_AT) return C.COMBO_HOLD_MUL;
+    return 1;
+  }
+
+  comboTier() { return (this.combo / C.COMBO_TIER) | 0; }
+
+  // **충돌은 목표 레인이 아니라 실제로 서 있는 위치로 판정한다.**
+  // shiftLane() 은 this.lane 을 즉시 목적지로 바꾼다 — 그게 보간의 기준점이기 때문이다.
+  // 그 값으로 충돌을 보면, 스와이프하는 순간 아직 원래 레인에 서 있는데도
+  // 목적지의 장애물에 맞는다. 플레이어가 보고 있는 것과 맞는 것이 달라진다.
+  // 실제로 그렇게 만들었다가 봇이 레인 이동 중에만 골라 맞았다.
+  effLane() {
+    const l = Math.round((this.worldX + C.LANE_W) / C.LANE_W);
+    return l < 0 ? 0 : (l >= C.LANE_COUNT ? C.LANE_COUNT - 1 : l);
+  }
+  meters() { return this.travelled / C.METER_UNITS; }
+
+  // 장애물이 보이기 시작하는 거리. 디렉터의 telegraph 레버와 시야 특성이 늘린다.
+  drawZ() {
+    let z = C.ZFAR;
+    if (this.supplier && this.supplier.levers) z *= this.supplier.levers.telegraph;
+    if (this.has('vision')) z *= 1.3;
+    return z;
   }
 
   // ── 한 스텝 ─────────────────────────────────────────────────
   step() {
-    // 보간용 이전 상태
-    this.prevPlayerX = this.playerX;
-    this.prevPlayerY = this.playerY;
-    this.prevWaterY = this.waterY;
-    this.prevCamY = this.camY;
+    this.prevWorldX = this.worldX;
+    this.prevFootY = this.footY;
+    this.prevGap = this.gap;
 
     this.tick++;
     this.stateTick++;
     this.simTime += C.SIM_DT;
 
-    if (this.state !== S.DEAD) {
-      // 물은 선형이다. 이징을 걸면 예측이 불가능해지고, 그 순간 실패가 플레이어 탓이 아니게 된다.
-      //
-      // 속도는 세 갈래지만 전부 일정 속도다. 순간이동하지 않는다.
-      //  ① 콤보가 물을 붙잡는다 — 연속 완벽 착지 3회면 멈추고, 6회면 내려간다
-      //  ② 너무 앞서면 3배속으로 따라붙는다 (안 그러면 물이 영원히 안 보인다)
-      //  ③ 그 외에는 기본 속도
-      let rise = this.waterRisePerStep * this.comboWaterMul();
-      const margin = this.playerY - this.waterY;
-      if (margin > this.chaseMargin) {
-        const chase = this.waterRisePerStep * C.WATER_CHASE_MUL;
-        if (chase > rise) rise = chase;
-      }
-      this.waterY += rise;
+    if (this.state === S.DRAFT) { this.draftFrames++; return; }
+    if (this.state === S.DEAD) return;
 
-      // 깊이가 쌓일수록 물이 더 가까이 따라붙는다. 후반에는 한 번 오래 겨누는 것도 위험해진다.
-      const t = this.depth / C.CHASE_TIGHTEN_DEPTH;
-      const k = t > 1 ? 1 : t;
-      this.chaseMargin = C.CHASE_MARGIN_START
-        + (C.CHASE_MARGIN_END - C.CHASE_MARGIN_START) * k;
-    }
-
-    this.tickCrumble();
-
-    // 이동 발판 위에서는 발판을 타고 같이 움직인다
-    if (this.state === S.READY || this.state === S.CHARGING || this.state === S.LANDED) {
-      if (this.platFlagsAt(this.platIdx) & C.F_MOVING) {
-        this.playerY = this.platYAt(this.platIdx) + this.rideOffset;
-      }
-    }
-
-    switch (this.state) {
-      case S.CHARGING:
-        break;
-
-      case S.LEAPING: {
-        this.leapStep++;
-        let p = this.leapStep / this.leapSteps;
-        if (p > 1) p = 1;
-        const e = easeOutQuad(p);
-        this.playerX = this.leapFromX + (this.leapToX - this.leapFromX) * e;
-        this.playerY = this.leapFromY + (this.leapToY - this.leapFromY) * e;
-        if (p >= 1) this.resolveLanding();
-        break;
-      }
-
-      case S.LANDED:
-        // 착지 판정은 진입 시점에 이미 끝났다. 이 상태는 1스텝짜리 비트다.
-        this.setState(this.landedResolveTo);
-        if (this.state === S.READY) this.tryBufferedCharge();
-        break;
-
-      case S.FALLING: {
-        this.fallVel += C.FALL_ACC_PER_STEP;
-        if (this.fallVel > C.FALL_MAX_SPEED) this.fallVel = C.FALL_MAX_SPEED;
-        this.playerY -= this.fallVel;
-        if (this.coyoteLeft > 0) {
-          this.coyoteLeft--;
-          // 미끄러지는 동안 같은 벽의 발판 범위를 통과하면 붙잡는다.
-          // 오버슛만 구제된다 — 짧게 쏜 건 구제되지 않는다.
-          for (let i = this.platIdx + 1; i <= this.platIdx + C.LOOKAHEAD; i++) {
-            this.ensurePlatform(i);
-            if (this._platSide[i % C.PLAT_POOL] !== this.side) continue;
-            if (this.platGone(i)) continue;
-            if (Math.abs(this.platYAt(i) - this.playerY) <= this.toleranceAt(i)) {
-              this.grab(i, true);
-              break;
-            }
-          }
-        }
-        break;
-      }
-
-      default:
-        break;
-    }
-
-    if (this.playerY > this.runBestY) {
-      this.runBestY = this.playerY;
-      if (!this.recordPassed && this.playerY > this.bestY) {
-        this.recordPassed = true;
-        this.emit(EV.RECORD, 0, 0);
-      }
-    }
-
-    // 카메라는 플레이어를 화면 상단 40%에 유지한다
-    this.camY += (this.playerY - this.camY) * C.CAM_LERP;
-
-    if (this.state !== S.DEAD && this.playerY - C.PLAYER_RADIUS <= this.waterY) {
-      this.die();
-    }
-  }
-
-  resolveLanding() {
-    // 도착 시점 판정. 발판이 움직였거나 사라졌으면 그 결과가 그대로 반영된다.
-    const t = this.pendingTarget;
-    let aimError = 2, signed = 0;
-    if (t >= 0 && !this.platGone(t)) {
-      const tol = this.toleranceAt(t);
-      signed = this.leapToY - this.platYAt(t);
-      aimError = Math.abs(signed) / tol;
-    }
-    this.lastAimError = aimError > 2 ? 2 : aimError;
-    this.lastAimSigned = signed;
-    this.pendingHit = aimError <= 1;
-    this.pendingPerfect = aimError <= C.PERFECT_RATIO;
-
-    if (this.pendingHit) {
-      this.grab(this.pendingTarget, false);
+    const base = this.baseSpeed();
+    let moveSpeed = base;
+    if (this.state === S.STAIR) {
+      // 계단에서는 발이 아니라 리듬이 속도를 만든다
+      moveSpeed = this.stairStall > 0 ? 0 : base * 0.75;
+      this.stairFrames--;
+      if (this.stairStall > 0) this.stairStall--;
+      this.stepLane();          // 계단에서도 좌우로 옮겨 탄다. 안 하면 가운데 박혀 있다
+      if (this.stairFrames <= 0) this.clearStair();
     } else {
-      if (this.combo > 0) this.emit(EV.COMBO_BREAK, this.combo, 0);
-      this.combo = 0;
-      this.side = 1 - this.side;
-      this.playerX = this.wallX(this.side);
-      this.fallVel = 0;
-      this.coyoteLeft = this.coyoteFrames;
-      this.landedResolveTo = S.FALLING;
-      this.setState(S.LANDED);
-      this.emit(EV.MISS, this.lastAimSigned, 0);
+      if (this.stumble > 0) { this.stumble--; moveSpeed = base * C.STUMBLE_SPEED_MUL; }
+      this.stepLane();
+      this.stepVertical();
     }
+
+    const advance = moveSpeed / C.SIM_HZ;
+    this.travelled += advance;
+    this.speed = moveSpeed;
+
+    this.stepWater(base, advance);
+
+    if (this.state === S.RUN) {
+      this.stepTrack();
+      if (this.travelled >= this.nextStairDist) this.enterStair();
+    }
+
+    // 거리 점수
+    this.score += advance * C.SCORE_PER_UNIT * this.mult();
+
+    if (this.travelled > this.bestDist && !this.recordPassed) {
+      this.recordPassed = true;
+      this.emit(EV.RECORD, 0, 0);
+    }
+
+    this.ensureRow(Math.ceil((this.travelled + C.ZFAR * 1.5) / C.ROW_SPACING) + 2);
+
+    if (this.gap <= 0) this.die();
   }
 
-  grab(idx, viaCoyote) {
-    const skip = viaCoyote ? 0 : this.lastSkip;
-    const slot = idx % C.PLAT_POOL;
-    this.side = this.platSideAt(idx);
-    this.platIdx = idx;
-    this.playerX = this.wallX(this.side);
-    this.rideOffset = this.playerY - this.platYAt(idx);
-    this.depth++;
-    this.ensurePlatform(idx + C.LOOKAHEAD);
-
-    let bonus = false;
-    if (this._platFlags[slot] & C.F_BONUS) {
-      this._platFlags[slot] &= ~C.F_BONUS;
-      this.waterY -= C.BONUS_WATER_PUSH;   // 유혹의 대가: 물이 내려간다
-      bonus = true;
-    }
-
-    // 부서지는 발판은 붙는 순간부터 무너지기 시작한다.
-    // 여기 오래 서서 정확히 겨눌 수는 없다 — 정확함과 시간이 정면으로 부딪힌다.
-    if ((this._platFlags[slot] & C.F_CRUMBLE) && this._platCrumble[slot] === 0) {
-      this._platCrumble[slot] = C.CRUMBLE_FRAMES;
-    }
-
-    // 관문 — 끝없이 오르기만 하면 진척이 안 느껴진다. 일정 간격마다 사건을 만든다.
-    if (this.depth % C.GATE_EVERY === 0) {
-      this.score += C.GATE_SCORE;
-      this.waterY -= C.GATE_WATER_PUSH;
-      this.emit(EV.GATE, this.depth, 0);
-    }
-
-    // ── 콤보 — 연속 완벽 착지만 이어진다 ──
-    // 그냥 붙기만 해서는 끊긴다. 코요테 구제도 끊는다 — 그건 실수를 봐준 것이지 실력이 아니다.
-    const perfect = !viaCoyote && this.pendingPerfect;
-    if (perfect) {
-      this.perfectCount++;
-      this.combo += 1 + (skip > 0 ? 1 : 0);   // 건너뛰며 완벽하면 두 칸 오른다
-      if (this.combo > this.comboBest) this.comboBest = this.combo;
-      this.emit(EV.PERFECT, this.lastAimError, 0);
-      this.emit(EV.COMBO, this.combo, this.comboTier());
+  stepLane() {
+    if (this.laneShift > 0) {
+      this.laneShift--;
+      const t = 1 - this.laneShift / this.laneShiftTotal;
+      const e = easeOutQuad(t);
+      this.worldX = C.LANE_X[this.laneFrom]
+        + (C.LANE_X[this.lane] - C.LANE_X[this.laneFrom]) * e;
     } else {
-      if (this.combo > 0) this.emit(EV.COMBO_BREAK, this.combo, 0);
-      this.combo = 0;
-      if (viaCoyote) this.emit(EV.COYOTE, 0, 0);
-      this.emit(EV.LAND, this.lastAimError, 0);
+      this.worldX = C.LANE_X[this.lane];
     }
-
-    if (skip > 0) this.emit(EV.SKIP, skip, 0);
-    if (bonus) this.emit(EV.BONUS, 0, 0);
-
-    // ── 점수 — 멀리 뛸수록, 건너뛸수록, 콤보가 높을수록 ──
-    const mult = 1 + this.combo * C.COMBO_MULT_STEP;
-    let gain = C.SCORE_BASE + this.aimDist * C.SCORE_PER_PX + skip * C.SCORE_SKIP;
-    if (bonus) gain += C.SCORE_BONUS;
-    this.score += (gain * mult) | 0;
-
-    this.landedResolveTo = S.READY;
-    this.setState(S.LANDED);
   }
 
-  // 부서지는 발판의 시계. 플레이어 주변만 돈다.
-  tickCrumble() {
-    const first = this.platIdx - 4 < 0 ? 0 : this.platIdx - 4;
-    const last = this.platIdx + C.LOOKAHEAD;
+  stepVertical() {
+    if (this.vstate === V.GROUND) { this.footY = 0; this.height = C.PLAYER_H; return; }
+    this.vFrames++;
+    const t = this.vFrames / this.vTotal;
+    if (t >= 1) {
+      const was = this.vstate;
+      this.vstate = V.GROUND;
+      this.footY = 0;
+      this.height = C.PLAYER_H;
+      if (was === V.JUMP) this.emit(EV.LAND, 0, 0);
+      return;
+    }
+    if (this.vstate === V.JUMP) {
+      // 포물선. 4·h·t·(1−t) 는 t=0.5 에서 정점 h 가 된다.
+      this.footY = 4 * C.JUMP_APEX * t * (1 - t);
+      this.height = C.PLAYER_H;
+    } else {
+      this.footY = 0;
+      this.height = C.SLIDE_H;
+    }
+  }
+
+  stepWater(base, advance) {
+    // 추격 거리는 깊이가 쌓일수록 좁혀진다
+    const k = clamp(this.travelled / C.CHASE_TIGHTEN_DIST, 0, 1);
+    this.chaseGap = C.CHASE_GAP_START + (C.CHASE_GAP_END - C.CHASE_GAP_START) * k;
+
+    let ratio = C.WATER_RATIO * this.comboWaterMul();
+    if (this.supplier && this.supplier.levers) ratio *= this.supplier.levers.waterMul;
+    if (this.has('chill')) ratio *= 0.8;
+    if (this.has('gambler')) ratio *= 1.25;
+
+    let waterAdvance = base * ratio / C.SIM_HZ;
+    // 너무 벌어지면 3배가 아니라 "플레이어보다 조금 빠르게" 붙는다.
+    // 일정 속도 두 개뿐이고 어느 쪽인지 눈에 보인다. 순간이동하지 않는다.
+    if (this.gap > this.chaseGap) {
+      const chase = base * C.WATER_CHASE_MUL / C.SIM_HZ;
+      if (chase > waterAdvance) waterAdvance = chase;
+    }
+    this.gap += advance - waterAdvance;
+    if (this.gap > this.chaseGap * 1.35) this.gap = this.chaseGap * 1.35;
+  }
+
+  // ── 트랙 판정 ───────────────────────────────────────────────
+  stepTrack() {
+    const first = Math.max(0, Math.floor((this.travelled - C.ROW_SPACING * 2) / C.ROW_SPACING));
+    const last = Math.min(this.rowMade,
+      Math.ceil((this.travelled + C.ROW_SPACING * 2) / C.ROW_SPACING));
     for (let i = first; i <= last; i++) {
-      const slot = i % C.PLAT_POOL;
-      const c = this._platCrumble[slot];
-      if (c <= 0) continue;
-      const next = c - 1;
-      this._platCrumble[slot] = next === 0 ? -1 : next;
-      if (next === 0 && i === this.platIdx) {
-        if (this.state === S.READY || this.state === S.CHARGING || this.state === S.LANDED) {
-          this.dropFromPlatform();
+      const slot = i % C.ROW_POOL;
+      if (this._rowDone[slot]) continue;
+      const z = this._rowZ[slot] - this.travelled;
+
+      // 코인은 통과하는 순간 먹는다
+      if (z < C.COIN_R && z > -C.COIN_R) {
+        const ci = slot * C.LANE_COUNT + this.effLane();
+        if (this._rowCoin[ci] && !this._rowTaken[ci]) {
+          this._rowTaken[ci] = 1;
+          this.coins++;
+          this.score += (C.COIN_SCORE * (this.has('collector') ? 2 : 1) * this.mult()) | 0;
+          this.emit(EV.COIN, 0, 0);
         }
       }
+
+      // 장애물 판정은 행이 플레이어 평면을 지나는 순간 한 번만
+      if (z > 0) continue;
+      this._rowDone[slot] = 1;
+      this.resolveRow(slot);
     }
   }
 
-  dropFromPlatform() {
+  resolveRow(slot) {
+    const here = this.effLane();
+    const ob = this._rowOb[slot * C.LANE_COUNT + here];
+    if (ob === C.OB_NONE) {
+      // 옆 레인에 장애물이 있었다면 아슬아슬 회피로 친다
+      let adjacent = 0;
+      for (let l = 0; l < C.LANE_COUNT; l++) {
+        if (l !== here && this._rowOb[slot * C.LANE_COUNT + l] !== C.OB_NONE) adjacent++;
+      }
+      if (adjacent > 0) this.reward(adjacent);
+      return;
+    }
+    if (this.clears(ob)) { this.reward(1); return; }
+    this.takeHit(ob);
+  }
+
+  // 자세로 넘을 수 있는가. 하나로 둘을 넘을 수 없다.
+  clears(ob) {
+    const pad = this.has('precise') ? 18 : 0;
+    const bottom = this.footY;
+    const top = this.footY + this.height;
+    if (ob === C.OB_LOW) return bottom + pad >= C.OB_LOW_H;
+    if (ob === C.OB_BEAM) return top - pad <= C.OB_BEAM_LO;
+    return false;   // 기둥은 레인을 바꾸는 수밖에 없다
+  }
+
+  reward(adjacent) {
+    this.combo++;
+    if (this.combo > this.comboBest) this.comboBest = this.combo;
+    this.nearMisses += adjacent > 0 ? 1 : 0;
+    this.score += (C.NEAR_MISS_SCORE * adjacent * this.mult()) | 0;
+    this.emit(EV.NEAR_MISS, adjacent, 0);
+    this.emit(EV.COMBO, this.combo, this.comboTier());
+  }
+
+  takeHit(ob) {
+    if (this.shieldCharges > 0) {
+      this.shieldCharges--;
+      this.emit(EV.SHIELD, 0, 0);
+      return;
+    }
+    this.hits++;
     if (this.combo > 0) this.emit(EV.COMBO_BREAK, this.combo, 0);
     this.combo = 0;
-    this.fallVel = 0;
-    this.coyoteLeft = 0;      // 발판이 사라졌다. 구제할 발판이 없다
-    this.setState(S.FALLING);
-    this.emit(EV.CRUMBLE, 0, 0);
+    this.stumble = Math.round(C.STUMBLE_MS / C.SIM_DT);
+    this.vstate = V.GROUND;
+    this.footY = 0;
+    this.height = C.PLAYER_H;
+    this.emit(EV.HIT, ob, 0);
   }
 
   die() {
     this.deathTick = this.tick;
-    if (this.runBestY > this.bestY) this.bestY = this.runBestY;
     if (this.score > this.bestScore) this.bestScore = this.score;
+    if (this.travelled > this.bestDist) this.bestDist = this.travelled;
     if (this.comboBest > this.bestCombo) this.bestCombo = this.comboBest;
     this.combo = 0;
     this.setState(S.DEAD);
@@ -616,14 +613,10 @@ export class Game {
   }
 
   // ── 조회 ────────────────────────────────────────────────────
-  heightMeters() { return Math.max(0, this.runBestY) / C.METER_PX; }
-  waterMargin()  { return this.playerY - this.waterY; }
-  comboTier()    { return (this.combo / C.COMBO_TIER) | 0; }
-
-  // 콤보가 물에 거는 힘. 1 = 평소, 0 = 멈춤, 음수 = 내려감.
-  comboWaterMul() {
-    if (this.combo >= C.COMBO_PUSH_AT) return C.COMBO_PUSH_MUL;
-    if (this.combo >= C.COMBO_HOLD_AT) return 0;
-    return 1;
+  // 물이 화면을 얼마나 잠식했는가. 0 = 안 보임, 1 = 플레이어를 삼킴.
+  waterK() { return clamp(1 - this.gap / C.CHASE_GAP_START, 0, 1); }
+  waterNear() {
+    const m = this.gap;
+    return m < C.WATER_NEAR ? clamp(1 - m / C.WATER_NEAR, 0, 1) : 0;
   }
 }

@@ -10,30 +10,34 @@
 //  - data/*.json 이 죽어도 게임은 100% 돈다. 줄어드는 건 다양성뿐이다
 
 import * as C from './config.js';
-import { EV } from './game.js';
+import { EV, FALLBACK_PATTERN } from './game.js';
 
 export const PROFILES = ['SAFE', 'RECKLESS', 'PRECISE', 'ERRATIC', 'BALANCED'];
 export const PROFILE_KR = ['겁쟁이', '도박꾼', '장인', '초심자', '균형'];
 
-// 전환 이유 — 문자열을 만들지 않기 위해 상수로 고정해둔다
 export const REASONS = [
   '관찰 중',
-  '차지가 짧고 조준이 정확하다',
-  '차지가 길고 조준이 거칠다',
-  '차지가 길고 조준이 정확하다',
-  '차지 편차가 크다',
+  '중앙만 달리고 코인을 지나친다',
+  '코인을 다 쫓고 아슬아슬하게 스친다',
+  '반응이 빠르고 거의 부딪히지 않는다',
+  '반응 시간이 들쭉날쭉하다',
   '어느 쪽으로도 치우치지 않았다',
 ];
 
-// 최근 N회 슬라이딩 윈도. 링버퍼라 push 해도 할당이 없다.
+// 드래프트 제시 이유 — 문자열을 만들지 않기 위해 상수로 고정
+export const DRAFT_REASONS = [
+  '기본 구성으로 제시한다',
+  '안전하게만 달린다 — 위험을 감수할 이유를 준다',
+  '너무 욕심을 낸다 — 버틸 수단을 준다',
+  '실력이 충분하다 — 더 밀어붙일 수단을 준다',
+  '아직 손에 안 익었다 — 다루기 쉬운 쪽을 준다',
+  '균형이 잡혀 있다 — 세 계열을 하나씩 준다',
+];
+
 class Ring {
   constructor(n) { this.a = new Float32Array(n); this.n = n; this.i = 0; this.c = 0; }
   reset() { this.i = 0; this.c = 0; }
-  push(v) {
-    this.a[this.i] = v;
-    this.i = (this.i + 1) % this.n;
-    if (this.c < this.n) this.c++;
-  }
+  push(v) { this.a[this.i] = v; this.i = (this.i + 1) % this.n; if (this.c < this.n) this.c++; }
   mean() {
     if (this.c === 0) return 0;
     let s = 0;
@@ -51,63 +55,65 @@ class Ring {
 
 // ── 내장 폴백 청크 12개 ──────────────────────────────────────
 // data/*.json 이 죽어도 게임이 100% 돌아가게 하는 최소 라이브러리.
-// 각 원소는 발판 6개의 [간격, 두께배수, 보너스여부].
-// 플래그: 1=보너스(앰버) 2=부서짐 4=이동
-const FALLBACK_CHUNKS = [
-  { profile: 'BALANCED', difficulty: 0, tags: ['near'], steps: [[140,1,0],[160,1,0],[130,1,0],[180,1,0],[150,1,0],[170,1,0]] },
-  { profile: 'BALANCED', difficulty: 0, tags: ['mid'],  steps: [[200,1,0],[180,1,0],[220,1,0],[190,1,0],[210,1,0],[200,1,0]] },
-  { profile: 'BALANCED', difficulty: 1, tags: ['mix'],  steps: [[150,1,0],[260,1,0],[140,1,1],[240,1,2],[170,1,0],[280,1,0]] },
-  { profile: 'BALANCED', difficulty: 1, tags: ['far'],  steps: [[300,1,0],[260,1,2],[320,1,0],[280,1,0],[300,1,0],[270,1,1]] },
-  { profile: 'BALANCED', difficulty: 2, tags: ['mix'],  steps: [[180,0.9,0],[320,0.9,4],[160,0.9,1],[350,0.9,0],[200,0.9,2],[300,0.9,0]] },
-  { profile: 'BALANCED', difficulty: 2, tags: ['near'], steps: [[130,0.9,2],[150,0.9,0],[140,0.9,4],[160,0.9,1],[135,0.9,0],[155,0.9,2]] },
-  { profile: 'BALANCED', difficulty: 3, tags: ['far'],  steps: [[340,0.85,0],[300,0.85,4],[370,0.85,0],[320,0.85,1],[360,0.85,2],[330,0.85,0]] },
-  { profile: 'BALANCED', difficulty: 3, tags: ['mix'],  steps: [[160,0.85,2],[380,0.85,0],[150,0.85,4],[340,0.85,1],[180,0.85,2],[360,0.85,0]] },
-  { profile: 'BALANCED', difficulty: 4, tags: ['far'],  steps: [[380,0.8,4],[350,0.8,2],[400,0.8,0],[360,0.8,1],[390,0.8,4],[370,0.8,2]] },
-  { profile: 'BALANCED', difficulty: 4, tags: ['mix'],  steps: [[140,0.8,2],[400,0.8,4],[160,0.8,2],[380,0.8,1],[150,0.8,2],[395,0.8,4]] },
-  { profile: 'BALANCED', difficulty: 2, tags: ['ramp'], steps: [[130,1,0],[190,1,0],[250,1,2],[310,1,0],[350,1,1],[390,1,0]] },
-  { profile: 'BALANCED', difficulty: 3, tags: ['drop'], steps: [[390,0.9,0],[330,0.9,4],[270,0.9,0],[210,0.9,1],[160,0.9,2],[130,0.9,0]] },
-];
+// 모듈 로드 시 한 번만 만든다. 루프 안이 아니다.
+const FALLBACK_CHUNKS = [];
+for (let c = 0; c < 12; c++) {
+  const steps = [];
+  for (let r = 0; r < C.CHUNK_ROWS; r++) {
+    const p = ((c * 5 + r) % 12) * 6;
+    steps.push([
+      FALLBACK_PATTERN[p], FALLBACK_PATTERN[p + 1], FALLBACK_PATTERN[p + 2],
+      FALLBACK_PATTERN[p + 3], FALLBACK_PATTERN[p + 4], FALLBACK_PATTERN[p + 5],
+    ]);
+  }
+  FALLBACK_CHUNKS.push({
+    id: 'fallback-' + c, profile: 'BALANCED',
+    difficulty: (c / 3) | 0, tags: ['mix'], steps,
+  });
+}
 
-// ── 내장 폴백 정책 ───────────────────────────────────────────
 // 문서 지시대로 폴백에서는 BALANCED 고정이다.
 const FALLBACK_POLICY = {
   BALANCED: {
-    gapProfile: [1, 1, 1], platformThickness: [1, 1, 1],
-    waterSpeed: 22, aimWobble: 1, bonusPlacement: 'mid', coyoteFrames: 5,
-    preferTags: ['mix'],
+    lanePressure: [1, 1, 1], density: 1, coinTemptation: 'mid',
+    waterMul: 1, telegraph: 1, draftSlant: 2, preferTags: ['mix'],
   },
 };
 
-// ── 내장 폴백 문구 ───────────────────────────────────────────
 const FALLBACK_LINES = {
-  death: ['물이 이겼다', '한 뼘 모자랐다', '재는 동안 차올랐다'],
+  death: ['물이 이겼다', '한 걸음 늦었다', '욕심이 발을 잡았다'],
   record: ['선을 넘었다'],
   revive: ['다시'],
 };
 
-// 전 프로파일 정책 — data/policy.json 이 살아 있을 때 쓰는 기본값.
+// 전 프로파일 정책 — data/policy.json 이 살아 있을 때의 기본값.
 // LLM 베이크가 이 표를 대체·확장한다.
 const BUILTIN_POLICY = {
   // 안전지대를 걷어내 도박을 강요한다
-  SAFE:     { gapProfile: [1.6, 1.0, 0.95], platformThickness: [1, 1, 1],
-              waterSpeed: 26, aimWobble: 1, bonusPlacement: 'far', coyoteFrames: 5,
-              preferTags: ['far', 'mix'] },
+  SAFE: {
+    lanePressure: [0.7, 1.8, 0.7], density: 1.0, coinTemptation: 'risky',
+    waterMul: 1.18, telegraph: 1.0, draftSlant: 0, preferTags: ['center', 'mix'],
+  },
   // 절제에 보상, 무모함에 벌
-  RECKLESS: { gapProfile: [1.0, 1.0, 1.0], platformThickness: [1, 1, 0.7],
-              waterSpeed: 22, aimWobble: 1, bonusPlacement: 'near', coyoteFrames: 5,
-              preferTags: ['near', 'mix'] },
+  RECKLESS: {
+    lanePressure: [1.2, 0.6, 1.2], density: 1.1, coinTemptation: 'safe',
+    waterMul: 1.0, telegraph: 0.9, draftSlant: 1, preferTags: ['side', 'mix'],
+  },
   // 실력에 걸맞은 압력
-  PRECISE:  { gapProfile: [1.0, 1.05, 1.1], platformThickness: [0.75, 0.75, 0.75],
-              waterSpeed: 27.5, aimWobble: 1.4, bonusPlacement: 'far', coyoteFrames: 5,
-              preferTags: ['far', 'ramp'] },
+  PRECISE: {
+    lanePressure: [1, 1, 1], density: 1.35, coinTemptation: 'risky',
+    waterMul: 1.25, telegraph: 0.75, draftSlant: 0, preferTags: ['dense', 'mix'],
+  },
   // 손에 익을 시간을 준다
-  ERRATIC:  { gapProfile: [0.9, 0.9, 0.85], platformThickness: [1.35, 1.35, 1.35],
-              waterSpeed: 18, aimWobble: 0.5, bonusPlacement: 'near', coyoteFrames: 8,
-              preferTags: ['near'] },
+  ERRATIC: {
+    lanePressure: [1, 1, 1], density: 0.65, coinTemptation: 'safe',
+    waterMul: 0.8, telegraph: 1.4, draftSlant: 1, preferTags: ['sparse'],
+  },
   // 3구간 압박 → 1구간 완화 교대
-  BALANCED: { gapProfile: [1, 1, 1], platformThickness: [1, 1, 1],
-              waterSpeed: 22, aimWobble: 1, bonusPlacement: 'mid', coyoteFrames: 5,
-              preferTags: ['mix'] },
+  BALANCED: {
+    lanePressure: [1, 1, 1], density: 1, coinTemptation: 'mid',
+    waterMul: 1, telegraph: 1, draftSlant: 2, preferTags: ['mix'],
+  },
 };
 
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -116,36 +122,25 @@ export class Director {
   constructor(game) {
     this.game = game;
 
-    // 지표 — 최근 8회 슬라이딩 윈도
-    this.wCharge = new Ring(C.METRIC_WINDOW);
-    this.wAim = new Ring(C.METRIC_WINDOW);
-    this.wHesitation = new Ring(C.METRIC_WINDOW);
-    this.wWaterMargin = new Ring(C.METRIC_WINDOW);
+    // 지표 — 최근 8구간 슬라이딩 윈도
+    this.wLane = new Ring(C.METRIC_WINDOW);
+    this.wGreed = new Ring(C.METRIC_WINDOW);
+    this.wReact = new Ring(C.METRIC_WINDOW);
+    this.wNear = new Ring(C.METRIC_WINDOW);
+    this.wWater = new Ring(C.METRIC_WINDOW);
 
-    this.missOver = 0;
-    this.missUnder = 0;
-    this.landings = 0;
-    this.perfects = 0;
-    this.lastLandTick = 0;
-    this.retryLatency = 0;
-
-    // 판정
     this.profile = 'BALANCED';
     this.profileIdx = 4;
     this.observing = true;
     this.reasonIdx = 0;
-    this.lastSwitchDepth = 0;
+    this.draftReason = DRAFT_REASONS[0];
     this.switches = 0;
+    this.lastSwitchDist = 0;
 
-    // 구간
-    this.chunkCount = 0;
-    this.lastPlayerChunk = -1;
-    this.assigned = new Map();   // 청크 인덱스 → 청크 객체 (구간 경계에서만 쓴다)
     this.levers = BUILTIN_POLICY.BALANCED;
     this.difficulty = 0;
     this.balancedPhase = 0;
 
-    // 데이터
     this.chunks = FALLBACK_CHUNKS;
     this.policy = BUILTIN_POLICY;
     this.lines = FALLBACK_LINES;
@@ -153,10 +148,27 @@ export class Director {
     this.librarySize = FALLBACK_CHUNKS.length;
     this.deathLine = FALLBACK_LINES.death[0];
 
-    // 후보 인덱스 버퍼. 매 선택마다 배열을 만들지 않는다.
     this.candidates = new Int32Array(512);
+    this.assigned = new Map();      // 청크 인덱스 → 청크
+    this.lastPlayerChunk = -1;
 
+    this.resetCounters();
     game.supplier = this;
+  }
+
+  resetCounters() {
+    this.centerFrames = 0;
+    this.sideFrames = 0;
+    this.coinsSeen = 0;
+    this.coinsTaken = 0;
+    this.rowsPassed = 0;
+    this.nearCount = 0;
+    this.hitCount = 0;
+    this.jumpCount = 0;
+    this.slideCount = 0;
+    this.stairAcc = 0;
+    this.draftAtk = 0;
+    this.draftDef = 0;
   }
 
   // ── 계층 2 산출물 로딩 ──────────────────────────────────────
@@ -172,7 +184,6 @@ export class Director {
       if (!validateChunks(c)) throw new Error('chunks schema');
       if (!validatePolicy(p)) throw new Error('policy schema');
       if (!validateLines(l)) throw new Error('lines schema');
-
       this.chunks = c.chunks;
       this.librarySize = c.chunks.length;
       this.policy = mergePolicy(p.policies);
@@ -182,7 +193,6 @@ export class Director {
         console.info('[director] data/chunks.json 은 오프라인 플레이스홀더다. D-3 베이크로 교체해야 한다.');
       }
     } catch (e) {
-      // 사용자에게는 아무 표시도 하지 않는다. 게임은 그대로 돈다.
       console.warn('[director] 계층2 데이터를 쓸 수 없어 내장 폴백으로 동작한다:', e.message);
       this.chunks = FALLBACK_CHUNKS;
       this.policy = FALLBACK_POLICY;
@@ -192,15 +202,12 @@ export class Director {
     }
   }
 
-  // ── 판 시작 ─────────────────────────────────────────────────
   onRunStart() {
-    this.wCharge.reset(); this.wAim.reset();
-    this.wHesitation.reset(); this.wWaterMargin.reset();
-    this.missOver = 0; this.missUnder = 0;
-    this.landings = 0; this.perfects = 0;
-    this.chunkCount = 0;
-    this.lastPlayerChunk = -1;
+    this.wLane.reset(); this.wGreed.reset(); this.wReact.reset();
+    this.wNear.reset(); this.wWater.reset();
+    this.resetCounters();
     this.assigned.clear();
+    this.lastPlayerChunk = -1;
     this.observing = true;
     this.reasonIdx = 0;
     this.switches = 0;
@@ -211,16 +218,13 @@ export class Director {
     this.applyLevers();
   }
 
-  // ── 발판 공급 — game.js 가 이 세 개를 부른다 ────────────────
-  chunkFor(n) {
-    const ci = ((n - 1) / C.CHUNK_SIZE) | 0;
+  // ── 트랙 공급 — game.js 가 행마다 이걸 부른다 ────────────────
+  chunkFor(ci) {
     let ch = this.assigned.get(ci);
     if (!ch) {
-      // 필요한 순간에 정한다. 미리 왕창 만들어두면 아직 관찰하지 않은 플레이로 판을 짜게 된다.
       ch = this.selectChunk(ci);
       this.assigned.set(ci, ch);
       if (this.assigned.size > 24) {
-        // 오래된 것부터 버린다 (Map 은 삽입 순서를 지킨다)
         const oldest = this.assigned.keys().next().value;
         this.assigned.delete(oldest);
       }
@@ -228,67 +232,87 @@ export class Director {
     return ch;
   }
 
-  stepOf(n) { return (n - 1) % C.CHUNK_SIZE; }
+  fillRow(game, n, base) {
+    const ci = (n / C.CHUNK_ROWS) | 0;
+    const ch = this.chunkFor(ci);
+    const st = ch.steps[n % C.CHUNK_ROWS];
+    const lv = this.levers;
 
-  gapFor(n) {
-    const ch = this.chunkFor(n);
-    const raw = ch.steps[this.stepOf(n)][0];
-    const g = this.levers.gapProfile;
-    const scale = raw < C.GAP_NEAR ? g[0] : (raw < C.GAP_MID ? g[1] : g[2]);
-    return clamp(raw * scale, C.GAP_FLOOR, C.GAP_CEIL);
-  }
+    // 1) 청크 원본
+    let o0 = st[0], o1 = st[1], o2 = st[2];
+    let c0 = st[3], c1 = st[4], c2 = st[5];
 
-  thickFor(n) {
-    const ch = this.chunkFor(n);
-    const st = ch.steps[this.stepOf(n)];
-    const raw = st[0];
-    const t = this.levers.platformThickness;
-    const band = raw < C.GAP_NEAR ? t[0] : (raw < C.GAP_MID ? t[1] : t[2]);
-    return clamp(st[1] * band, C.LEVER_THICK_MIN, C.LEVER_THICK_MAX);
-  }
-
-  // 발판 종류 비트필드. 보너스만 레버가 위치를 통제한다.
-  flagsFor(n) {
-    const ch = this.chunkFor(n);
-    const st = ch.steps[this.stepOf(n)];
-    let flags = st[2] & C.F_MAX;
-
-    if (flags & C.F_BONUS) {
-      // 유혹의 위치는 레버가 정한다. 청크가 보너스를 제안해도 위치가 안 맞으면 안 놓는다.
-      const place = this.levers.bonusPlacement;
-      const raw = st[0];
-      const band = raw < C.GAP_NEAR ? 'near' : (raw < C.GAP_MID ? 'mid' : 'far');
-      if (place === 'none' || band !== place) flags &= ~C.F_BONUS;
+    // 2) 밀도 레버 — 결정론적으로 덜어내거나 옮긴다. 새로 만들지는 않는다.
+    if (lv.density < 1) {
+      const drop = (n * 7) % 3;
+      if (lv.density < 0.8 || drop === 0) {
+        if (drop === 0) o0 = 0; else if (drop === 1) o1 = 0; else o2 = 0;
+      }
     }
 
-    // 난이도 0에서는 부서지는 발판도 이동 발판도 나오지 않는다.
-    // 첫 판 첫 10초에 규칙을 다 던지면 아무도 배우지 못한다.
-    if (this.difficulty < 1) flags &= ~C.F_CRUMBLE;
-    if (this.difficulty < 2) flags &= ~C.F_MOVING;
+    // 3) 레인 압박 — 비어 있는 "압박 대상 레인"으로 장애물을 옮긴다.
+    //    새로 만들지 않고 위치만 바꾸므로 통과 가능성이 유지된다.
+    const want = lv.lanePressure[0] > lv.lanePressure[1]
+      ? (lv.lanePressure[0] > lv.lanePressure[2] ? 0 : 2)
+      : (lv.lanePressure[1] > lv.lanePressure[2] ? 1 : 2);
+    if (lv.lanePressure[want] > 1.3) {
+      const cur = [o0, o1, o2];
+      if (cur[want] === 0) {
+        for (let l = 0; l < 3; l++) {
+          if (l !== want && cur[l] !== 0) { cur[want] = cur[l]; cur[l] = 0; break; }
+        }
+      }
+      o0 = cur[0]; o1 = cur[1]; o2 = cur[2];
+    }
 
-    // 한 발판이 부서지면서 동시에 움직이지는 않는다. 읽을 수 없어진다.
-    if ((flags & C.F_CRUMBLE) && (flags & C.F_MOVING)) flags &= ~C.F_MOVING;
-    return flags;
+    // 4) 유혹의 위치 — 코인을 안전한 레인에 둘지, 위험한 레인 옆에 둘지
+    if (lv.coinTemptation === 'risky') {
+      // 장애물이 있는 레인의 바로 옆으로 코인을 민다
+      const oo = [o0, o1, o2], cc = [c0, c1, c2];
+      let moved = false;
+      for (let l = 0; l < 3 && !moved; l++) {
+        if (oo[l] === 0) continue;
+        const nb = l === 0 ? 1 : (l === 2 ? 1 : (n % 2 === 0 ? 0 : 2));
+        if (oo[nb] === 0) {
+          for (let k = 0; k < 3; k++) if (cc[k]) { cc[k] = 0; break; }
+          cc[nb] = 1; moved = true;
+        }
+      }
+      c0 = cc[0]; c1 = cc[1]; c2 = cc[2];
+    } else if (lv.coinTemptation === 'safe') {
+      const oo = [o0, o1, o2], cc = [0, 0, 0];
+      let placed = false;
+      for (let l = 0; l < 3 && !placed; l++) {
+        const t = (l + (n % 3)) % 3;
+        if (oo[t] === 0 && (c0 || c1 || c2)) { cc[t] = 1; placed = true; }
+      }
+      c0 = cc[0]; c1 = cc[1]; c2 = cc[2];
+    }
+
+    // 5) **안전장치 — 세 레인이 동시에 막히면 하나를 연다.**
+    //    데이터가 뭘 주든, 레버가 뭘 하든, 통과 불가능한 행은 나올 수 없다.
+    if (o0 !== 0 && o1 !== 0 && o2 !== 0) {
+      const open = n % 3;
+      if (open === 0) o0 = 0; else if (open === 1) o1 = 0; else o2 = 0;
+    }
+
+    game._rowOb[base] = o0;
+    game._rowOb[base + 1] = o1;
+    game._rowOb[base + 2] = o2;
+    game._rowCoin[base] = c0;
+    game._rowCoin[base + 1] = c1;
+    game._rowCoin[base + 2] = c2;
+    this.coinsSeen += (c0 ? 1 : 0) + (c1 ? 1 : 0) + (c2 ? 1 : 0);
   }
 
   // ── 청크 선택 — 결정론적. Math.random() 없음 ────────────────
   selectChunk(ci) {
-    this.chunkCount = ci;
-    const want = this.profile;
-    const diff = this.difficulty;
     const tags = this.levers.preferTags;
-
-    // 1순위: 프로파일 + 난이도 + 선호 태그
-    let n = this.collect(want, diff, tags);
-    // 2순위: 프로파일 + 난이도
-    if (n === 0) n = this.collect(want, diff, null);
-    // 3순위: 난이도만
-    if (n === 0) n = this.collect(null, diff, null);
-    // 4순위: 전부
+    let n = this.collect(this.profile, this.difficulty, tags);
+    if (n === 0) n = this.collect(this.profile, this.difficulty, null);
+    if (n === 0) n = this.collect(null, this.difficulty, null);
     if (n === 0) n = this.collect(null, -1, null);
     if (n === 0) return FALLBACK_CHUNKS[ci % FALLBACK_CHUNKS.length];
-
-    // 변형 선택도 결정론적이다. 구간 번호로 순회한다.
     return this.chunks[this.candidates[(ci * 5 + this.switches) % n]];
   }
 
@@ -310,73 +334,119 @@ export class Director {
     return n;
   }
 
+  // ── 특성 드래프트 — 어떤 3개를 제시할지가 곧 디렉터의 판단이다 ──
+  draftOffer(game, out) {
+    const slant = this.levers.draftSlant;   // 0=공격 1=방어 2=혼합
+    this.draftReason = DRAFT_REASONS[this.observing ? 0 : this.profileIdx + 1];
+
+    let n = 0;
+    // 1순위: 성향의 반대편 계열을 먼저 채운다
+    const order = slant === 2 ? [0, 1, 2] : (slant === 0 ? [0, 2, 1] : [1, 2, 0]);
+    const start = (this.switches * 3 + game.runs) % C.TRAITS.length;
+    for (let pass = 0; pass < order.length && n < C.TRAIT_OFFER; pass++) {
+      const kind = order[pass];
+      for (let k = 0; k < C.TRAITS.length && n < C.TRAIT_OFFER; k++) {
+        const i = (start + k) % C.TRAITS.length;
+        if (game.traits[i]) continue;
+        if (C.TRAITS[i].kind !== kind) continue;
+        let dup = false;
+        for (let q = 0; q < n; q++) if (out[q] === i) dup = true;
+        if (dup) continue;
+        out[n++] = i;
+        // 혼합이면 계열당 하나씩만
+        if (slant === 2) break;
+      }
+    }
+    // 남으면 아무거나 채운다
+    for (let k = 0; k < C.TRAITS.length && n < C.TRAIT_OFFER; k++) {
+      const i = (start + k) % C.TRAITS.length;
+      if (game.traits[i]) continue;
+      let dup = false;
+      for (let q = 0; q < n; q++) if (out[q] === i) dup = true;
+      if (dup) continue;
+      out[n++] = i;
+    }
+    while (n < C.TRAIT_OFFER) out[n++] = -1;
+  }
+
   // ── 이벤트 수신 — 지표 수집 ─────────────────────────────────
   onEvent(type, a, b, game) {
     switch (type) {
-      case EV.FIRE:
-        this.wCharge.push(game.lastChargeRatio);
+      case EV.COIN: this.coinsTaken++; break;
+      case EV.NEAR_MISS: if (a > 0) this.nearCount++; break;
+      case EV.HIT: this.hitCount++; break;
+      case EV.JUMP: this.jumpCount++; this.noteReaction(game); break;
+      case EV.SLIDE: this.slideCount++; this.noteReaction(game); break;
+      case EV.MOVE: this.noteReaction(game); break;
+      case EV.STAIR_CLEAR: this.stairAcc = a; break;
+      case EV.DRAFT_PICK:
+        if (b === 0) this.draftAtk++; else if (b === 1) this.draftDef++;
         break;
-      case EV.PERFECT:
-        this.wAim.push(game.lastAimError);
-        this.landings++; this.perfects++;
-        this.lastLandTick = game.tick;
-        break;
-      case EV.LAND:
-        this.wAim.push(game.lastAimError);
-        this.landings++;
-        this.lastLandTick = game.tick;
-        break;
-      case EV.MISS:
-        this.wAim.push(game.lastAimError);
-        if (a > 0) this.missOver++; else this.missUnder++;
-        break;
-      case EV.CHARGE_START:
-        if (this.lastLandTick > 0) {
-          this.wHesitation.push((game.tick - this.lastLandTick) * C.SIM_DT);
-        }
-        break;
-      case EV.RESET:
-        if (game.deathTick > 0) this.retryLatency = (game.tick - game.deathTick) * C.SIM_DT;
-        break;
-      case EV.DEATH:
-        this.pickDeathLine(game);
-        break;
-      default:
-        break;
+      case EV.DEATH: this.pickDeathLine(game); break;
+      default: break;
+    }
+  }
+
+  // 반응 시간의 대리 지표 — 회피 입력 시점에 가장 가까운 장애물까지의 거리.
+  // 늦게 반응할수록 장애물이 가까이 와 있다. 0 = 여유, 1 = 코앞.
+  noteReaction(game) {
+    const first = Math.floor(game.travelled / C.ROW_SPACING);
+    for (let i = first; i <= first + 6; i++) {
+      if (i > game.rowMade) break;
+      const z = game.rowZ(i) - game.travelled;
+      if (z <= 0) continue;
+      let any = false;
+      for (let l = 0; l < C.LANE_COUNT; l++) if (game.rowOb(i, l) !== C.OB_NONE) any = true;
+      if (!any) continue;
+      this.wReact.push(clamp(1 - z / (C.ROW_SPACING * 4), 0, 1));
+      return;
     }
   }
 
   pickDeathLine(game) {
     const pool = this.lines.death;
     if (!pool || pool.length === 0) return;
-    // 결정론적 선택 — 판 번호와 깊이로 고른다
-    this.deathLine = pool[(game.runs * 7 + game.depth) % pool.length];
+    this.deathLine = pool[(game.runs * 7 + ((game.travelled / C.ROW_SPACING) | 0)) % pool.length];
   }
 
-  // ── 매 스텝 — 구간 경계 감지와 물 여유 표본 ──────────────────
+  // ── 매 스텝 — 구간 경계 감지와 표본 수집 ─────────────────────
   step(game) {
-    this.wWaterMargin.push(game.waterMargin());
-    const ci = (game.platIdx / C.CHUNK_SIZE) | 0;
+    if (game.lane === 1) this.centerFrames++; else this.sideFrames++;
+    const ci = ((game.travelled / C.ROW_SPACING) / C.CHUNK_ROWS) | 0;
     if (ci !== this.lastPlayerChunk) {
+      if (this.lastPlayerChunk >= 0) this.closeChunk(game);
       this.lastPlayerChunk = ci;
       this.onChunkBoundary(game, ci);
     }
   }
 
-  onChunkBoundary(game, ci) {
-    // 난이도는 깊이를 따라 오른다
-    this.difficulty = clamp((game.depth / 12) | 0, 0, 4);
+  // 구간이 끝날 때 그 구간의 지표를 윈도에 밀어 넣는다
+  closeChunk(game) {
+    const frames = this.centerFrames + this.sideFrames;
+    this.wLane.push(frames > 0 ? this.centerFrames / frames : 0.5);
+    this.wGreed.push(this.coinsSeen > 0 ? clamp(this.coinsTaken / this.coinsSeen, 0, 1) : 0.5);
+    this.wNear.push(clamp(this.nearCount / C.CHUNK_ROWS, 0, 1));
+    this.wWater.push(clamp(game.gap / C.CHASE_GAP_START, 0, 1));
+    this.centerFrames = 0; this.sideFrames = 0;
+    this.coinsSeen = 0; this.coinsTaken = 0;
+    this.nearCount = 0;
+  }
 
-    if (ci < C.OBSERVE_CHUNKS) { this.observing = true; return; }
+  onChunkBoundary(game, ci) {
+    this.difficulty = clamp(((game.travelled / 2600) | 0), 0, 4);
+
+    if (ci < C.OBSERVE_CHUNKS) { this.observing = true; this.applyLevers(); return; }
     this.observing = false;
 
-    const cr = this.wCharge.mean();
-    const ae = this.wAim.mean();
-    const sd = this.wCharge.stdev();
+    const lane = this.wLane.mean();
+    const greed = this.wGreed.mean();
+    const react = this.wReact.mean();
+    const sd = this.wReact.stdev();
+    const near = this.wNear.mean();
 
-    const raw = classify(cr, ae, sd);
+    const raw = classify(lane, greed, react, sd, near);
     let next = raw;
-    if (raw !== this.profile && nearBoundary(cr, ae, sd)) {
+    if (raw !== this.profile && nearBoundary(lane, greed, react, sd, near)) {
       // 히스테리시스 — 경계값 ±0.05 안에서는 직전 프로파일을 유지한다.
       // 이게 없으면 프로파일이 구간마다 튄다.
       next = this.profile;
@@ -384,8 +454,8 @@ export class Director {
     if (next !== this.profile) {
       this.profile = next;
       this.profileIdx = PROFILES.indexOf(next);
-      this.reasonIdx = reasonFor(next);
-      this.lastSwitchDepth = game.depth;
+      this.reasonIdx = this.profileIdx + 1;
+      this.lastSwitchDist = game.travelled;
       this.switches++;
     }
     this.applyLevers();
@@ -394,60 +464,42 @@ export class Director {
   applyLevers() {
     const p = this.policy[this.profile] || this.policy.BALANCED || FALLBACK_POLICY.BALANCED;
     this.levers = p;
-
     // BALANCED 는 3구간 압박 → 1구간 완화로 교대한다
-    let waterSpeed = p.waterSpeed;
     if (this.profile === 'BALANCED') {
       this.balancedPhase = (this.balancedPhase + 1) % 4;
-      waterSpeed = this.balancedPhase === 3 ? p.waterSpeed * 0.8 : p.waterSpeed * 1.1;
     }
-
-    const g = this.game;
-    g.waterRisePerStep = clamp(waterSpeed, C.LEVER_WATER_MIN, C.LEVER_WATER_MAX) / C.SIM_HZ;
-    g.aimWobbleScale = clamp(p.aimWobble, C.LEVER_WOBBLE_MIN, C.LEVER_WOBBLE_MAX);
-    g.coyoteFrames = clamp(p.coyoteFrames | 0, C.LEVER_COYOTE_MIN, C.LEVER_COYOTE_MAX);
-    this.appliedWaterSpeed = clamp(waterSpeed, C.LEVER_WATER_MIN, C.LEVER_WATER_MAX);
   }
 
   // ── 디렉터 뷰가 읽는 값 ─────────────────────────────────────
   get profileName() { return PROFILE_KR[this.profileIdx] || PROFILE_KR[4]; }
-  get metricCharge() { return this.wCharge.mean(); }
-  get metricAim() { return this.wAim.mean(); }
-  get metricStdev() { return this.wCharge.stdev(); }
-  get perfectRate() { return this.landings === 0 ? 0 : this.perfects / this.landings; }
-  get missBias() {
-    const t = this.missOver + this.missUnder;
-    return t === 0 ? 0.5 : this.missOver / t;
+  get metricLane() { return this.wLane.mean(); }
+  get metricGreed() { return this.wGreed.mean(); }
+  get metricReact() { return this.wReact.mean(); }
+  get metricStdev() { return this.wReact.stdev(); }
+  get metricNear() { return this.wNear.mean(); }
+  get dodgeStyle() {
+    const t = this.jumpCount + this.slideCount;
+    return t === 0 ? 0.5 : this.jumpCount / t;
   }
 }
 
-// ── 프로파일 판정 — 문서 임계값 그대로. 결정론적 ──────────────
-function classify(cr, ae, sd) {
-  if (cr < C.TH_CHARGE_LOW && ae < C.TH_AIM_LOW) return 'SAFE';
-  if (cr > C.TH_CHARGE_HIGH && ae > C.TH_AIM_HIGH) return 'RECKLESS';
-  if (cr > C.TH_CHARGE_HIGH && ae < C.TH_AIM_LOW) return 'PRECISE';
+// ── 프로파일 판정 — 결정론적 ──────────────────────────────────
+function classify(lane, greed, react, sd, near) {
+  if (lane > C.TH_LANE_HIGH && greed < C.TH_GREED_LOW) return 'SAFE';
+  if (greed > C.TH_GREED_HIGH && near > C.TH_NEAR_HIGH) return 'RECKLESS';
+  if (react < C.TH_REACT_FAST && near < C.TH_NEAR_HIGH) return 'PRECISE';
   if (sd > C.TH_STDEV) return 'ERRATIC';
   return 'BALANCED';
 }
 
-// 임계값 근처인가. 여기 걸리면 프로파일을 바꾸지 않는다.
-function nearBoundary(cr, ae, sd) {
+function nearBoundary(lane, greed, react, sd, near) {
   const m = C.HYSTERESIS;
-  return Math.abs(cr - C.TH_CHARGE_LOW) < m
-      || Math.abs(cr - C.TH_CHARGE_HIGH) < m
-      || Math.abs(ae - C.TH_AIM_LOW) < m
-      || Math.abs(ae - C.TH_AIM_HIGH) < m
+  return Math.abs(lane - C.TH_LANE_HIGH) < m
+      || Math.abs(greed - C.TH_GREED_LOW) < m
+      || Math.abs(greed - C.TH_GREED_HIGH) < m
+      || Math.abs(react - C.TH_REACT_FAST) < m
+      || Math.abs(near - C.TH_NEAR_HIGH) < m
       || Math.abs(sd - C.TH_STDEV) < m;
-}
-
-function reasonFor(profile) {
-  switch (profile) {
-    case 'SAFE': return 1;
-    case 'RECKLESS': return 2;
-    case 'PRECISE': return 3;
-    case 'ERRATIC': return 4;
-    default: return 5;
-  }
 }
 
 // ── 스키마 검증 — 통과하지 못하면 폴백이다 ────────────────────
@@ -458,14 +510,19 @@ function validateChunks(c) {
     if (!k || typeof k.profile !== 'string') return false;
     if (PROFILES.indexOf(k.profile) < 0) return false;
     if (typeof k.difficulty !== 'number' || k.difficulty < 0 || k.difficulty > 4) return false;
-    if (!Array.isArray(k.steps) || k.steps.length !== C.CHUNK_SIZE) return false;
+    if (!Array.isArray(k.steps) || k.steps.length !== C.CHUNK_ROWS) return false;
     for (let s = 0; s < k.steps.length; s++) {
       const st = k.steps[s];
-      if (!Array.isArray(st) || st.length !== 3) return false;
-      if (typeof st[0] !== 'number' || st[0] < C.GAP_FLOOR || st[0] > C.GAP_CEIL) return false;
-      if (typeof st[1] !== 'number' || st[1] < C.LEVER_THICK_MIN || st[1] > C.LEVER_THICK_MAX) return false;
-      // 플래그 비트필드: 1=보너스 2=부서짐 4=이동
-      if (!Number.isInteger(st[2]) || st[2] < 0 || st[2] > C.F_MAX) return false;
+      if (!Array.isArray(st) || st.length !== 6) return false;
+      let blocked = 0;
+      for (let v = 0; v < 3; v++) {
+        if (!Number.isInteger(st[v]) || st[v] < 0 || st[v] > 3) return false;
+        if (st[v] !== 0) blocked++;
+      }
+      if (blocked === 3) return false;   // 통과 불가능한 행은 데이터로도 못 들어온다
+      for (let v = 3; v < 6; v++) {
+        if (st[v] !== 0 && st[v] !== 1) return false;
+      }
     }
   }
   return true;
@@ -478,12 +535,12 @@ function validatePolicy(p) {
   for (let i = 0; i < keys.length; i++) {
     const v = p.policies[keys[i]];
     if (!v) return false;
-    if (!Array.isArray(v.gapProfile) || v.gapProfile.length !== 3) return false;
-    if (!Array.isArray(v.platformThickness) || v.platformThickness.length !== 3) return false;
-    if (typeof v.waterSpeed !== 'number') return false;
-    if (typeof v.aimWobble !== 'number') return false;
-    if (typeof v.coyoteFrames !== 'number') return false;
-    if (['near', 'mid', 'far', 'none'].indexOf(v.bonusPlacement) < 0) return false;
+    if (!Array.isArray(v.lanePressure) || v.lanePressure.length !== 3) return false;
+    if (typeof v.density !== 'number') return false;
+    if (typeof v.waterMul !== 'number') return false;
+    if (typeof v.telegraph !== 'number') return false;
+    if (typeof v.draftSlant !== 'number') return false;
+    if (['safe', 'mid', 'risky'].indexOf(v.coinTemptation) < 0) return false;
   }
   return true;
 }
@@ -494,12 +551,21 @@ function validateLines(l) {
       && Array.isArray(l.record) && Array.isArray(l.revive);
 }
 
-// 베이크 결과가 일부 프로파일만 담고 있어도 나머지는 내장값으로 메운다.
 function mergePolicy(p) {
   const out = {};
   for (let i = 0; i < PROFILES.length; i++) {
     const k = PROFILES[i];
-    out[k] = p[k] || BUILTIN_POLICY[k];
+    const v = p[k] || BUILTIN_POLICY[k];
+    // 레버는 범위 밖으로 나갈 수 없다. 데이터가 뭘 주든 여기서 자른다.
+    out[k] = {
+      lanePressure: v.lanePressure,
+      density: clamp(v.density, C.LEVER_DENSITY_MIN, C.LEVER_DENSITY_MAX),
+      coinTemptation: v.coinTemptation,
+      waterMul: clamp(v.waterMul, C.LEVER_WATER_MIN, C.LEVER_WATER_MAX),
+      telegraph: clamp(v.telegraph, C.LEVER_TELEGRAPH_MIN, C.LEVER_TELEGRAPH_MAX),
+      draftSlant: v.draftSlant | 0,
+      preferTags: v.preferTags || ['mix'],
+    };
   }
   return out;
 }

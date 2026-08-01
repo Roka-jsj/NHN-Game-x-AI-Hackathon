@@ -2,7 +2,6 @@
 // 수치를 바꾸고 싶으면 여기만 본다. 다른 파일에 숫자를 흩뿌리지 않는다.
 
 // ─── 논리 좌표계 ──────────────────────────────────────────────
-// 월드 y는 위로 증가한다. 화면 y는 아래로 증가한다. render에서 뒤집는다.
 export const VIEW_W = 540;
 export const VIEW_H = 960;
 
@@ -12,226 +11,232 @@ export const SIM_DT = 1000 / SIM_HZ;          // 16.667ms
 export const MAX_FRAME_DELTA = 250;           // 탭 복귀 시 누산기 폭주(죽음의 나선) 차단
 export const MAX_STEPS_PER_FRAME = 8;         // 위 클램프의 이중 안전판
 
-// ─── 기하 ────────────────────────────────────────────────────
-export const UNIT_PX = 8;                     // 여백 단위. 8의 배수만 쓴다
-export const PLAYER_RADIUS = 14;
-export const PLATFORM_THICKNESS = 12;         // 세로 두께. 착지 판정에 쓰이는 치수다
-export const PLATFORM_REACH = 76;             // 벽에서 튀어나온 길이. 렌더 전용, 판정 무관
-export const WALL_INSET = 64;                 // 화면 가장자리 → 벽면
-// 발판이 시작되는 x. 벽면이 아니라 **플레이어 지름 + 여백 8px** 만큼 떨어져서 시작한다.
-// 실루엣 테스트에서 플레이어 원과 발판 막대가 한 덩어리로 뭉쳐 읽히지 않았다.
-// 색으로 때우지 않고 형태를 고쳤다 — 플레이어는 벽을 잡고, 선반은 그 옆에서 뻗어 나온다.
-export const PLATFORM_X0 = WALL_INSET + PLAYER_RADIUS * 2 + UNIT_PX;
+// ─── 여백 단위 ────────────────────────────────────────────────
+export const UNIT_PX = 8;                     // 여백은 8의 배수만 쓴다
 
-// 착지 허용폭 = 발판 반두께 + 플레이어 반지름.
-// aimError는 이 값으로 정규화한다. 디렉터 임계값 0.4/0.6이 의미를 갖는 유일한 기준이다.
-export const BASE_TOLERANCE = PLATFORM_THICKNESS / 2 + PLAYER_RADIUS;  // 20px
-export const PERFECT_RATIO = 0.12;            // 완벽 착지 = 발판 중심 ±12%
-
-// ─── 차지 · 도약 ─────────────────────────────────────────────
-export const CHARGE_MAX_MS = 900;
-export const CHARGE_MIN_MS = 80;              // 그 미만 릴리스는 80ms로 취급 (오발 구제)
-export const OVERCHARGE_WARN_MS = 900;        // 이 시점부터 경고 연출
-export const OVERCHARGE_FIRE_MS = 1200;       // 강제 발사
-export const OVERCHARGE_PENALTY = 0.85;       // 강제 발사에만 −15%
-
-export const LEAP_DIST_MIN = 90;
-export const LEAP_DIST_MAX = 420;
-export const LEAP_TIME_MIN = 180;
-export const LEAP_TIME_MAX = 420;
-
-// ─── 조준 진동 — 사인파다. Math.random() 금지. 읽을 수 있어야 실력이 된다 ───
-export const WOBBLE_RATIO = 0.06;             // 진폭 = 조준선 길이 × 0.06
-export const WOBBLE_PERIOD_MS = 620;
-
-// ─── 물 — 반드시 선형. 이징 금지 ─────────────────────────────
-export const WATER_SPEED_PX_S = 22;
-// per-step 상수로 미리 나눠둔다. 시뮬레이션 코드에서 deltaTime을 곱하지 않기 위해서다.
-// 고정 스텝인데 delta를 곱하면 이중 적용이다 (QA A1).
-export const WATER_RISE_PER_STEP = WATER_SPEED_PX_S / SIM_HZ;
-export const WATER_START_GAP = 520;           // 시작 시 플레이어 아래 여유
-export const WATER_NEAR_PX = 200;             // 이 거리 안이면 근접 경고
-
-// ── 추격 규칙 ────────────────────────────────────────────────
-// 문서 수치(22px/s 선형)만으로는 물이 영원히 위협이 되지 않는다.
-// 플레이어는 도약 200px을 0.6초에 하므로 상승 속도가 약 333px/s다.
-// 물이 22px/s로 오르면 30초 뒤 수면은 화면 9장 아래에 있다.
-// "차지하는 동안 물이 오른다"는 문서의 핵심 문장이 실제로는 작동하지 않는다.
+// ─── 원근 투영 ────────────────────────────────────────────────
+// 레인 3개가 소실점으로 모이는 고전적 러너 투영.
+// 에셋 0개로 서브웨이 서퍼·템플런의 화면을 만든다.
 //
-// 그래서 거리가 벌어지면 물이 3배속으로 따라붙는다.
-// **여전히 선형이다** — 일정 속도 두 개뿐이고, 어느 쪽인지 눈으로 보인다.
-// 순간이동하지 않는다. 예측 가능해야 실패가 플레이어 탓이 된다.
-export const WATER_CHASE_MUL = 3;
-export const CHASE_MARGIN_START = 640;        // 초반: 화면 2/3 아래에서 따라온다
-export const CHASE_MARGIN_END = 300;          // 후반: 코앞까지 붙는다
-export const CHASE_TIGHTEN_DEPTH = 60;        // 이 발판 수에 걸쳐 좁혀진다
-
-// ─── 콤보 — 연속 완벽 착지 ───────────────────────────────────
-// 이 게임의 척추다. 완벽 착지(±12%)는 오래 정확히 겨눠야 나오고,
-// 겨누는 동안 물은 오른다. 그런데 완벽 착지가 쌓이면 물이 멈추고, 더 쌓이면 내려간다.
-// **정확함이 곧 생존이다.** 문서가 "게임 전체"라고 한 긴장이 여기서 닫힌다.
-export const COMBO_HOLD_AT = 3;               // 이 콤보부터 물이 멈춘다
-export const COMBO_PUSH_AT = 6;               // 이 콤보부터 물이 내려간다
-export const COMBO_PUSH_MUL = -0.5;           // 내려가는 속도 (기본 속도의 절반)
-export const COMBO_TIER = 3;                  // 티어 하나당 콤보 3
-
-// ─── 점수 ────────────────────────────────────────────────────
-export const SCORE_BASE = 10;                 // 착지 기본점
-export const SCORE_PER_PX = 1 / 20;           // 멀리 뛸수록 더 준다 — 위험에 보상
-export const SCORE_SKIP = 25;                 // 한 칸 건너뛰기 성공
-export const SCORE_BONUS = 150;               // 앰버 발판
-export const COMBO_MULT_STEP = 0.5;           // 배수 = 1 + 콤보 × 0.5
-export const BONUS_WATER_PUSH = 220;          // 앰버를 먹으면 물이 이만큼 내려간다
-
-// ─── 낙하 ────────────────────────────────────────────────────
-export const FALL_ACC_PER_STEP = 1.2;
-export const FALL_MAX_SPEED = 42;
-
-// ─── 카메라 ──────────────────────────────────────────────────
-export const CAM_ANCHOR = 0.40;               // 플레이어를 화면 상단 40%에 유지
-export const CAM_LERP = 0.12;
-
-// ─── 발판 종류 — 비트필드 ────────────────────────────────────
-// 청크 스텝의 3번째 값이 이 비트필드다. [간격, 두께배수, 플래그]
+//   s = ZNEAR / (ZNEAR + z)        z=0 에서 1, 멀어질수록 0
+//   화면x = VP_X + worldX × s
+//   화면y = HORIZON_Y + (GROUND_Y − HORIZON_Y) × s
 //
-// 왜 종류를 늘리는가: 가만히 있는 발판만 있으면 "오래 겨눌수록 정확하다"가
-// 항상 옳은 전략이 된다. 그러면 문서가 말한 긴장("재는 동안 물은 오른다")이
-// 물이 느린 순간 전부 사라진다. 발판 자체가 시간을 압박해야 매 순간 선택이 생긴다.
-export const F_BONUS = 1;      // 앰버 — 먹으면 물이 내려간다
-export const F_CRUMBLE = 2;    // 부서진다 — 붙는 순간부터 무너진다. 오래 겨눌 수 없다
-export const F_MOVING = 4;     // 위아래로 흔들린다 — 사인파. 읽을 수 있다
-export const F_MAX = 7;
+// 이 식은 곱셈 두 번과 나눗셈 한 번이다. 폴리곤이 아무리 많아도 싸다.
+export const HORIZON_Y = 260;
+// 플레이어가 서 있는 화면 y. 아래로 240px 을 비워 둔다 —
+// 물이 차오를 공간이다. 이 여백이 없으면 물이 곧바로 플레이어를 덮어
+// 화면이 안 읽힌다. 실제로 820 으로 뒀다가 그렇게 됐다.
+export const GROUND_Y = 720;
+export const VP_X = VIEW_W * 0.5;
+export const ZNEAR = 520;
+// 이보다 먼 것은 그리지 않는다. 420 속도에서 5.5초 앞까지 보인다 —
+// 반응하기엔 충분하고, 더 늘리면 원경에 장애물이 뭉쳐 읽히지 않는다.
+export const ZFAR = 2300;
 
-export const CRUMBLE_FRAMES = 42;             // 0.7초. 이 안에 떠나야 한다
-export const CRUMBLE_WARN = 15;               // 남은 프레임이 이하면 경고 연출
-// 부서지는 발판 **다음** 간격의 상한.
-// 390px 도약은 818ms 차지를 요구하는데 발판은 700ms 만에 무너진다 —
-// 그 조합은 어떻게 눌러도 못 넘는다. 실패가 플레이어 탓이 아니게 되는 배치다.
-// 청크가 뭘 주든 여기서 잘라낸다. 데이터가 아니라 규칙으로 막는다.
-export const CRUMBLE_NEXT_GAP_MAX = 300;      // 필요한 차지 약 600ms — 반응 시간까지 감안
-export const MOVE_AMP = 34;                   // 이동 발판 진폭
-export const MOVE_PERIOD_MS = 1800;           // 주기. 조준 진동(620ms)과 배수 관계가 아니게 둔다
+// ─── 레인 ────────────────────────────────────────────────────
+export const LANE_COUNT = 3;
+export const LANE_W = 150;                    // 레인 중심 간 월드 거리
+export const LANE_SHIFT_MS = 130;             // 레인 이동 소요. 관성 특성이 0으로 만든다
+export const LANE_X = [-LANE_W, 0, LANE_W];
 
-// ─── 관문 ────────────────────────────────────────────────────
-// 끝없이 오르기만 하면 진척이 안 느껴진다. 일정 간격마다 사건을 만든다.
-export const GATE_EVERY = 12;                 // 발판 12개마다
-export const GATE_SCORE = 200;
-export const GATE_WATER_PUSH = 120;
+// ─── 플레이어 ─────────────────────────────────────────────────
+export const PLAYER_W = 64;
+export const PLAYER_H = 120;
+export const JUMP_MS = 460;
+export const JUMP_APEX = 150;                 // 발밑이 이만큼 뜬다
+export const SLIDE_MS = 380;
+export const SLIDE_H = 55;                    // 슬라이드 중 키
 
-// ─── 발판 풀 ─────────────────────────────────────────────────
-export const PLAT_POOL = 64;                  // 링버퍼. 화면에 동시에 보이는 건 10개 안팎
-// 착지 후보 탐색 범위. 최대 도약 420px / 최소 간격 100px = 4.2칸이고
-// 후보는 같은 벽(한 칸 걸러)만 세므로 8이면 충분하다.
-// 이 값이 곧 "발판을 얼마나 앞서 생성하는가"이기도 하다 —
-// 크게 잡으면 디렉터가 아직 관찰하지 않은 구간까지 미리 만들어버린다.
-export const LOOKAHEAD = 8;
+// ─── 속도 ────────────────────────────────────────────────────
+export const SPEED_BASE = 420;                // 월드 단위 / 초
+export const SPEED_MAX = 760;
+export const SPEED_RAMP_DIST = 9000;          // 이 거리에 걸쳐 최고 속도까지 오른다
+export const STUMBLE_MS = 1100;               // 충돌 후 비틀거리는 시간
+export const STUMBLE_SPEED_MUL = 0.25;
 
-// 패스 1 고정 패턴. 랜덤 없음. 전부 [LEAP_DIST_MIN, LEAP_DIST_MAX] 안이다.
-// 패스 4에서 디렉터가 이 배열 대신 청크를 공급한다.
-export const GAP_PATTERN = [150, 210, 130, 280, 170, 240, 120, 330];
+// ─── 장애물 ───────────────────────────────────────────────────
+// 세 종류가 가위바위보처럼 맞물린다. 하나로 둘을 넘을 수 없다.
+export const OB_NONE = 0;
+export const OB_LOW = 1;      // 낮은 벽  → 점프로만 넘는다
+export const OB_BEAM = 2;     // 높은 빔  → 슬라이드로만 지난다
+export const OB_PILLAR = 3;   // 기둥     → 레인을 바꾸는 수밖에 없다
 
-// ─── 게임필 (패스 2) ─────────────────────────────────────────
+// 폭은 종류마다 다르다. **형태만으로 구분돼야 한다** — 색으로 때우지 않는다.
+//   낮은 벽: 넓고 낮다   → 넘어라
+//   높은 빔: 넓고 얇고 떠 있다 → 숙여라
+//   기둥:   좁고 높다   → 돌아가라
+export const OB_W = 112;
+export const OB_W_LOW = 112;
+export const OB_W_BEAM = 128;
+export const OB_W_PILLAR = 62;
+export const OB_DEPTH = 64;
+export const OB_LOW_H = 70;                   // 0 ~ 70 을 막는다
+export const OB_BEAM_LO = 80;                 // 80 ~ 300 을 막는다
+export const OB_BEAM_HI = 300;
+export const OB_PILLAR_H = 300;
+
+// ─── 코인 ─────────────────────────────────────────────────────
+export const COIN_R = 18;
+export const COIN_H = 92;                     // 지면에서 이 높이에 뜬다
+export const COIN_SCORE = 25;
+
+// ─── 트랙 ─────────────────────────────────────────────────────
+export const ROW_SPACING = 240;               // 행 간 월드 거리. 420 속도에서 0.57초
+export const CHUNK_ROWS = 6;                  // 구간 = 행 6개
+export const ROW_POOL = 64;                   // 링버퍼
+// 같은 레인에서 "자세를 요구하는" 장애물 사이에 최소 이만큼의 행을 비운다.
+// 점프는 460ms 인데 행 간격은 최고 속도에서 316ms 다.
+// 연속으로 놓으면 점프가 끝나기 전에 다음 것이 도착해 **어떻게 눌러도 못 넘는다.**
+// 실제로 그렇게 만들었다가 봇이 매번 같은 자리에서 죽었다.
+export const MIN_ACTION_ROWS = 2;
+
+// ─── 물 추격 ──────────────────────────────────────────────────
+// 앞선 버전에서 측정으로 검증한 규칙을 그대로 이식한다.
+// 일정 속도 두 개뿐이고 어느 쪽인지 눈에 보인다. 순간이동하지 않는다.
+export const WATER_RATIO = 0.88;              // 평소 물 속도 = 플레이어 속도 × 이 값
+export const WATER_CHASE_MUL = 1.25;          // 너무 벌어지면 플레이어보다 빨라진다
+export const CHASE_GAP_START = 620;           // 초반 최대 간격
+export const CHASE_GAP_END = 340;             // 후반 최대 간격 — 코앞까지 붙는다
+export const CHASE_TIGHTEN_DIST = 12000;      // 이 거리에 걸쳐 좁혀진다
+export const WATER_NEAR = 260;                // 이 안이면 근접 경고
+
+// ─── 콤보 — 무피격 연속 회피 ──────────────────────────────────
+// 정확함이 곧 생존이다. 이 관계가 이 게임의 척추다.
+export const COMBO_HOLD_AT = 3;               // 이 콤보부터 물이 느려진다
+export const COMBO_PUSH_AT = 6;               // 이 콤보부터 물이 밀린다
+export const COMBO_HOLD_MUL = 0.75;
+export const COMBO_PUSH_MUL = 0.5;
+export const COMBO_TIER = 3;
+
+// ─── 점수 ─────────────────────────────────────────────────────
+export const SCORE_PER_UNIT = 1 / 12;         // 거리 점수
+export const COMBO_MULT_STEP = 0.25;          // 배수 = 1 + 콤보 × 0.25
+// 배수 상한. 콤보는 무피격이면 끝없이 오르는데 배수까지 같이 오르면
+// 점수가 지수적으로 폭주한다 — 실제로 3분에 275만 점이 나왔다.
+// 콤보 자체는 계속 세고(물을 붙잡는 힘은 유지), 배수만 여기서 자른다.
+export const COMBO_MULT_CAP = 6;
+export const NEAR_MISS_Z = 90;                // 이 거리 안으로 스치면 아슬아슬 회피
+export const NEAR_MISS_SCORE = 15;
+
+// ─── 게임필 ───────────────────────────────────────────────────
 // 전부 "시뮬레이션 프레임" 단위다. 렌더 프레임이 아니다.
 // 시뮬은 주사율과 무관하게 60Hz 고정이므로, 프레임 수로 세면
 // 60Hz와 120Hz에서 지속 시간이 저절로 같아진다.
-export const HITSTOP_LAND = 3;
-export const HITSTOP_PERFECT = 6;
+export const HITSTOP_COIN = 2;
+export const HITSTOP_NEAR = 3;
+export const HITSTOP_HIT = 8;
+export const HITSTOP_STAIR = 3;
 export const HITSTOP_DEATH = 8;
-export const HITSTOP_RECORD = 4;
 
 export const DEATH_SLOW_FRAMES = 24;          // 400ms
-export const DEATH_SLOW_RATE = 0.15;          // 0.15배속
+export const DEATH_SLOW_RATE = 0.15;
 export const RESULT_UI_MS = 260;
 
-export const INPUT_BUFFER_FRAMES = 6;         // 착지 100ms 전 입력을 기억한다
-
-export const SHAKE_LAND = 3;
-export const SHAKE_PERFECT = 5;
-export const SHAKE_DEATH = 12;
-export const SHAKE_RECORD = 6;
+export const SHAKE_COIN = 1.5;
+export const SHAKE_NEAR = 3;
+export const SHAKE_HIT = 12;
+export const SHAKE_STAIR = 4;
+export const SHAKE_DEATH = 14;
 export const SHAKE_DECAY = 0.85;
 export const SHAKE_ROT_DEATH = 0.02;
-export const SHAKE_WATER_MAX = 1.6;           // 물 근접 상시 미세 진동
+export const SHAKE_WATER_MAX = 1.6;
 
-export const SQUASH_MS = 120;                 // easeOutBack 복귀
-export const SQUASH_CHARGE_X = 1.12;
-export const SQUASH_CHARGE_Y = 0.88;
-export const SQUASH_FIRE_X = 0.72;
-export const SQUASH_FIRE_Y = 1.35;
-export const SQUASH_LAND_X = 1.38;
-export const SQUASH_LAND_Y = 0.62;
+export const SQUASH_MS = 120;
+export const SQUASH_JUMP_X = 0.78;
+export const SQUASH_JUMP_Y = 1.30;
+export const SQUASH_LAND_X = 1.34;
+export const SQUASH_LAND_Y = 0.68;
+export const SQUASH_HIT_X = 1.40;
+export const SQUASH_HIT_Y = 0.60;
 
-export const RING_MS = 220;                   // 완벽 착지 흰 링 확산
-export const RING_R0 = 14;
-export const RING_R1 = 48;
+export const RING_MS = 220;
+export const RING_R0 = 18;
+export const RING_R1 = 62;
 export const RING_MAX = 4;
 
 export const PARTICLE_MAX = 128;
-export const PART_LAND = 6;
-export const PART_PERFECT = 12;
-export const PART_DEATH = 20;
+export const PART_COIN = 6;
+export const PART_NEAR = 4;
+export const PART_HIT = 16;
+export const PART_DEATH = 24;
 export const PART_GRAVITY = 0.42;
 
 export const TRAIL_MAX = 32;
-export const TRAIL_FRAMES = 4;                // 도약 중 잔상
-export const CAM_LEAD = 2.2;                  // 카메라가 상승 방향으로 앞을 본다 (렌더 전용)
+export const TRAIL_FRAMES = 6;
 
-// ─── AI 디렉터 계층1 (패스 4) ────────────────────────────────
-export const CHUNK_SIZE = 6;                  // 구간 = 발판 6개
-export const OBSERVE_CHUNKS = 3;              // 구간 3개(발판 18개) 관찰 후 첫 판정
+// ─── 계단 스프린트 (무한의 계단 이식) ──────────────────────────
+// 관문마다 트랙이 계단으로 변한다. 장애물이 사라지고 리듬만 남는다.
+// 규칙이 바뀐 걸 눈으로 알 수 있어야 한다.
+export const STAIR_FIRST_DIST = 8400;         // 첫 관문. 20초는 러너 문법만 가르친다
+export const STAIR_EVERY_DIST = 9600;
+export const STAIR_STEPS = 18;                // 이만큼 오르면 구간 종료
+export const STAIR_MS = 6000;                 // 제한 시간
+export const STAIR_STEP_PUSH = 120;           // 한 칸당 물이 밀리는 거리
+export const STAIR_MISS_STALL = 24;           // 틀리면 이 프레임만큼 정지
+export const STAIR_STEP_SCORE = 40;
+
+// ─── 특성 드래프트 ────────────────────────────────────────────
+// 관문 직후 3개 중 1개를 고른다.
+// **어떤 3개를 제시할지가 곧 디렉터의 판단이다.**
+export const TRAIT_OFFER = 3;
+export const DRAFT_UI_MS = 260;
+
+// 계열: 0 = 공격, 1 = 방어, 2 = 조작
+export const TRAITS = [
+  { id: 'gambler',   kind: 0, name: '도박사',   desc: '점수 2배 · 물 25% 빨라짐' },
+  { id: 'sprint',    kind: 0, name: '가속',     desc: '이동 속도 15% 증가' },
+  { id: 'collector', kind: 0, name: '수집가',   desc: '코인 점수 2배' },
+  { id: 'chain',     kind: 0, name: '연쇄',     desc: '콤보 배수 50% 증가' },
+  { id: 'chill',     kind: 1, name: '저체온',   desc: '물 상승 20% 감소' },
+  { id: 'shield',    kind: 1, name: '방패',     desc: '충돌 1회를 무효로 한다' },
+  { id: 'vision',    kind: 1, name: '시야',     desc: '장애물이 더 멀리서 보인다' },
+  { id: 'recover',   kind: 1, name: '회복',     desc: '계단 한 칸당 물이 더 밀린다' },
+  { id: 'inertia',   kind: 2, name: '관성',     desc: '레인 이동이 즉시 끝난다' },
+  { id: 'glide',     kind: 2, name: '활공',     desc: '점프 체공 40% 증가' },
+  { id: 'precise',   kind: 2, name: '정밀',     desc: '회피 판정 폭 50% 증가' },
+  { id: 'brake',     kind: 2, name: '제동',     desc: '슬라이드 지속 50% 증가' },
+];
+
+// ─── AI 디렉터 계층1 ──────────────────────────────────────────
+export const OBSERVE_CHUNKS = 3;              // 구간 3개 관찰 후 첫 판정
 export const METRIC_WINDOW = 8;               // 최근 8회 슬라이딩 윈도
 export const HYSTERESIS = 0.05;               // 경계값 ±0.05 안에서는 프로파일을 바꾸지 않는다
 
-// 프로파일 판정 임계값 — 문서 그대로. 결정론적이어야 재현 가능하다.
-export const TH_CHARGE_LOW = 0.35;
-export const TH_CHARGE_HIGH = 0.65;
-export const TH_AIM_LOW = 0.4;
-export const TH_AIM_HIGH = 0.6;
+// 프로파일 판정 임계값 — 결정론적이어야 재현 가능하다
+export const TH_LANE_HIGH = 0.55;             // 중앙 레인 체류 비율
+export const TH_GREED_LOW = 0.35;
+export const TH_GREED_HIGH = 0.65;
+export const TH_REACT_FAST = 0.40;            // 정규화된 반응 시간
+export const TH_NEAR_HIGH = 0.45;
 export const TH_STDEV = 0.22;
 
 // 레버 범위
-export const LEVER_THICK_MIN = 0.7, LEVER_THICK_MAX = 1.4;
-export const LEVER_WATER_MIN = 18, LEVER_WATER_MAX = 34;
-export const LEVER_WOBBLE_MIN = 0.5, LEVER_WOBBLE_MAX = 1.4;
-export const LEVER_COYOTE_MIN = 5, LEVER_COYOTE_MAX = 8;
+export const LEVER_DENSITY_MIN = 0.6, LEVER_DENSITY_MAX = 1.5;
+export const LEVER_WATER_MIN = 0.72, LEVER_WATER_MAX = 1.30;   // WATER_RATIO 배수
+export const LEVER_TELEGRAPH_MIN = 0.7, LEVER_TELEGRAPH_MAX = 1.4;
 
-// 간격 분류 경계 (근 / 중 / 원)
-export const GAP_NEAR = 180;
-export const GAP_MID = 300;
-// ── 생성 가능한 간격의 범위 ──
-// 문서의 "차지 0% → 90px" 는 실제로 도달할 수 없는 값이다.
-// 최소 차지가 80ms 로 강제되므로 실제 최소 도약은
-//   90 + 330 × (80/900) = 119.3px
-// 이고, 그보다 짧은 간격은 **어떻게 눌러도 넘어간다.**
-// 하한을 100 으로 뒀다가 92px 간격이 생성돼 봇이 매번 29px 오버슛하며 죽었다.
-export const LEAP_DIST_ACHIEVABLE_MIN =
-  LEAP_DIST_MIN + (LEAP_DIST_MAX - LEAP_DIST_MIN) * (CHARGE_MIN_MS / CHARGE_MAX_MS);
-export const GAP_FLOOR = 130;
-// 상한도 "최대 도약 420" 이 아니다.
-// 플레이어는 발판 중심에서 최대 허용폭(두꺼운 발판이면 약 23px)만큼 아래에 붙을 수 있고,
-// 그러면 다음 발판까지의 실제 거리가 그만큼 늘어난다.
-export const GAP_CEIL = 390;
+export const REACT_NORM_MS = 900;             // 반응 시간 정규화 기준
 
 export const DATA_CHUNKS = 'data/chunks.json';
 export const DATA_POLICY = 'data/policy.json';
 export const DATA_LINES = 'data/lines.json';
 
-// ─── 표시 ────────────────────────────────────────────────────
-export const METER_PX = 40;                   // 40px = 1m
+// ─── 표시 ─────────────────────────────────────────────────────
+export const METER_UNITS = 40;                // 40 월드 단위 = 1m
 
-// ─── 팔레트 — 이 6색 외에 어떤 색도 쓰지 않는다 ───────────────
+// ─── 팔레트 — 이 6색 외에 어떤 색도 쓰지 않는다 ────────────────
 // 내가 통제하는 것은 흰색, 나를 죽이는 것은 붉은색, 나머지는 청회색.
 export const COL_BG      = '#12242E';         // 배경. 수면 아래의 습한 어둠
 export const COL_GRID    = '#1B3341';         // 제도 격자. 깊이감만 담당
-export const COL_STRUCT  = '#7E9AA6';         // 발판·구조. 안전하지만 시선을 끌지 않는다
-export const COL_PLAYER  = '#F4F7F5';         // 플레이어·조준선·조준점·게이지
-export const COL_DANGER  = '#C4463A';         // 물·위험. 이 색이 보이면 죽는다는 뜻
-export const COL_BONUS   = '#F2B441';         // 보너스. 한 구간에 0~1개
+export const COL_STRUCT  = '#7E9AA6';         // 트랙·장애물. 안전하지만 시선을 끌지 않는다
+export const COL_PLAYER  = '#F4F7F5';         // 플레이어·UI. 내가 통제하는 것
+export const COL_DANGER  = '#C4463A';         // 물·충돌. 이 색이 보이면 죽는다는 뜻
+export const COL_BONUS   = '#F2B441';         // 코인·특성. 한 구간에 몇 개만
 
 // 투명도는 써도 되지만 색상 자체를 섞어 새 색을 만들지 않는다.
-// rgba 문자열을 매 프레임 조립하면 루프 안 할당이 된다 (패스 3 위반).
+// rgba 문자열을 매 프레임 조립하면 루프 안 할당이 된다.
 // 그래서 색마다 알파 단계표를 한 번만 만들어두고 인덱스로 꺼내 쓴다.
-// 이 함수를 거치지 않는 색상 리터럴은 소스 어디에도 없다 — grep으로 확인 가능하다.
 export const ALPHA_STEPS = 16;
 
 export function makeRamp(hex) {
@@ -245,7 +250,6 @@ export function makeRamp(hex) {
   return ramp;
 }
 
-// 램프 인덱스. 0~1 알파를 단계로 양자화한다. 문자열을 만들지 않는다.
 export function rampIndex(a) {
   const i = (a * ALPHA_STEPS + 0.5) | 0;
   return i < 0 ? 0 : (i > ALPHA_STEPS ? ALPHA_STEPS : i);
@@ -258,11 +262,12 @@ export const RAMP_BONUS = makeRamp(COL_BONUS);
 export const RAMP_GRID = makeRamp(COL_GRID);
 export const RAMP_BG = makeRamp(COL_BG);
 
-// ─── 통일 규칙 ───────────────────────────────────────────────
-export const RADIUS = 4;                      // 모서리 반경은 이거 하나 (플레이어는 원)
+// ─── 통일 규칙 ────────────────────────────────────────────────
+export const RADIUS = 4;                      // 모서리 반경은 이거 하나
 export const STROKE = 2;                      // 선 굵기는 이거 하나
-export const UNIT = UNIT_PX;                  // 여백은 8의 배수만
+export const UNIT = UNIT_PX;
 export const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 
-// ─── 디바이스 ────────────────────────────────────────────────
+// ─── 디바이스 ─────────────────────────────────────────────────
 export const DPR_CAP = 2;                     // 3배 기기에서 픽셀이 4배가 되는 걸 막는다
+export const SWIPE_PX = 24;                   // 이 거리를 넘는 순간 스와이프로 확정한다

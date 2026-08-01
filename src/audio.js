@@ -1,9 +1,8 @@
 // 오디오 — 게임필의 나머지 절반.
 //
 // **오디오 파일이 0개다.** mp3·wav·ogg 하나도 없다. 전부 WebAudio 절차적 합성이다.
-// 그 결과:
 //   - 라이선스 문제 0. 외부 에셋 출처를 기재할 것이 없다
-//   - 로딩 시간 0. 첫 로딩 2초(게이트 #7)에 오디오가 기여하는 바이트가 없다
+//   - 로딩 시간 0. 첫 로딩 2초에 오디오가 기여하는 바이트가 없다
 //   - 지연 0. <audio> 태그는 재생 지연이 커서 타격감을 죽인다
 //
 // 소리는 기존 상태 전이에 **붙기만** 한다. 전이 타이밍을 바꾸지 않는다.
@@ -19,17 +18,16 @@ export class Audio {
     this.master = null;
     this.muted = false;
     this.ready = false;
+    this.failed = false;
 
     this.noiseBuf = null;
-    this.chargeOsc = null;
-    this.chargeGain = null;
     this.waterGain = null;
-    this.overcharge = false;
-    this.failed = false;
+    this.runOsc = null;
+    this.runGain = null;
   }
 
   // 첫 사용자 제스처에서 반드시 불려야 한다.
-  // 안 하면 심사자 아이폰에서 완전 무음이다. 이건 실기기로만 확인 가능하다.
+  // 안 하면 심사자 아이폰에서 완전 무음이다. 실기기로만 확인 가능하다.
   unlock() {
     if (this.failed) return;
     try {
@@ -42,14 +40,13 @@ export class Audio {
         this.master.connect(this.ctx.destination);
         this.buildNoise();
         this.buildWaterLoop();
-
+        this.buildRunDrone();
         // 전화 수신 등으로 다시 suspended 로 돌아가는 경우도 처리한다
         this.ctx.onstatechange = () => {
           if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
         };
       }
       if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
-
       // resume 만으로 안 풀리는 기기가 있다. 무음 버퍼를 한 번 재생한다.
       const src = this.ctx.createBufferSource();
       src.buffer = this.ctx.createBuffer(1, 1, this.ctx.sampleRate);
@@ -77,7 +74,7 @@ export class Audio {
     src.loop = true;
     const lp = this.ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.value = 220;
+    lp.frequency.value = 200;
     const g = this.ctx.createGain();
     g.gain.value = 0;
     src.connect(lp); lp.connect(g); g.connect(this.master);
@@ -85,13 +82,34 @@ export class Audio {
     this.waterGain = g;
   }
 
+  // 질주 저역. 속도가 오르면 음도 오른다 — 빨라지는 게 귀로 들린다.
+  buildRunDrone() {
+    const o = this.ctx.createOscillator();
+    o.type = 'triangle';
+    o.frequency.value = 55;
+    const g = this.ctx.createGain();
+    g.gain.value = 0;
+    o.connect(g); g.connect(this.master);
+    o.start(0);
+    this.runOsc = o;
+    this.runGain = g;
+  }
+
   setMuted(m) {
     this.muted = m;
     if (this.master) this.master.gain.value = m ? 0 : MASTER_CAP;
   }
 
+  // 탭이 숨겨질 때. 배경에서 계속 울리면 안 된다.
+  hush() {
+    if (!this.ready || this.failed) return;
+    const t = this.ctx.currentTime;
+    this.runGain.gain.setTargetAtTime(0, t, 0.02);
+    this.waterGain.gain.setTargetAtTime(0, t, 0.02);
+  }
+
   // 같은 소리를 연속 재생할 때 ±3% 피치 변화. 안 하면 기계처럼 들린다.
-  // 특히 연속 착지에서 확연하다. 이건 연출이라 난수를 써도 된다 — 판정과 무관하다.
+  // 이건 연출이라 난수를 써도 된다 — 판정과 무관하다.
   vary(f) { return f * (1 + (Math.random() * 2 - 1) * 0.03); }
 
   // 일회용 오실레이터. ended 에서 disconnect 해 노드가 쌓이지 않게 한다.
@@ -129,82 +147,50 @@ export class Audio {
     src.stop(t + ms / 1000);
   }
 
-  startCharge() {
-    if (!this.ready || this.failed) return;
-    this.stopCharge();
-    const t = this.ctx.currentTime;
-    const o = this.ctx.createOscillator();
-    const g = this.ctx.createGain();
-    o.type = 'triangle';
-    o.frequency.setValueAtTime(220, t);
-    g.gain.setValueAtTime(0.06, t);
-    o.connect(g); g.connect(this.master);
-    o.start(t);
-    this.chargeOsc = o;
-    this.chargeGain = g;
-    this.overcharge = false;
-  }
-
-  // 릴리스 시 즉시 정지. 감쇠 없이 끊는 게 명료하다.
-  stopCharge() {
-    if (this.chargeOsc) {
-      try { this.chargeOsc.stop(); } catch (e) { /* 이미 정지 */ }
-      this.chargeOsc.disconnect();
-      this.chargeGain.disconnect();
-      this.chargeOsc = null;
-      this.chargeGain = null;
-    }
-  }
-
   // ── 매 프레임 — 연속 파라미터만 만진다. 노드를 만들지 않는다 ──
   update(game) {
     if (!this.ready || this.failed) return;
     const t = this.ctx.currentTime;
 
-    if (this.chargeOsc && game.state === S.CHARGING) {
-      // 220 → 660Hz 선형 상승. 차지 진행도에 연동한다.
-      const held = game.simTime - game.chargePressSim;
-      const r = held < 0 ? 0 : (held > C.CHARGE_MAX_MS ? 1 : held / C.CHARGE_MAX_MS);
-      this.chargeOsc.frequency.setTargetAtTime(220 + 440 * r, t, 0.01);
-      // 오버차지 맥동 — 6프레임 주기로 게인이 뛴다
-      if (this.overcharge) {
-        const on = (((game.tick / 6) | 0) & 1) === 0;
-        this.chargeGain.gain.setTargetAtTime(on ? 0.10 : 0.06, t, 0.005);
-      }
-    }
+    // 질주음 — 속도에 연동
+    const alive = game.state !== S.DEAD && game.state !== S.DRAFT;
+    const spd = game.speed / C.SPEED_MAX;
+    this.runOsc.frequency.setTargetAtTime(48 + 46 * spd, t, 0.05);
+    this.runGain.gain.setTargetAtTime(alive ? 0.05 + 0.05 * spd : 0, t, 0.08);
 
-    // 물 근접 — 0 → 0.15 를 근접도에 비례해 연속 제어
-    const margin = game.waterMargin();
-    let near = 0;
-    if (margin < C.WATER_NEAR_PX) near = margin <= 0 ? 1 : 1 - margin / C.WATER_NEAR_PX;
-    this.waterGain.gain.setTargetAtTime(near * near * 0.15, t, 0.08);
+    // 물 근접 — 0 → 0.16 을 근접도에 비례해 연속 제어
+    const near = game.waterNear();
+    this.waterGain.gain.setTargetAtTime(near * near * 0.16, t, 0.08);
   }
 
-  // ── 상태 전이에 붙는다. 전이 타이밍을 바꾸지 않는다 ──
+  // ── 상태 전이에 붙는다. 전이 타이밍을 바꾸지 않는다 ──────────
   onEvent(type, a, b, game) {
     if (this.failed) return;
     switch (type) {
-      case EV.CHARGE_START:
-        this.startCharge();
+      case EV.MOVE:
+        // 레인 이동 — 짧은 스와이프음. 방향에 따라 위/아래로 쓸린다
+        this.blip('triangle', b > 0 ? 420 : 520, b > 0 ? 560 : 400, 70, 0.07, 0);
         break;
 
-      case EV.OVERCHARGE:
-        this.overcharge = true;
+      case EV.JUMP:
+        this.blip('triangle', 300, 620, 130, 0.09, 0);
         break;
 
-      case EV.FIRE:
-        this.stopCharge();
-        this.blip('square', 880, 220, 40, 0.12, 0);   // 처프
+      case EV.SLIDE:
+        this.noise(180, 0.09, 1800, 500, 'lowpass');
         break;
 
       case EV.LAND:
-        this.kick();
+        this.blip('sine', 120, 70, 60, 0.12, 0);
+        this.noise(15, 0.06, 2000, 2000, 'lowpass');
         break;
 
-      case EV.PERFECT:
-        this.kick();
-        // 완전 5도 위 음을 동시에. 이게 중독의 소리다.
-        this.blip('sine', 180, 180, 90, 0.09, 0);
+      case EV.COIN:
+        this.blip('sine', 880, 1320, 90, 0.10, 0);
+        break;
+
+      case EV.NEAR_MISS:
+        if (a > 0) this.noise(90, 0.07, 2600, 900, 'bandpass');
         break;
 
       case EV.COMBO: {
@@ -212,58 +198,66 @@ export class Audio {
         const tier = b > 5 ? 5 : b;
         if (tier > 0) {
           const f = 330 * Math.pow(1.5, tier - 1);
-          this.blip('sine', f, f, 130, 0.09, 0);
+          this.blip('sine', f, f, 140, 0.09, 0);
         }
         break;
       }
 
-      case EV.COMBO_BREAK:
-        this.blip('sine', 200, 120, 90, 0.06, 0);
+      case EV.HIT:
+        // 충돌 — 저역 임팩트 + 마찰. 죽는 소리는 아니지만 아프게 들려야 한다
+        this.blip('square', 180, 60, 180, 0.16, 0);
+        this.noise(260, 0.16, 1200, 180, 'lowpass');
         break;
 
-      case EV.MISS:
-        this.noise(80, 0.10, 1400, 600, 'bandpass');   // 마찰감
+      case EV.SHIELD:
+        this.blip('sine', 660, 990, 160, 0.12, 0);
         break;
 
-      case EV.CRUMBLE:
-        this.noise(140, 0.12, 900, 200, 'lowpass');
+      case EV.STAIR_ENTER:
+        this.blip('sine', 440, 660, 160, 0.10, 0);
+        this.blip('sine', 660, 880, 200, 0.09, 0.1);
         break;
 
-      case EV.BONUS:
-        this.blip('sine', 660, 990, 120, 0.10, 0);
+      case EV.STAIR_STEP: {
+        // 오를수록 음이 올라간다. 리듬이 귀로 들린다.
+        const n = a > 18 ? 18 : a;
+        this.blip('triangle', 300 + n * 26, 300 + n * 26, 90, 0.11, 0);
+        break;
+      }
+
+      case EV.STAIR_MISS:
+        this.blip('square', 200, 110, 160, 0.13, 0);
         break;
 
-      case EV.GATE:
-        this.blip('sine', 440, 440, 90, 0.08, 0);
-        this.blip('sine', 660, 660, 110, 0.07, 0.06);
+      case EV.STAIR_CLEAR:
+        this.blip('sine', 523.25, 523.25, 80, 0.11, 0);
+        this.blip('sine', 659.25, 659.25, 80, 0.11, 0.08);
+        this.blip('sine', 783.99, 783.99, 120, 0.11, 0.16);
+        break;
+
+      case EV.DRAFT_OPEN:
+        this.blip('sine', 392, 523.25, 220, 0.09, 0);
+        break;
+
+      case EV.DRAFT_PICK:
+        this.blip('sine', 523.25, 784, 200, 0.12, 0);
         break;
 
       case EV.RECORD:
-        // 상승 아르페지오 3음 — 근음 · 3도 · 5도
-        this.blip('sine', 523.25, 523.25, 70, 0.10, 0);
-        this.blip('sine', 659.25, 659.25, 70, 0.10, 0.07);
-        this.blip('sine', 783.99, 783.99, 90, 0.10, 0.14);
+        this.blip('sine', 660, 990, 90, 0.10, 0);
+        this.blip('sine', 990, 1320, 120, 0.10, 0.09);
         break;
 
       case EV.DEATH:
-        this.stopCharge();
         // 화이트노이즈 + 로우패스 800 → 80Hz 스윕, 800ms
         this.noise(800, 0.22, 800, 80, 'lowpass');
         break;
 
       case EV.RESET:
-        this.stopCharge();
-        this.overcharge = false;
         break;
 
       default:
         break;
     }
-  }
-
-  // 사인 킥 120 → 60Hz 60ms + 화이트노이즈 버스트 15ms
-  kick() {
-    this.blip('sine', 120, 60, 60, 0.16, 0);
-    this.noise(15, 0.10, 2000, 2000, 'lowpass');
   }
 }
