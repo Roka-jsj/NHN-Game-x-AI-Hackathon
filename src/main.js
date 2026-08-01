@@ -10,6 +10,7 @@ import * as C from './config.js';
 import { Game } from './game.js';
 import { Feel } from './feel.js';
 import { Renderer } from './render.js';
+import { Director } from './director.js';
 
 const stage = document.getElementById('stage');
 const canvas = document.getElementById('game');
@@ -18,7 +19,20 @@ const ctx = canvas.getContext('2d', { alpha: false });
 const game = new Game();
 const feel = new Feel();
 const renderer = new Renderer(canvas, ctx);
-game.onEvent = (type, a, b) => feel.onEvent(type, a, b, game);
+const director = new Director(game);
+let directorView = false;
+
+game.onEvent = (type, a, b) => {
+  feel.onEvent(type, a, b, game);
+  director.onEvent(type, a, b, game);
+};
+
+// Game 은 생성자에서 이미 한 판을 차렸다. 그때는 디렉터가 없었으므로
+// 첫 판만 고정 패턴으로 깔린다. 디렉터를 붙였으니 다시 차린다.
+game.reset();
+
+// 계층2 산출물은 있으면 쓰고 없으면 안 쓴다. 실패해도 게임은 이미 돌고 있다.
+director.load();
 
 // ─────────────────────────────────────────────────────────────
 // 입력 큐 — 핸들러는 여기에 기록만 한다. 상태는 프레임 시작에서만 바뀐다.
@@ -43,6 +57,14 @@ function clearQueue() { qHead = 0; qTail = 0; qCount = 0; }
 // click 은 쓰지 않는다. 지연이 있다.
 stage.addEventListener('pointerdown', (e) => {
   e.preventDefault();
+  // 디렉터 뷰 토글은 게임 입력이 아니다. 큐에 넣지 않고 여기서 걸러낸다.
+  // getBoundingClientRect 는 입력 순간에만 부른다 — 루프 안이 아니다.
+  const r = canvas.getBoundingClientRect();
+  if (r.width > 0 && r.height > 0) {
+    const lx = (e.clientX - r.left) / r.width * C.VIEW_W;
+    const ly = (e.clientY - r.top) / r.height * C.VIEW_H;
+    if (Renderer.hitToggle(lx, ly)) { directorView = !directorView; return; }
+  }
   enqueue(IN_DOWN, e.timeStamp);
 }, { passive: false });
 
@@ -133,7 +155,7 @@ function frame(nowWall) {
     accumulator = 0;
     firstFrame = false;
     needsTimeReset = false;
-    renderer.draw(game, feel, 0, null);
+    renderer.draw(game, feel, 0, director, directorView);
     return;
   }
   if (paused) { lastWall = nowWall; return; }
@@ -168,11 +190,12 @@ function frame(nowWall) {
     } else {
       game.step();
       feel.step(game);
+      director.step(game);   // 구간 경계에서만 실제로 뭔가 한다
     }
     if (++steps >= C.MAX_STEPS_PER_FRAME) { accumulator = 0; break; }
   }
 
-  renderer.draw(game, feel, accumulator / C.SIM_DT, null);
+  renderer.draw(game, feel, accumulator / C.SIM_DT, director, directorView);
 }
 
 requestAnimationFrame(frame);
@@ -182,7 +205,9 @@ requestAnimationFrame(frame);
 // 합성 클록 위에서 60Hz/120Hz 동일성을 재려면 이벤트 timeStamp를 우리가 정해야 하고,
 // 브라우저가 만든 PointerEvent의 timeStamp는 가짜 클록과 다른 시간축을 쓴다. 그래서 필요하다.
 window.__rising = {
-  game, feel, C,
+  game, feel, director, C,
   inject(type, wallTs) { enqueue(type === 'down' ? IN_DOWN : IN_UP, wallTs); },
+  setDirectorView(on) { directorView = !!on; },
+  get directorView() { return directorView; },
   get accumulator() { return accumulator; },
 };

@@ -74,6 +74,7 @@ export class Feel {
 
     this.flashFrames = 0;      // 신기록 흰 섬광
     this.overcharge = false;
+    this.lastTier = 0;         // 콤보 티어. 오를 때만 보상을 준다
   }
 
   // 탭 전환 복귀 시 호출. 히트스톱·셰이크가 누적되어 터지는 걸 막는다.
@@ -231,6 +232,40 @@ export class Feel {
         this.flashFrames = 3;
         break;
 
+      // 콤보가 오를수록 보상이 커진다. 티어가 바뀌는 순간이 사건이 되어야 한다.
+      case EV.COMBO: {
+        const tier = b;
+        if (tier > this.lastTier) {
+          this.lastTier = tier;
+          this.freezeFrames = C.HITSTOP_PERFECT + (tier > 3 ? 3 : tier);
+          this.addShake(C.SHAKE_PERFECT + tier, 0);
+          this.ring(game.playerX, game.playerY);
+          this.flashFrames = 2;
+        }
+        break;
+      }
+
+      case EV.COMBO_BREAK:
+        this.lastTier = 0;
+        this.addShake(C.SHAKE_LAND, 0);
+        break;
+
+      case EV.SKIP:
+        this.burst(game.playerX, game.playerY, C.PART_PERFECT, 1);
+        break;
+
+      case EV.GATE:
+        this.freezeFrames = C.HITSTOP_RECORD;
+        this.addShake(C.SHAKE_RECORD, 0);
+        this.flashFrames = 3;
+        this.ring(game.playerX, game.playerY);
+        break;
+
+      case EV.CRUMBLE:
+        this.addShake(C.SHAKE_PERFECT, C.SHAKE_ROT_DEATH * 0.5);
+        this.burst(game.playerX, game.playerY, C.PART_LAND, 0);
+        break;
+
       case EV.DEATH:
         this.freezeFrames = C.HITSTOP_DEATH;
         this.slowFrames = C.DEATH_SLOW_FRAMES;
@@ -242,6 +277,7 @@ export class Feel {
 
       case EV.RESET:
         this.reset();
+        this.lastTier = 0;
         break;
 
       default:

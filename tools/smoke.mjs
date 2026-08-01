@@ -122,23 +122,63 @@ const BOT = () => {
       }
       // idle 모드: 아무것도 하지 않고 물에 잠기기를 기다린다 (사망→재시작 왕복 검증)
       if (this.mode === 'idle') return;
+
+      // 성향별 봇 — 디렉터가 실제로 사람을 읽는지 확인하려면
+      // 서로 다르게 노는 플레이어가 필요하다.
+      //   safe     : 바로 다음 발판만, 정확하게        → 짧은 차지 + 낮은 오차
+      //   precise  : 한 칸 건너뛰되 정확하게           → 긴 차지 + 낮은 오차
+      //   reckless : 한 칸 건너뛰고 대충                → 긴 차지 + 높은 오차
+      let off = 1, bias = 0, careful = true;
+      if (this.mode === 'precise') { off = 3; }
+      else if (this.mode === 'reckless') { off = 3; bias = 0.7; careful = false; }
+
       if (g.state === S_READY && !this.pressed) {
-        // 반대편 벽의 다음 발판까지의 간격
-        const target = g.platIdx + 1;
+        let target = g.platIdx + off;
         g.ensurePlatform(target + 2);
-        const gap = g.platYAt(target) - g.playerY;
-        const ratio = (gap - C.LEAP_DIST_MIN) / (C.LEAP_DIST_MAX - C.LEAP_DIST_MIN);
-        const clamped = Math.max(0, Math.min(1, ratio));
-        this.hold = Math.max(C.CHARGE_MIN_MS, clamped * C.CHARGE_MAX_MS);
+        let gap = g.platYAt(target) - g.playerY;
+        if (gap > C.LEAP_DIST_MAX) { target = g.platIdx + 1; gap = g.platYAt(target) - g.playerY; }
+        const tol = C.PLATFORM_THICKNESS * g.platThickAt(target) * 0.5 + C.PLAYER_RADIUS;
+        this.target = target;
+        this.bias = bias * tol;
+        this.wantGap = gap + this.bias;
+        this.careful = careful;
+        this.hold = this.holdFor(target, C);
         R.inject('down', t);
         this.pressed = true;
         this.pressAt = t;
         return;
       }
-      if (g.state === S_CHARGING && this.pressed && t - this.pressAt >= this.hold) {
+      if (g.state === S_CHARGING && this.pressed) {
+        // 진동은 사인파라 **역산할 수 있다.** 숙련자가 하는 일이 이것이다:
+        // "지금 떼면 조준점이 어디에 있을지"를 알고, 그만큼 눌러야 할 시간을 되민다.
+        // 랜덤이었다면 이 계산은 존재할 수 없고, 봇도 사람도 실력을 쌓을 수 없다.
+        //
+        // 처음엔 "진동이 0이 될 때까지 기다렸다 뗀다"로 짰다가 봇이 한 번도 착지하지 못했다.
+        // 기다리는 동안 차지가 계속 쌓여 도약 거리가 자라기 때문이다. 기다리면 안 되고 보정해야 한다.
+        if (this.careful) this.hold = this.holdFor(this.target, C, g);
+        if (t - this.pressAt < this.hold) return;
         R.inject('up', t);
         this.pressed = false;
       }
+    },
+
+    // 목표 발판에 맞추는 차지 시간.
+    // 조준 진동도 이동 발판도 전부 시각의 함수라 **역산할 수 있다.**
+    // 고정점 반복 6회면 수렴한다. 랜덤이었다면 이 함수는 존재할 수 없다.
+    holdFor(target, C, g) {
+      const span = C.LEAP_DIST_MAX - C.LEAP_DIST_MIN;
+      const raw = (d) => Math.max(C.CHARGE_MIN_MS,
+        Math.min(C.CHARGE_MAX_MS, (d - C.LEAP_DIST_MIN) / span * C.CHARGE_MAX_MS));
+      if (!g) return raw(this.wantGap);
+      let h = raw(this.wantGap);
+      for (let k = 0; k < 6; k++) {
+        const dist = C.LEAP_DIST_MIN + span * Math.min(1, h / C.CHARGE_MAX_MS);
+        const arrive = g.chargePressSim + h + g.leapDurationFor(dist);
+        const gap = g.platYAtTime(target, arrive) - g.playerY + this.bias;
+        const w = g.wobbleOffset(dist, g.chargePressSim + h);
+        h = raw(gap - w);
+      }
+      return h;
     },
   };
 };
@@ -194,6 +234,7 @@ async function run() {
   const url = `http://127.0.0.1:${port}/`;
   const browser = await chromium.launch({ args: ['--enable-precise-memory-info'] });
   const results = [];
+  const allProfiles = [];
   const shotArg = process.argv.indexOf('--shot');
   const perfOnly = process.argv.includes('--perf');
 
@@ -252,30 +293,53 @@ async function run() {
     const state = await page.evaluate(async ({ frameMs, frames, hideAt, mode }) => {
       window.__bot.mode = mode || 'play';
       let sawDead = false;
+      let lastProfile = null, switches = 0;
+      const seen = {};
+      // 판이 끝나면 depth 가 0으로 돌아간다. 마지막 값만 보면 아무것도 못 잰다.
+      // 누적 착지 수와 최고 도달을 따로 센다.
+      let landed = 0, maxDepth = 0, prevDepth = 0, deaths = 0;
+      let hideJump = -1;
       for (let i = 0; i < frames; i++) {
         if (hideAt && i === hideAt) {
+          const before = window.__rising.game.tick;
           Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
           document.dispatchEvent(new Event('visibilitychange'));
           // 30초를 건너뛴다 — 실제 탭 전환과 같은 상황
           window.__clock.tick(30000);
           Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
           document.dispatchEvent(new Event('visibilitychange'));
+          window.__clock.tick(frameMs);   // 복귀 후 첫 프레임
+          hideJump = window.__rising.game.tick - before;
         }
         window.__bot.step();
         window.__clock.tick(frameMs);
-        if (window.__rising.game.state === 5) sawDead = true;
+        const gg = window.__rising.game;
+        if (gg.state === 5) sawDead = true;
+        if (gg.depth > prevDepth) landed += gg.depth - prevDepth;
+        else if (gg.depth < prevDepth) deaths++;
+        prevDepth = gg.depth;
+        if (gg.depth > maxDepth) maxDepth = gg.depth;
+        const d = window.__rising.director;
+        if (d && !d.observing) {
+          if (d.profile !== lastProfile) { lastProfile = d.profile; switches++; seen[d.profile] = (seen[d.profile] || 0) + 1; }
+        }
         if (i % 240 === 0) await new Promise((r) => setTimeout(r, 0));
       }
       const g = window.__rising.game;
       const f = window.__rising.feel;
       return {
         tick: g.tick, depth: g.depth, runs: g.runs, sawDead,
+        landed, maxDepth, deaths, hideJump,
         playerY: g.playerY, bestY: g.bestY, runBestY: g.runBestY,
         waterY: g.waterY, state: g.state, perfect: g.perfectCount,
         accumulator: window.__rising.accumulator,
         freeze: f ? f.freezeFrames : 0,
         slow: f ? f.slowFrames : 0,
         shake: f ? f.shakeMag : 0,
+        score: g.score, comboBest: g.comboBest,
+        profiles: Object.keys(seen), switches,
+        library: window.__rising.director ? window.__rising.director.librarySize : 0,
+        fallback: window.__rising.director ? window.__rising.director.usingFallback : true,
       };
     }, { frameMs, frames, hideAt: opts.hideAt || 0, mode: opts.mode });
 
@@ -287,13 +351,12 @@ async function run() {
   // ── 게이트 #1 · 60Hz vs 120Hz ────────────────────────────────
   const a = await drive(1000 / 60, 30, { shot: true });
   const b = await drive(1000 / 120, 30);
-  const depthErr = a.state.depth === 0 ? 1 : Math.abs(a.state.depth - b.state.depth) / a.state.depth;
+  const depthErr = a.state.landed === 0 ? 1 : Math.abs(a.state.landed - b.state.landed) / a.state.landed;
   results.push({
     gate: '#1 60Hz vs 120Hz 속도 동일성',
-    detail: `30초 후 도달 발판 — 60Hz ${a.state.depth} / 120Hz ${b.state.depth} (오차 ${(depthErr * 100).toFixed(2)}%), ` +
+    detail: `30초 누적 착지 — 60Hz ${a.state.landed} / 120Hz ${b.state.landed} (오차 ${(depthErr * 100).toFixed(2)}%), ` +
             `시뮬 틱 ${a.state.tick} / ${b.state.tick}, ` +
-            `완벽착지 ${a.state.perfect} / ${b.state.perfect}, ` +
-            `도달높이 ${a.state.runBestY.toFixed(2)} / ${b.state.runBestY.toFixed(2)}`,
+            `최고 도달 ${a.state.maxDepth} / ${b.state.maxDepth}, 사망 ${a.state.deaths} / ${b.state.deaths}`,
     pass: depthErr < 0.03,
   });
 
@@ -352,17 +415,40 @@ async function run() {
   });
 
   // ── 게이트 #3 · 탭 전환 복귀 ─────────────────────────────────
-  // 대조군(탭 전환 없음)과 비교한다. 절대값이 아니라 편차가 증거다.
-  const ctrl = await drive(1000 / 60, 20);
+  // 30초를 건너뛴 직후 첫 프레임에서 시뮬이 몇 스텝 돌았는지를 **직접** 잰다.
+  // 누산기가 폭주하면 여기서 1800스텝(30초분)이 한 프레임에 쏟아진다.
+  // 대조군 비교는 사망 횟수 변동에 묻혀서 이 신호를 못 잡는다.
   const c = await drive(1000 / 60, 20, { hideAt: 300 });
-  const tickDrift = Math.abs(c.state.tick - ctrl.state.tick) / ctrl.state.tick;
   results.push({
-    gate: '#3 탭 전환 복귀 (30초 방치)',
-    detail: `시뮬 틱 — 대조군 ${ctrl.state.tick} / 탭 전환 ${c.state.tick} (편차 ${(tickDrift * 100).toFixed(2)}%), ` +
-            `누산기 잔여 ${c.state.accumulator.toFixed(3)}ms, ` +
-            `히트스톱 잔여 ${c.state.freeze}f / 슬로우 잔여 ${c.state.slow}f — 누적 폭발 없음`,
-    pass: tickDrift < 0.03 && c.state.freeze <= 8 && c.state.slow <= 24,
+    gate: '#3 탭 전환 복귀 (30초 방치) — 누산기 폭주',
+    detail: `숨김 30초를 건너뛴 직후 첫 프레임의 시뮬 스텝 ${c.state.hideJump}개 ` +
+            `(폭주하면 1800개가 한 프레임에 쏟아진다. 정상은 0~1)  ·  ` +
+            `누산기 잔여 ${c.state.accumulator.toFixed(3)}ms, 히트스톱 잔여 ${c.state.freeze}f / 슬로우 ${c.state.slow}f`,
+    pass: c.state.hideJump >= 0 && c.state.hideJump <= 2 && c.state.freeze <= 8 && c.state.slow <= 24,
   });
+
+  // ── 디렉터 · 5개 프로파일이 실제로 판정되는가 ────────────────
+  {
+    const modes = ['safe', 'precise', 'reckless'];
+    const found = [];
+    let maxSw = 0;
+    for (const m of modes) {
+      const r = await drive(1000 / 60, 45, { mode: m });
+      found.push(m + '→[' + r.state.profiles.join(',') + '] 전환' + r.state.switches + '회');
+      if (r.state.switches > maxSw) maxSw = r.state.switches;
+      for (const p of r.state.profiles) if (allProfiles.indexOf(p) < 0) allProfiles.push(p);
+    }
+    results.push({
+      gate: '디렉터 — 성향별로 다른 프로파일이 판정되는가',
+      detail: found.join(' | ') + '  ·  관측된 프로파일 ' + allProfiles.length + '종: ' + allProfiles.join(','),
+      pass: allProfiles.length >= 3,
+    });
+    results.push({
+      gate: '디렉터 — 프로파일이 매 프레임 튀지 않는가',
+      detail: '45초 플레이 중 최대 전환 ' + maxSw + '회 (프레임 단위로 튀면 수백 회가 나온다)',
+      pass: maxSw <= 8,
+    });
+  }
 
   // ── 게이트 #10 · LLM 폴백 (data/*.json 존재할 때만 의미 있음) ─
   if (fs.existsSync(path.join(ROOT, 'data'))) {
@@ -377,16 +463,19 @@ async function run() {
           r.fulfill({ status: 200, contentType: 'application/json', body: '{"chunks":[[[' }));
       },
     });
-    const warnOnly = (logs) => logs.filter((l) => l.startsWith('error') || l.startsWith('pageerror'));
+    // 일부러 차단했으니 브라우저의 리소스 로드 실패 로그는 당연히 찍힌다.
+    // 그건 테스터가 만든 것이고 게임의 잘못이 아니다. 그 외 에러만 센다.
+    const warnOnly = (logs) => logs.filter((l) =>
+      (l.startsWith('error') || l.startsWith('pageerror')) && l.indexOf('Failed to load resource') < 0);
     results.push({
       gate: '#10 LLM 폴백 — 차단',
-      detail: `30초 플레이 도달 발판 ${blocked.state.depth}, 치명 로그 ${warnOnly(blocked.logs).length}개`,
-      pass: blocked.state.depth > 0 && warnOnly(blocked.logs).length === 0,
+      detail: `30초 누적 착지 ${blocked.state.landed}, 치명 로그 ${warnOnly(blocked.logs).length}개`,
+      pass: blocked.state.landed > 0 && warnOnly(blocked.logs).length === 0,
     });
     results.push({
       gate: '#10 LLM 폴백 — JSON 파손',
-      detail: `30초 플레이 도달 발판 ${corrupt.state.depth}, 치명 로그 ${warnOnly(corrupt.logs).length}개`,
-      pass: corrupt.state.depth > 0 && warnOnly(corrupt.logs).length === 0,
+      detail: `30초 누적 착지 ${corrupt.state.landed}, 치명 로그 ${warnOnly(corrupt.logs).length}개`,
+      pass: corrupt.state.landed > 0 && warnOnly(corrupt.logs).length === 0,
     });
   }
 

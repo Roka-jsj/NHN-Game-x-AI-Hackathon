@@ -26,6 +26,11 @@ export const EV = {
   RECORD: 8,
   DEATH: 9,
   RESET: 10,
+  COMBO: 11,        // a = 새 콤보 값, b = 티어
+  COMBO_BREAK: 12,  // a = 끊긴 콤보 값
+  SKIP: 13,         // a = 건너뛴 발판 수
+  GATE: 14,         // a = 통과한 발판 수
+  CRUMBLE: 15,      // 발 밑이 무너졌다
 };
 
 const TAU = Math.PI * 2;
@@ -38,7 +43,9 @@ export class Game {
     this._platY = new Float64Array(C.PLAT_POOL);
     this._platSide = new Uint8Array(C.PLAT_POOL);
     this._platThick = new Float32Array(C.PLAT_POOL);
-    this._platBonus = new Uint8Array(C.PLAT_POOL);
+    this._platFlags = new Uint8Array(C.PLAT_POOL);
+    // 부서지는 발판의 남은 프레임. 0 = 멀쩡, >0 = 무너지는 중, -1 = 사라짐
+    this._platCrumble = new Int16Array(C.PLAT_POOL);
 
     // 발판 공급자. 패스 1은 고정 패턴, 패스 4에서 디렉터가 갈아끼운다.
     this.supplier = null;
@@ -48,7 +55,10 @@ export class Game {
     this.waterRisePerStep = C.WATER_RISE_PER_STEP;
     this.aimWobbleScale = 1;
 
-    this.bestY = 0;            // 최고 기록. 메모리에만 둔다 (localStorage 금지)
+    // 최고 기록. 전부 메모리에만 둔다 (localStorage 금지)
+    this.bestY = 0;            // 높이 — 화면의 점선 기록선
+    this.bestScore = 0;
+    this.bestCombo = 0;
     this.runs = 0;
 
     // main이 프레임 시작에서 심어주는 시각 기준점. 판 리셋과 무관하므로 여기서만 잡는다.
@@ -59,10 +69,51 @@ export class Game {
   }
 
   // ── 발판 접근 ───────────────────────────────────────────────
-  platYAt(i)     { return this._platY[i % C.PLAT_POOL]; }
+  platBaseY(i)   { return this._platY[i % C.PLAT_POOL]; }
   platSideAt(i)  { return this._platSide[i % C.PLAT_POOL]; }
   platThickAt(i) { return this._platThick[i % C.PLAT_POOL]; }
-  platBonusAt(i) { return this._platBonus[i % C.PLAT_POOL]; }
+  platFlagsAt(i) { return this._platFlags[i % C.PLAT_POOL]; }
+  platBonusAt(i) { return this._platFlags[i % C.PLAT_POOL] & C.F_BONUS; }
+  platGone(i)    { return this._platCrumble[i % C.PLAT_POOL] === -1; }
+  crumbleLeft(i) { return this._platCrumble[i % C.PLAT_POOL]; }
+
+  // 이동 발판의 위치는 시각의 함수다. 사인파라 **미래를 계산할 수 있다.**
+  // 판정·조준·렌더가 전부 이 함수 하나를 쓴다. 보이는 것과 맞는 것이 같아야 한다.
+  platYAtTime(i, t) {
+    const slot = i % C.PLAT_POOL;
+    const base = this._platY[slot];
+    if ((this._platFlags[slot] & C.F_MOVING) === 0) return base;
+    return base + C.MOVE_AMP * Math.sin(TAU * t / C.MOVE_PERIOD_MS + i * 1.7);
+  }
+  platYAt(i) { return this.platYAtTime(i, this.simTime); }
+
+  leapDurationFor(dist) {
+    const span = (dist - C.LEAP_DIST_MIN) / (C.LEAP_DIST_MAX - C.LEAP_DIST_MIN);
+    const k = span < 0 ? 0 : (span > 1 ? 1 : span);
+    return C.LEAP_TIME_MIN + (C.LEAP_TIME_MAX - C.LEAP_TIME_MIN) * k;
+  }
+
+  // 지금 떼면 어느 발판을 노리게 되는가, 그리고 도착 시각은 언제인가.
+  // 렌더가 이걸로 "발판이 도착 순간에 있을 자리"를 그린다.
+  // 이동 발판을 도착 시점에 판정하면서 미래를 안 보여주면 그건 불공정한 게임이다.
+  previewTarget(nowSim) {
+    const dist = this.aimPreview(nowSim);
+    const landingY = this.playerY + dist + this.wobbleOffset(dist, nowSim);
+    const arrive = nowSim + this.leapDurationFor(dist);
+    const targetSide = 1 - this.side;
+    let best = -1, bestD = Infinity;
+    for (let i = this.platIdx + 1; i <= this.platIdx + C.LOOKAHEAD; i++) {
+      this.ensurePlatform(i);
+      if (this._platSide[i % C.PLAT_POOL] !== targetSide) continue;
+      if (this.platGone(i)) continue;
+      const d = Math.abs(this.platYAtTime(i, arrive) - landingY);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    this.previewIdx = best;
+    this.previewArrive = arrive;
+    this.previewLandingY = landingY;
+    return best;
+  }
 
   // 착지 허용폭 = 발판 반두께 + 플레이어 반지름
   toleranceAt(i) {
@@ -73,21 +124,27 @@ export class Game {
     while (this.platMade < i) {
       const n = this.platMade + 1;
       const slot = n % C.PLAT_POOL;
+      this._platCrumble[slot] = 0;
       if (n === 0) {
         this._platY[slot] = 0;
         this._platSide[slot] = 0;
         this._platThick[slot] = 1;
-        this._platBonus[slot] = 0;
+        this._platFlags[slot] = 0;      // 시작 발판은 언제나 멀쩡한 발판이다
       } else {
         const prev = (n - 1) % C.PLAT_POOL;
         // supplier가 없으면 패스 1의 고정 패턴. 랜덤 0.
-        const gap = this.supplier
+        let gap = this.supplier
           ? this.supplier.gapFor(n)
           : C.GAP_PATTERN[(n - 1) % C.GAP_PATTERN.length];
+        // 직전 발판이 무너지는 발판이면 오래 겨눌 시간이 없다.
+        // 먼 간격을 붙이면 어떻게 눌러도 못 넘는 배치가 된다.
+        if ((this._platFlags[prev] & C.F_CRUMBLE) && gap > C.CRUMBLE_NEXT_GAP_MAX) {
+          gap = C.CRUMBLE_NEXT_GAP_MAX;
+        }
         this._platY[slot] = this._platY[prev] + gap;
         this._platSide[slot] = n % 2;
         this._platThick[slot] = this.supplier ? this.supplier.thickFor(n) : 1;
-        this._platBonus[slot] = this.supplier ? this.supplier.bonusFor(n) : 0;
+        this._platFlags[slot] = this.supplier ? this.supplier.flagsFor(n) : 0;
       }
       this.platMade = n;
     }
@@ -159,6 +216,14 @@ export class Game {
     this.runBestY = 0;
     this.recordPassed = this.bestY <= 0;
     this.deathTick = -1;
+
+    // 콤보 · 점수
+    this.combo = 0;
+    this.comboBest = 0;
+    this.score = 0;
+    this.lastSkip = 0;
+    this.chaseMargin = C.CHASE_MARGIN_START;
+    this.rideOffset = 0;
 
     this.runs++;
     this.emit(EV.RESET, 0, 0);
@@ -265,24 +330,26 @@ export class Game {
     const landingY = this.playerY + dist + wob;
 
     // 착지 후보: 반대편 벽의 발판 중 조준점에 가장 가까운 것.
+    // 이동 발판은 **도착 시점의 위치**로 고른다 — 조준 중에 화면에 그려준 예측선과 같은 기준이다.
     // 멀리 뛰어 한 칸 건너뛰는 플레이가 성립한다.
+    const arrive = releaseSim + this.leapDurationFor(dist);
     const targetSide = 1 - this.side;
     let best = -1, bestDist = Infinity;
     for (let i = this.platIdx + 1; i <= this.platIdx + C.LOOKAHEAD; i++) {
       this.ensurePlatform(i);
       if (this._platSide[i % C.PLAT_POOL] !== targetSide) continue;
-      const d = Math.abs(this._platY[i % C.PLAT_POOL] - landingY);
+      if (this.platGone(i)) continue;
+      const d = Math.abs(this.platYAtTime(i, arrive) - landingY);
       if (d < bestDist) { bestDist = d; best = i; }
     }
 
-    const tol = best >= 0 ? this.toleranceAt(best) : C.BASE_TOLERANCE;
-    const aimError = best >= 0 ? bestDist / tol : 2;
+    // 한 칸 건너뛰기. 같은 벽의 발판은 한 칸 걸러 있으므로 차이를 2로 나눈다.
+    this.lastSkip = best > this.platIdx + 1 ? ((best - this.platIdx - 1) / 2) | 0 : 0;
 
+    // 착지 판정은 여기서 하지 않는다. **도착하는 순간**에 한다.
+    // 이동 발판은 도약하는 동안 움직이고, 부서지는 발판은 사라질 수 있다.
+    // "내가 내려앉은 자리에 발판이 있었는가"가 플레이어가 이해하는 규칙이다.
     this.pendingTarget = best;
-    this.pendingHit = aimError <= 1;
-    this.pendingPerfect = aimError <= C.PERFECT_RATIO;
-    this.lastAimError = aimError > 2 ? 2 : aimError;
-    this.lastAimSigned = best >= 0 ? (landingY - this.platYAt(best)) : 0;
     this.lastChargeRatio = ratio;
     this.lastChargeMs = ms;
 
@@ -332,7 +399,33 @@ export class Game {
 
     if (this.state !== S.DEAD) {
       // 물은 선형이다. 이징을 걸면 예측이 불가능해지고, 그 순간 실패가 플레이어 탓이 아니게 된다.
-      this.waterY += this.waterRisePerStep;
+      //
+      // 속도는 세 갈래지만 전부 일정 속도다. 순간이동하지 않는다.
+      //  ① 콤보가 물을 붙잡는다 — 연속 완벽 착지 3회면 멈추고, 6회면 내려간다
+      //  ② 너무 앞서면 3배속으로 따라붙는다 (안 그러면 물이 영원히 안 보인다)
+      //  ③ 그 외에는 기본 속도
+      let rise = this.waterRisePerStep * this.comboWaterMul();
+      const margin = this.playerY - this.waterY;
+      if (margin > this.chaseMargin) {
+        const chase = this.waterRisePerStep * C.WATER_CHASE_MUL;
+        if (chase > rise) rise = chase;
+      }
+      this.waterY += rise;
+
+      // 깊이가 쌓일수록 물이 더 가까이 따라붙는다. 후반에는 한 번 오래 겨누는 것도 위험해진다.
+      const t = this.depth / C.CHASE_TIGHTEN_DEPTH;
+      const k = t > 1 ? 1 : t;
+      this.chaseMargin = C.CHASE_MARGIN_START
+        + (C.CHASE_MARGIN_END - C.CHASE_MARGIN_START) * k;
+    }
+
+    this.tickCrumble();
+
+    // 이동 발판 위에서는 발판을 타고 같이 움직인다
+    if (this.state === S.READY || this.state === S.CHARGING || this.state === S.LANDED) {
+      if (this.platFlagsAt(this.platIdx) & C.F_MOVING) {
+        this.playerY = this.platYAt(this.platIdx) + this.rideOffset;
+      }
     }
 
     switch (this.state) {
@@ -367,7 +460,8 @@ export class Game {
           for (let i = this.platIdx + 1; i <= this.platIdx + C.LOOKAHEAD; i++) {
             this.ensurePlatform(i);
             if (this._platSide[i % C.PLAT_POOL] !== this.side) continue;
-            if (Math.abs(this._platY[i % C.PLAT_POOL] - this.playerY) <= this.toleranceAt(i)) {
+            if (this.platGone(i)) continue;
+            if (Math.abs(this.platYAt(i) - this.playerY) <= this.toleranceAt(i)) {
               this.grab(i, true);
               break;
             }
@@ -397,9 +491,24 @@ export class Game {
   }
 
   resolveLanding() {
+    // 도착 시점 판정. 발판이 움직였거나 사라졌으면 그 결과가 그대로 반영된다.
+    const t = this.pendingTarget;
+    let aimError = 2, signed = 0;
+    if (t >= 0 && !this.platGone(t)) {
+      const tol = this.toleranceAt(t);
+      signed = this.leapToY - this.platYAt(t);
+      aimError = Math.abs(signed) / tol;
+    }
+    this.lastAimError = aimError > 2 ? 2 : aimError;
+    this.lastAimSigned = signed;
+    this.pendingHit = aimError <= 1;
+    this.pendingPerfect = aimError <= C.PERFECT_RATIO;
+
     if (this.pendingHit) {
       this.grab(this.pendingTarget, false);
     } else {
+      if (this.combo > 0) this.emit(EV.COMBO_BREAK, this.combo, 0);
+      this.combo = 0;
       this.side = 1 - this.side;
       this.playerX = this.wallX(this.side);
       this.fallVel = 0;
@@ -411,38 +520,97 @@ export class Game {
   }
 
   grab(idx, viaCoyote) {
+    const skip = viaCoyote ? 0 : this.lastSkip;
+    const slot = idx % C.PLAT_POOL;
     this.side = this.platSideAt(idx);
     this.platIdx = idx;
     this.playerX = this.wallX(this.side);
+    this.rideOffset = this.playerY - this.platYAt(idx);
     this.depth++;
     this.ensurePlatform(idx + C.LOOKAHEAD);
 
-    if (this.platBonusAt(idx)) {
-      this._platBonus[idx % C.PLAT_POOL] = 0;
-      this.waterY -= C.WATER_START_GAP * 0.12;   // 유혹의 대가: 물이 내려간다
-      this.emit(EV.BONUS, 0, 0);
+    let bonus = false;
+    if (this._platFlags[slot] & C.F_BONUS) {
+      this._platFlags[slot] &= ~C.F_BONUS;
+      this.waterY -= C.BONUS_WATER_PUSH;   // 유혹의 대가: 물이 내려간다
+      bonus = true;
     }
 
-    if (viaCoyote) {
-      this.landedResolveTo = S.READY;
-      this.setState(S.LANDED);
-      this.emit(EV.COYOTE, 0, 0);
-      this.emit(EV.LAND, this.lastAimError, 0);
-    } else {
-      if (this.pendingPerfect) {
-        this.perfectCount++;
-        this.emit(EV.PERFECT, this.lastAimError, 0);
-      } else {
-        this.emit(EV.LAND, this.lastAimError, 0);
-      }
-      this.landedResolveTo = S.READY;
-      this.setState(S.LANDED);
+    // 부서지는 발판은 붙는 순간부터 무너지기 시작한다.
+    // 여기 오래 서서 정확히 겨눌 수는 없다 — 정확함과 시간이 정면으로 부딪힌다.
+    if ((this._platFlags[slot] & C.F_CRUMBLE) && this._platCrumble[slot] === 0) {
+      this._platCrumble[slot] = C.CRUMBLE_FRAMES;
     }
+
+    // 관문 — 끝없이 오르기만 하면 진척이 안 느껴진다. 일정 간격마다 사건을 만든다.
+    if (this.depth % C.GATE_EVERY === 0) {
+      this.score += C.GATE_SCORE;
+      this.waterY -= C.GATE_WATER_PUSH;
+      this.emit(EV.GATE, this.depth, 0);
+    }
+
+    // ── 콤보 — 연속 완벽 착지만 이어진다 ──
+    // 그냥 붙기만 해서는 끊긴다. 코요테 구제도 끊는다 — 그건 실수를 봐준 것이지 실력이 아니다.
+    const perfect = !viaCoyote && this.pendingPerfect;
+    if (perfect) {
+      this.perfectCount++;
+      this.combo += 1 + (skip > 0 ? 1 : 0);   // 건너뛰며 완벽하면 두 칸 오른다
+      if (this.combo > this.comboBest) this.comboBest = this.combo;
+      this.emit(EV.PERFECT, this.lastAimError, 0);
+      this.emit(EV.COMBO, this.combo, this.comboTier());
+    } else {
+      if (this.combo > 0) this.emit(EV.COMBO_BREAK, this.combo, 0);
+      this.combo = 0;
+      if (viaCoyote) this.emit(EV.COYOTE, 0, 0);
+      this.emit(EV.LAND, this.lastAimError, 0);
+    }
+
+    if (skip > 0) this.emit(EV.SKIP, skip, 0);
+    if (bonus) this.emit(EV.BONUS, 0, 0);
+
+    // ── 점수 — 멀리 뛸수록, 건너뛸수록, 콤보가 높을수록 ──
+    const mult = 1 + this.combo * C.COMBO_MULT_STEP;
+    let gain = C.SCORE_BASE + this.aimDist * C.SCORE_PER_PX + skip * C.SCORE_SKIP;
+    if (bonus) gain += C.SCORE_BONUS;
+    this.score += (gain * mult) | 0;
+
+    this.landedResolveTo = S.READY;
+    this.setState(S.LANDED);
+  }
+
+  // 부서지는 발판의 시계. 플레이어 주변만 돈다.
+  tickCrumble() {
+    const first = this.platIdx - 4 < 0 ? 0 : this.platIdx - 4;
+    const last = this.platIdx + C.LOOKAHEAD;
+    for (let i = first; i <= last; i++) {
+      const slot = i % C.PLAT_POOL;
+      const c = this._platCrumble[slot];
+      if (c <= 0) continue;
+      const next = c - 1;
+      this._platCrumble[slot] = next === 0 ? -1 : next;
+      if (next === 0 && i === this.platIdx) {
+        if (this.state === S.READY || this.state === S.CHARGING || this.state === S.LANDED) {
+          this.dropFromPlatform();
+        }
+      }
+    }
+  }
+
+  dropFromPlatform() {
+    if (this.combo > 0) this.emit(EV.COMBO_BREAK, this.combo, 0);
+    this.combo = 0;
+    this.fallVel = 0;
+    this.coyoteLeft = 0;      // 발판이 사라졌다. 구제할 발판이 없다
+    this.setState(S.FALLING);
+    this.emit(EV.CRUMBLE, 0, 0);
   }
 
   die() {
     this.deathTick = this.tick;
     if (this.runBestY > this.bestY) this.bestY = this.runBestY;
+    if (this.score > this.bestScore) this.bestScore = this.score;
+    if (this.comboBest > this.bestCombo) this.bestCombo = this.comboBest;
+    this.combo = 0;
     this.setState(S.DEAD);
     this.emit(EV.DEATH, 0, 0);
   }
@@ -450,4 +618,12 @@ export class Game {
   // ── 조회 ────────────────────────────────────────────────────
   heightMeters() { return Math.max(0, this.runBestY) / C.METER_PX; }
   waterMargin()  { return this.playerY - this.waterY; }
+  comboTier()    { return (this.combo / C.COMBO_TIER) | 0; }
+
+  // 콤보가 물에 거는 힘. 1 = 평소, 0 = 멈춤, 음수 = 내려감.
+  comboWaterMul() {
+    if (this.combo >= C.COMBO_PUSH_AT) return C.COMBO_PUSH_MUL;
+    if (this.combo >= C.COMBO_HOLD_AT) return 0;
+    return 1;
+  }
 }

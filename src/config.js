@@ -47,6 +47,37 @@ export const WATER_RISE_PER_STEP = WATER_SPEED_PX_S / SIM_HZ;
 export const WATER_START_GAP = 520;           // 시작 시 플레이어 아래 여유
 export const WATER_NEAR_PX = 200;             // 이 거리 안이면 근접 경고
 
+// ── 추격 규칙 ────────────────────────────────────────────────
+// 문서 수치(22px/s 선형)만으로는 물이 영원히 위협이 되지 않는다.
+// 플레이어는 도약 200px을 0.6초에 하므로 상승 속도가 약 333px/s다.
+// 물이 22px/s로 오르면 30초 뒤 수면은 화면 9장 아래에 있다.
+// "차지하는 동안 물이 오른다"는 문서의 핵심 문장이 실제로는 작동하지 않는다.
+//
+// 그래서 거리가 벌어지면 물이 3배속으로 따라붙는다.
+// **여전히 선형이다** — 일정 속도 두 개뿐이고, 어느 쪽인지 눈으로 보인다.
+// 순간이동하지 않는다. 예측 가능해야 실패가 플레이어 탓이 된다.
+export const WATER_CHASE_MUL = 3;
+export const CHASE_MARGIN_START = 640;        // 초반: 화면 2/3 아래에서 따라온다
+export const CHASE_MARGIN_END = 300;          // 후반: 코앞까지 붙는다
+export const CHASE_TIGHTEN_DEPTH = 60;        // 이 발판 수에 걸쳐 좁혀진다
+
+// ─── 콤보 — 연속 완벽 착지 ───────────────────────────────────
+// 이 게임의 척추다. 완벽 착지(±12%)는 오래 정확히 겨눠야 나오고,
+// 겨누는 동안 물은 오른다. 그런데 완벽 착지가 쌓이면 물이 멈추고, 더 쌓이면 내려간다.
+// **정확함이 곧 생존이다.** 문서가 "게임 전체"라고 한 긴장이 여기서 닫힌다.
+export const COMBO_HOLD_AT = 3;               // 이 콤보부터 물이 멈춘다
+export const COMBO_PUSH_AT = 6;               // 이 콤보부터 물이 내려간다
+export const COMBO_PUSH_MUL = -0.5;           // 내려가는 속도 (기본 속도의 절반)
+export const COMBO_TIER = 3;                  // 티어 하나당 콤보 3
+
+// ─── 점수 ────────────────────────────────────────────────────
+export const SCORE_BASE = 10;                 // 착지 기본점
+export const SCORE_PER_PX = 1 / 20;           // 멀리 뛸수록 더 준다 — 위험에 보상
+export const SCORE_SKIP = 25;                 // 한 칸 건너뛰기 성공
+export const SCORE_BONUS = 150;               // 앰버 발판
+export const COMBO_MULT_STEP = 0.5;           // 배수 = 1 + 콤보 × 0.5
+export const BONUS_WATER_PUSH = 220;          // 앰버를 먹으면 물이 이만큼 내려간다
+
 // ─── 낙하 ────────────────────────────────────────────────────
 export const FALL_ACC_PER_STEP = 1.2;
 export const FALL_MAX_SPEED = 42;
@@ -55,9 +86,40 @@ export const FALL_MAX_SPEED = 42;
 export const CAM_ANCHOR = 0.40;               // 플레이어를 화면 상단 40%에 유지
 export const CAM_LERP = 0.12;
 
+// ─── 발판 종류 — 비트필드 ────────────────────────────────────
+// 청크 스텝의 3번째 값이 이 비트필드다. [간격, 두께배수, 플래그]
+//
+// 왜 종류를 늘리는가: 가만히 있는 발판만 있으면 "오래 겨눌수록 정확하다"가
+// 항상 옳은 전략이 된다. 그러면 문서가 말한 긴장("재는 동안 물은 오른다")이
+// 물이 느린 순간 전부 사라진다. 발판 자체가 시간을 압박해야 매 순간 선택이 생긴다.
+export const F_BONUS = 1;      // 앰버 — 먹으면 물이 내려간다
+export const F_CRUMBLE = 2;    // 부서진다 — 붙는 순간부터 무너진다. 오래 겨눌 수 없다
+export const F_MOVING = 4;     // 위아래로 흔들린다 — 사인파. 읽을 수 있다
+export const F_MAX = 7;
+
+export const CRUMBLE_FRAMES = 42;             // 0.7초. 이 안에 떠나야 한다
+export const CRUMBLE_WARN = 15;               // 남은 프레임이 이하면 경고 연출
+// 부서지는 발판 **다음** 간격의 상한.
+// 390px 도약은 818ms 차지를 요구하는데 발판은 700ms 만에 무너진다 —
+// 그 조합은 어떻게 눌러도 못 넘는다. 실패가 플레이어 탓이 아니게 되는 배치다.
+// 청크가 뭘 주든 여기서 잘라낸다. 데이터가 아니라 규칙으로 막는다.
+export const CRUMBLE_NEXT_GAP_MAX = 300;      // 필요한 차지 약 600ms — 반응 시간까지 감안
+export const MOVE_AMP = 34;                   // 이동 발판 진폭
+export const MOVE_PERIOD_MS = 1800;           // 주기. 조준 진동(620ms)과 배수 관계가 아니게 둔다
+
+// ─── 관문 ────────────────────────────────────────────────────
+// 끝없이 오르기만 하면 진척이 안 느껴진다. 일정 간격마다 사건을 만든다.
+export const GATE_EVERY = 12;                 // 발판 12개마다
+export const GATE_SCORE = 200;
+export const GATE_WATER_PUSH = 120;
+
 // ─── 발판 풀 ─────────────────────────────────────────────────
 export const PLAT_POOL = 64;                  // 링버퍼. 화면에 동시에 보이는 건 10개 안팎
-export const LOOKAHEAD = 12;                  // 착지 후보 탐색 범위 (인덱스)
+// 착지 후보 탐색 범위. 최대 도약 420px / 최소 간격 100px = 4.2칸이고
+// 후보는 같은 벽(한 칸 걸러)만 세므로 8이면 충분하다.
+// 이 값이 곧 "발판을 얼마나 앞서 생성하는가"이기도 하다 —
+// 크게 잡으면 디렉터가 아직 관찰하지 않은 구간까지 미리 만들어버린다.
+export const LOOKAHEAD = 8;
 
 // 패스 1 고정 패턴. 랜덤 없음. 전부 [LEAP_DIST_MIN, LEAP_DIST_MAX] 안이다.
 // 패스 4에서 디렉터가 이 배열 대신 청크를 공급한다.
@@ -108,6 +170,46 @@ export const PART_GRAVITY = 0.42;
 export const TRAIL_MAX = 32;
 export const TRAIL_FRAMES = 4;                // 도약 중 잔상
 export const CAM_LEAD = 2.2;                  // 카메라가 상승 방향으로 앞을 본다 (렌더 전용)
+
+// ─── AI 디렉터 계층1 (패스 4) ────────────────────────────────
+export const CHUNK_SIZE = 6;                  // 구간 = 발판 6개
+export const OBSERVE_CHUNKS = 3;              // 구간 3개(발판 18개) 관찰 후 첫 판정
+export const METRIC_WINDOW = 8;               // 최근 8회 슬라이딩 윈도
+export const HYSTERESIS = 0.05;               // 경계값 ±0.05 안에서는 프로파일을 바꾸지 않는다
+
+// 프로파일 판정 임계값 — 문서 그대로. 결정론적이어야 재현 가능하다.
+export const TH_CHARGE_LOW = 0.35;
+export const TH_CHARGE_HIGH = 0.65;
+export const TH_AIM_LOW = 0.4;
+export const TH_AIM_HIGH = 0.6;
+export const TH_STDEV = 0.22;
+
+// 레버 범위
+export const LEVER_THICK_MIN = 0.7, LEVER_THICK_MAX = 1.4;
+export const LEVER_WATER_MIN = 18, LEVER_WATER_MAX = 34;
+export const LEVER_WOBBLE_MIN = 0.5, LEVER_WOBBLE_MAX = 1.4;
+export const LEVER_COYOTE_MIN = 5, LEVER_COYOTE_MAX = 8;
+
+// 간격 분류 경계 (근 / 중 / 원)
+export const GAP_NEAR = 180;
+export const GAP_MID = 300;
+// ── 생성 가능한 간격의 범위 ──
+// 문서의 "차지 0% → 90px" 는 실제로 도달할 수 없는 값이다.
+// 최소 차지가 80ms 로 강제되므로 실제 최소 도약은
+//   90 + 330 × (80/900) = 119.3px
+// 이고, 그보다 짧은 간격은 **어떻게 눌러도 넘어간다.**
+// 하한을 100 으로 뒀다가 92px 간격이 생성돼 봇이 매번 29px 오버슛하며 죽었다.
+export const LEAP_DIST_ACHIEVABLE_MIN =
+  LEAP_DIST_MIN + (LEAP_DIST_MAX - LEAP_DIST_MIN) * (CHARGE_MIN_MS / CHARGE_MAX_MS);
+export const GAP_FLOOR = 130;
+// 상한도 "최대 도약 420" 이 아니다.
+// 플레이어는 발판 중심에서 최대 허용폭(두꺼운 발판이면 약 23px)만큼 아래에 붙을 수 있고,
+// 그러면 다음 발판까지의 실제 거리가 그만큼 늘어난다.
+export const GAP_CEIL = 390;
+
+export const DATA_CHUNKS = 'data/chunks.json';
+export const DATA_POLICY = 'data/policy.json';
+export const DATA_LINES = 'data/lines.json';
 
 // ─── 표시 ────────────────────────────────────────────────────
 export const METER_PX = 40;                   // 40px = 1m
