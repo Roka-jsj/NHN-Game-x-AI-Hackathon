@@ -60,7 +60,21 @@ export const STUMBLE_SPEED_MUL = 0.25;
 export const OB_NONE = 0;
 export const OB_LOW = 1;      // 낮은 벽  → 점프로만 넘는다
 export const OB_BEAM = 2;     // 높은 빔  → 슬라이드로만 지난다
-export const OB_PILLAR = 3;   // 기둥     → 레인을 바꾸는 수밖에 없다
+export const OB_PILLAR = 3;
+// 네 번째 종류 — **움직이는 기둥.** 평론가가 "장애물이 세 종류뿐이라 3분을 하면
+// 1분째와 3분째의 종류가 같고 속도만 다르다"고 지적한 것에 대한 답이다.
+//
+// 판정은 기둥과 완전히 같다. 다른 것은 **어디에 도착할지를 읽어야 한다**는 것뿐이다.
+// 멀리서는 다른 레인에 있다가 다가오면서 최종 레인으로 미끄러진다.
+// 지금 보이는 자리가 아니라 도착할 자리를 봐야 하고, 그게 새로운 기술이다.
+//
+// 판정용 레인(도착 지점)에 그대로 저장하므로 **통과 가능성 규칙이 전부 그대로
+// 적용된다.** 청크 스키마도 안 바뀐다 — 디렉터가 기둥 일부를 결정론적으로
+// 승격시킬 뿐이라 구운 350청크를 다시 굽지 않아도 된다.
+export const OB_DRIFT = 4;
+export const DRIFT_SPAN = 900;                // 이 거리 안에서 최종 레인으로 미끄러진다
+export const DRIFT_EVERY = 5;                 // 기둥 다섯 개 중 하나꼴로 승격
+export const DRIFT_FROM_DIST = 5200;          // 이 거리 전에는 안 나온다. 먼저 기둥을 가르친다   // 기둥     → 레인을 바꾸는 수밖에 없다
 
 // 폭은 종류마다 다르다. **형태만으로 구분돼야 한다** — 색으로 때우지 않는다.
 //   낮은 벽: 넓고 낮다   → 넘어라
@@ -75,6 +89,8 @@ export const OB_LOW_H = 70;                   // 0 ~ 70 을 막는다
 export const OB_BEAM_LO = 80;                 // 80 ~ 300 을 막는다
 export const OB_BEAM_HI = 300;
 export const OB_PILLAR_H = 300;
+export const OB_W_DRIFT = 70;
+export const OB_DRIFT_H = 260;
 
 // ─── 코인 ─────────────────────────────────────────────────────
 export const COIN_R = 18;

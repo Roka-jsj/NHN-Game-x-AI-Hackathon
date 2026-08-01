@@ -366,9 +366,18 @@ export class Renderer {
       for (let l = 0; l < C.LANE_COUNT; l++) {
         const ob = game.rowOb(i, l);
         if (ob === C.OB_NONE) continue;
-        const cx = C.VP_X + C.LANE_X[l] * sc;
+        // 움직이는 기둥은 멀리서 다른 레인에 있다가 최종 레인으로 미끄러진다.
+        // **지금 자리가 아니라 도착할 자리를 봐야 한다** — 그게 이 종류의 전부다.
+        let wx = C.LANE_X[l];
+        if (ob === C.OB_DRIFT) {
+          const from = game.driftFrom(i, l);
+          const k = z > C.DRIFT_SPAN ? 1 : (z < 0 ? 0 : z / C.DRIFT_SPAN);
+          wx = C.LANE_X[l] + (C.LANE_X[from] - C.LANE_X[l]) * k;
+        }
+        const cx = C.VP_X + wx * sc;
         const ow = ob === C.OB_LOW ? C.OB_W_LOW
-                 : (ob === C.OB_BEAM ? C.OB_W_BEAM : C.OB_W_PILLAR);
+                 : (ob === C.OB_BEAM ? C.OB_W_BEAM
+                 : (ob === C.OB_DRIFT ? C.OB_W_DRIFT : C.OB_W_PILLAR));
         const hw = ow * 0.5 * sc;
 
         // 바닥 그림자 — 장애물이 공중에 뜬 것처럼 보이지 않게 붙들어 준다
@@ -393,6 +402,22 @@ export class Renderer {
           const leg = 7 * sc;
           ctx.fillRect(cx - hw, gy - C.OB_BEAM_LO * sc, leg, C.OB_BEAM_LO * sc);
           ctx.fillRect(cx + hw - leg, gy - C.OB_BEAM_LO * sc, leg, C.OB_BEAM_LO * sc);
+        } else if (ob === C.OB_DRIFT) {
+          // 움직이는 기둥 — 기둥보다 좁고, 도착할 레인에 표적선이 서 있다.
+          // 표적선이 없으면 "어디로 가는지"를 마지막 순간까지 알 수 없다.
+          const th = C.OB_DRIFT_H * sc;
+          ctx.fillRect(cx - hw, gy - th, hw * 2, th);
+          if (outline) ctx.strokeRect(cx - hw, gy - th, hw * 2, th);
+          const tx = C.VP_X + C.LANE_X[l] * sc;
+          if (Math.abs(tx - cx) > 2) {
+            ctx.strokeStyle = C.RAMP_DANGER[C.rampIndex(0.25 + 0.45 * sc)];
+            ctx.lineWidth = C.STROKE;
+            ctx.beginPath();
+            ctx.moveTo(tx - hw, gy);
+            ctx.lineTo(tx + hw, gy);
+            ctx.stroke();
+            if (outline) { ctx.strokeStyle = C.COL_BG; ctx.lineWidth = C.STROKE; }
+          }
         } else {
           // 위아래가 다 막힌 기둥 — 돌아가라는 뜻
           ctx.fillRect(cx - hw, gy - C.OB_PILLAR_H * sc, hw * 2, C.OB_PILLAR_H * sc);

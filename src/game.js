@@ -167,13 +167,24 @@ export class Game {
     if (n <= 0) return;
     const pbase = ((n - 1) % C.ROW_POOL) * C.LANE_COUNT;
     for (let l = 0; l < C.LANE_COUNT; l++) {
-      if (this._rowOb[pbase + l] !== C.OB_PILLAR && this._rowOb[base + l] !== C.OB_PILLAR) return;
+      if (!this.blocksLane(this._rowOb[pbase + l]) && !this.blocksLane(this._rowOb[base + l])) return;
     }
     // 없다 — 직전 행에서 통과 가능했던 레인 하나를 연다
     for (let l = 0; l < C.LANE_COUNT; l++) {
-      if (this._rowOb[pbase + l] !== C.OB_PILLAR) { this._rowOb[base + l] = C.OB_NONE; return; }
+      if (!this.blocksLane(this._rowOb[pbase + l])) { this._rowOb[base + l] = C.OB_NONE; return; }
     }
     this._rowOb[base] = C.OB_NONE;
+  }
+
+  // 자세로는 못 넘는 종류 — 레인을 바꾸는 수밖에 없다
+  blocksLane(ob) { return ob === C.OB_PILLAR || ob === C.OB_DRIFT; }
+
+  // 움직이는 기둥이 **출발하는** 레인. 도착 레인(판정용)은 행에 저장돼 있다.
+  // 해시라서 같은 판이면 같은 궤적이 나온다 — 외울 수 있고, 그래서 실력이 는다.
+  driftFrom(i, toLane) {
+    const h = (i * 2654435761) % 1000;
+    const alt = h % 2 === 0 ? 0 : 2;
+    return alt === toLane ? 1 : alt;
   }
 
   // 계단 구간 진입 직전·직후는 비운다
@@ -757,7 +768,7 @@ export class Game {
     const top = this.footY + this.height;
     if (ob === C.OB_LOW) return bottom + pad >= C.OB_LOW_H;
     if (ob === C.OB_BEAM) return top - pad <= C.OB_BEAM_LO;
-    return false;   // 기둥은 레인을 바꾸는 수밖에 없다
+    return false;   // 기둥과 움직이는 기둥은 레인을 바꾸는 수밖에 없다
   }
 
   reward(adjacent, daring) {

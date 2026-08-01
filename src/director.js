@@ -300,6 +300,19 @@ export class Director {
       if (open === 0) o0 = 0; else if (open === 1) o1 = 0; else o2 = 0;
     }
 
+    // 6) 기둥 일부를 **움직이는 기둥**으로 승격한다.
+    //    판정은 기둥과 같고 그리는 자리만 달라지므로, 위의 통과 가능성 검사가
+    //    전부 그대로 유효하다. 청크 스키마(0~3)도 안 바뀐다 —
+    //    구운 350청크를 다시 굽지 않아도 네 번째 종류가 생긴다.
+    //    처음 5200 거리 안에서는 안 나온다. 기둥을 먼저 가르쳐야 한다.
+    if (game.travelled > C.DRIFT_FROM_DIST || n * C.ROW_SPACING > C.DRIFT_FROM_DIST) {
+      if (n % C.DRIFT_EVERY === 0) {
+        if (o0 === C.OB_PILLAR) o0 = C.OB_DRIFT;
+        else if (o1 === C.OB_PILLAR) o1 = C.OB_DRIFT;
+        else if (o2 === C.OB_PILLAR) o2 = C.OB_DRIFT;
+      }
+    }
+
     game._rowOb[base] = o0;
     game._rowOb[base + 1] = o1;
     game._rowOb[base + 2] = o2;

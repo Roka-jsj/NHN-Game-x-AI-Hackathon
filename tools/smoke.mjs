@@ -115,7 +115,7 @@ const BOT = () => {
       if (row < 0 || row > g.rowMade) return 0;
       const ob = g.rowOb(row, lane);
       if (ob === 0) return 0;
-      if (ob === 3) return 99;
+      if (ob === 3 || ob === 4) return 99;   // 기둥·움직이는 기둥은 자세로 못 넘는다
       return 1;
     },
 
@@ -425,7 +425,7 @@ async function run() {
       // 트랙 통과 가능성은 봇이 아니라 **정적으로** 센다.
       // 봇이 죽는 건 봇이 못해서일 수도 있지만, 세 레인이 동시에 막힌 행은
       // 누가 플레이해도 즉사다. 생성된 행을 하나씩 직접 본다.
-      let rowsSeen = 0, rowsBlocked = 0, lastRow = -1;
+      let rowsSeen = 0, rowsBlocked = 0, drifters = 0, lastRow = -1;
       const draftKinds = [0, 0, 0];
       for (let i = 0; i < frames; i++) {
         if (hideAt && i === hideAt) {
@@ -471,7 +471,11 @@ async function run() {
           if (lastRow < 0) continue;
           rowsSeen++;
           let blocked = 0;
-          for (let l = 0; l < 3; l++) if (gg.rowOb(lastRow, l)) blocked++;
+          for (let l = 0; l < 3; l++) {
+            const o = gg.rowOb(lastRow, l);
+            if (o) blocked++;
+            if (o === 4) drifters++;              // 움직이는 기둥
+          }
           if (blocked === 3) rowsBlocked++;
         }
 
@@ -489,7 +493,7 @@ async function run() {
         tick: g.tick, runs: g.runs, sawDead, state: g.state,
         dist, maxDist, deaths, coins, hideJump,
         stairs, drafts, picks, traits, draftKinds,
-        rowsSeen, rowsBlocked,
+        rowsSeen, rowsBlocked, drifters,
         travelled: g.travelled, worldX: g.worldX, gap: g.gap,
         hits: g.hits, nearMisses: g.nearMisses, jumps: g.jumps, slides: g.slides,
         accumulator: window.__rising.accumulator,
@@ -605,6 +609,13 @@ async function run() {
               `특성 선택 ${long.state.picks}회 (현재 보유 ${long.state.traits}개), ` +
               `최고 도달 ${(long.state.maxDist / 1000).toFixed(0)}m, 사망 ${long.state.deaths}회`,
       pass: long.state.stairs >= 1 && long.state.drafts >= 1 && long.state.picks >= 1,
+    });
+    results.push({
+      gate: '네 번째 장애물 — 움직이는 기둥이 실제로 나오는가',
+      detail: `90초 플레이에서 생성된 행 ${long.state.rowsSeen}개 중 움직이는 기둥 ` +
+              `${long.state.drifters}개. 판정은 기둥과 같고 그리는 자리만 달라지므로 ` +
+              `세 레인 동시 차단 ${long.state.rowsBlocked}개가 그대로 0이어야 한다`,
+      pass: long.state.drifters > 0 && long.state.rowsBlocked === 0,
     });
   }
 
