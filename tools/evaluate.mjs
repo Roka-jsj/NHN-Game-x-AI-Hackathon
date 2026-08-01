@@ -240,7 +240,12 @@ async function run() {
   server.close();
 
   // ── 파생 판정 — 루프가 이 값들을 보고 다음 수정을 정한다 ──
-  const outcomes = new Set(report.matches.map((m) => m.outcome));
+  // 결말 종류만 세면 안 된다. 무승부를 없애자 승/승/패/승이 되어 "종류 2"로
+  // 떨어졌는데, 이건 후퇴가 아니라 **지표가 조악했던 것**이다 —
+  // 무승부가 병증이었고 승패는 정상 결말이다.
+  // 전략이 갈리는지는 결말과 **판 길이**를 함께 봐야 한다.
+  // 82초 승리와 222초 승리는 같은 결말이지만 전혀 다른 판이다.
+  const outcomes = new Set(report.matches.map((m) => m.outcome + ':' + Math.floor(m.seconds / 60)));
   const unresolved = report.matches.filter((m) => m.outcome < 0).length;
   const draws = report.matches.filter((m) => m.outcome === 3).length;
   const lengths = report.matches.filter((m) => m.outcome > 0).map((m) => m.seconds);

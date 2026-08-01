@@ -535,9 +535,15 @@ export class Game {
     // 기지는 협곡 가장자리(높은 곳)에 있어 전선보다 한참 늦게 잠긴다 —
     // 그때까지 승부가 안 났으면 둘 다 죽는 게 맞다.
     if (this.water <= C.WATER_BASE_AT) {
-      const d = C.WATER_DPS * dt;
-      this.baseHp[SIDE_L] -= d;
-      this.baseHp[SIDE_R] -= d;
+      // **물은 밀리는 쪽을 먼저 삼킨다.**
+      // 양쪽을 똑같이 깎았더니 두 기지가 같은 프레임에 0이 되어 무승부가
+      // 기본 결말이 됐다(네 전략 중 둘). 전선이 어디 있느냐로 갈라야
+      // 밀어붙인 쪽이 보상을 받고, 그래야 전략 선택에 의미가 생긴다.
+      //   전선 0.5 → 양쪽 같음.  0.8(내가 밀고 있음) → 적이 1.6배, 내가 0.4배
+      const front = this.frontline();
+      const d = C.WATER_DPS * dt * 2;
+      this.baseHp[SIDE_L] -= d * (1 - front);
+      this.baseHp[SIDE_R] -= d * front;
       for (let sd = 0; sd < 2; sd++) {
         if (this.baseHp[sd] <= 0) {
           this.baseHp[sd] = 0;
