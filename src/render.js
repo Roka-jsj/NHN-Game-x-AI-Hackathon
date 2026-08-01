@@ -532,7 +532,9 @@ export class Renderer {
     const top = C.VIEW_H - panelH - C.UNIT * 3;
     let y = top;
 
-    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.85)];
+    // 완전 불투명이다. 반투명으로 뒀더니 뒤의 발판이 비쳐 지표 숫자를 방해했다.
+    // 이 화면은 제출 영상에 들어가는 증거다 — 읽기 쉬운 게 최우선이다.
+    ctx.fillStyle = C.COL_BG;
     ctx.fillRect(x - C.UNIT, y - C.UNIT, C.UNIT * 30, panelH);
     ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(0.20)];
     ctx.lineWidth = C.STROKE;
