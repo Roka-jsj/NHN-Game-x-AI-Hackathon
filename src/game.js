@@ -351,7 +351,7 @@ export class Game {
   enterStair() {
     this.setState(S.STAIR);
     this.stairStep = 0;
-    this.stairSide = 0;
+    this.stairSide = this.stairSideFor(0);
     this.stairStall = 0;
     this.stairHit = 0;
     this.stairTry = 0;
@@ -373,7 +373,7 @@ export class Game {
     }
     this.stairHit++;
     this.stairStep++;
-    this.stairSide = 1 - this.stairSide;
+    this.stairSide = this.stairSideFor(this.stairStep);
     this.laneFrom = this.lane;
     this.lane = side === 0 ? 0 : 2;
     this.laneShiftTotal = 5;    // 짧게. 계단은 리듬이라 즉각적이어야 한다
@@ -383,6 +383,18 @@ export class Game {
     this.score += (C.STAIR_STEP_SCORE * this.mult()) | 0;
     this.emit(EV.STAIR_STEP, this.stairStep, 0);
     if (this.stairStep >= C.STAIR_STEPS) this.clearStair();
+  }
+
+  // 계단 순서. 좌·우·좌·우로만 두면 두 번째 계단부터는 리듬이 아니라 노동이다.
+  // 같은 쪽이 두 번 연속 나오는 자리를 결정론적으로 섞는다 —
+  // 그래야 **보고 눌러야** 하고, 외워서 누를 수 없다.
+  // 난수가 아니라 해시다. 같은 판이면 같은 순서가 나온다.
+  stairSideFor(step) {
+    const h = (step * 2654435761 + this.runs * 40503) % 1000;
+    // 기본은 교대. 다섯 칸에 한 번꼴로 같은 쪽을 한 번 더 요구한다.
+    const repeat = h % 5 === 0;
+    const base = step % 2;
+    return repeat ? 1 - base : base;
   }
 
   clearStair() {

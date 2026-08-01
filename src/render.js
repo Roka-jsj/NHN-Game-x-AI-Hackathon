@@ -356,7 +356,12 @@ export class Renderer {
       if (z < -C.ROW_SPACING || z > far) continue;
       const sc = this.scaleAt(z);
       const gy = this.groundY(sc);
-      const fade = C.rampIndex(0.35 + 0.65 * sc);
+      // 0.35 에서 시작하면 원경의 장애물이 트랙 바닥에 묻힌다.
+      // 바닥을 0.5 로 올려 멀어도 실루엣이 남게 한다.
+      const fade = C.rampIndex(0.5 + 0.5 * sc);
+      // 가까운 것에는 배경색 테두리를 두른다. **색을 늘리지 않고** 실루엣을 뗀다 —
+      // 팔레트 6색 규율을 지키면서 대비를 버는 유일한 방법이다.
+      const outline = sc > 0.4;
 
       for (let l = 0; l < C.LANE_COUNT; l++) {
         const ob = game.rowOb(i, l);
@@ -365,14 +370,25 @@ export class Renderer {
         const ow = ob === C.OB_LOW ? C.OB_W_LOW
                  : (ob === C.OB_BEAM ? C.OB_W_BEAM : C.OB_W_PILLAR);
         const hw = ow * 0.5 * sc;
+
+        // 바닥 그림자 — 장애물이 공중에 뜬 것처럼 보이지 않게 붙들어 준다
+        ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.55 * sc)];
+        ctx.beginPath();
+        ctx.ellipse(cx, gy, hw * 1.15, 7 * sc, 0, 0, TAU);
+        ctx.fill();
+
         ctx.fillStyle = C.RAMP_STRUCT[fade];
+        if (outline) { ctx.strokeStyle = C.COL_BG; ctx.lineWidth = C.STROKE; }
         if (ob === C.OB_LOW) {
           // 낮고 넓은 덩어리 — 넘으라는 뜻
           ctx.fillRect(cx - hw, gy - C.OB_LOW_H * sc, hw * 2, C.OB_LOW_H * sc);
+          if (outline) ctx.strokeRect(cx - hw, gy - C.OB_LOW_H * sc, hw * 2, C.OB_LOW_H * sc);
         } else if (ob === C.OB_BEAM) {
           // 공중에 떠 있고 아래가 비어 있다 — 숙이라는 뜻
           ctx.fillRect(cx - hw, gy - C.OB_BEAM_HI * sc,
                        hw * 2, (C.OB_BEAM_HI - C.OB_BEAM_LO) * sc);
+          if (outline) ctx.strokeRect(cx - hw, gy - C.OB_BEAM_HI * sc,
+                                      hw * 2, (C.OB_BEAM_HI - C.OB_BEAM_LO) * sc);
           // 기둥 두 개로 떠 있음을 명시한다
           const leg = 7 * sc;
           ctx.fillRect(cx - hw, gy - C.OB_BEAM_LO * sc, leg, C.OB_BEAM_LO * sc);
@@ -380,6 +396,7 @@ export class Renderer {
         } else {
           // 위아래가 다 막힌 기둥 — 돌아가라는 뜻
           ctx.fillRect(cx - hw, gy - C.OB_PILLAR_H * sc, hw * 2, C.OB_PILLAR_H * sc);
+          if (outline) ctx.strokeRect(cx - hw, gy - C.OB_PILLAR_H * sc, hw * 2, C.OB_PILLAR_H * sc);
         }
       }
 
