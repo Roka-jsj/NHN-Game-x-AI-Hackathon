@@ -585,7 +585,10 @@ export class Renderer {
     const t = feel.resultStep / feel.resultSteps;
     const e = t >= 1 ? 1 : easeOutBack(t);
 
-    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.8)];
+    // 0.8 알파로 깔았더니 코앞의 기둥·코인이 글자 위로 비쳐서 점수를 읽기가
+    // 어려웠다. 드래프트 화면과 같은 규칙으로 맞춘다 — **결과는 완전 불투명이다.**
+    // 등장하는 동안만 비치고, 자리를 잡으면 뒤가 보이지 않는다.
+    ctx.fillStyle = t >= 1 ? C.COL_BG : C.RAMP_BG[C.rampIndex(0.55 + 0.45 * t)];
     ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
 
     ctx.setTransform(s * e, 0, 0, s * e, HALF_W * s, HALF_H * s);
