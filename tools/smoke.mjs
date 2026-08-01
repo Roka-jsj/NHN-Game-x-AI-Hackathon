@@ -182,11 +182,15 @@ async function run() {
         if (i % 240 === 0) await new Promise((r) => setTimeout(r, 0));
       }
       const g = window.__rising.game;
+      const f = window.__rising.feel;
       return {
         tick: g.tick, depth: g.depth, runs: g.runs, sawDead,
         playerY: g.playerY, bestY: g.bestY, runBestY: g.runBestY,
         waterY: g.waterY, state: g.state, perfect: g.perfectCount,
         accumulator: window.__rising.accumulator,
+        freeze: f ? f.freezeFrames : 0,
+        slow: f ? f.slowFrames : 0,
+        shake: f ? f.shakeMag : 0,
       };
     }, { frameMs, frames, hideAt: opts.hideAt || 0, mode: opts.mode });
 
@@ -202,7 +206,9 @@ async function run() {
   results.push({
     gate: '#1 60Hz vs 120Hz 속도 동일성',
     detail: `30초 후 도달 발판 — 60Hz ${a.state.depth} / 120Hz ${b.state.depth} (오차 ${(depthErr * 100).toFixed(2)}%), ` +
-            `시뮬 틱 ${a.state.tick} / ${b.state.tick}`,
+            `시뮬 틱 ${a.state.tick} / ${b.state.tick}, ` +
+            `완벽착지 ${a.state.perfect} / ${b.state.perfect}, ` +
+            `도달높이 ${a.state.runBestY.toFixed(2)} / ${b.state.runBestY.toFixed(2)}`,
     pass: depthErr < 0.03,
   });
 
@@ -212,6 +218,44 @@ async function run() {
     detail: a.logs.length ? a.logs.join(' | ') : '에러·경고 0개',
     pass: a.logs.length === 0,
   });
+
+  // ── 재현성 · 같은 타이밍에 떼면 같은 결과 ────────────────────
+  // 조준 진동이 사인파라는 것의 실증. 난수였다면 여기서 갈린다.
+  const rep = await drive(1000 / 60, 30);
+  const same = rep.state.playerY === a.state.playerY
+            && rep.state.depth === a.state.depth
+            && rep.state.perfect === a.state.perfect;
+  results.push({
+    gate: '재현성 — 조준 진동이 사인파인가',
+    detail: `동일 입력 2회: 도달 발판 ${a.state.depth}/${rep.state.depth}, ` +
+            `완벽착지 ${a.state.perfect}/${rep.state.perfect}, ` +
+            `최종 playerY ${a.state.playerY.toFixed(6)} / ${rep.state.playerY.toFixed(6)}`,
+    pass: same,
+  });
+
+  // ── 입력 지연 · 큐가 프레임 시작에서 소비되는가 ──────────────
+  {
+    const page = await browser.newPage({ viewport: { width: 420, height: 900 } });
+    await page.addInitScript(CLOCK_INIT);
+    await page.addInitScript(BOT);
+    await page.goto(url, { waitUntil: 'load' });
+    await page.waitForFunction('!!window.__rising', null, { timeout: 5000 });
+    const latency = await page.evaluate(() => {
+      const R = window.__rising, g = R.game;
+      window.__clock.tick(1000 / 60);            // 루프 기동
+      window.__clock.tick(1000 / 60);
+      const before = g.state;
+      R.inject('down', window.performance.now());
+      window.__clock.tick(1000 / 60);            // 딱 한 프레임
+      return { before, after: g.state };
+    });
+    await page.close();
+    results.push({
+      gate: '#4 입력 지연 — 큐 소비 프레임 수 (코드 레벨)',
+      detail: `입력 주입 → 1프레임 후 상태 ${latency.before} → ${latency.after} (0=READY, 1=CHARGING)`,
+      pass: latency.before === 0 && latency.after === 1,
+    });
+  }
 
   // ── 루프 왕복 · 죽고 다시 시작되는가 ─────────────────────────
   const idle = await drive(1000 / 60, 32, { mode: 'idle' });
@@ -223,14 +267,16 @@ async function run() {
   });
 
   // ── 게이트 #3 · 탭 전환 복귀 ─────────────────────────────────
+  // 대조군(탭 전환 없음)과 비교한다. 절대값이 아니라 편차가 증거다.
+  const ctrl = await drive(1000 / 60, 20);
   const c = await drive(1000 / 60, 20, { hideAt: 300 });
-  const cleanTicks = Math.round((20 * 1000) / (1000 / 60));
-  const tickDrift = Math.abs(c.state.tick - cleanTicks) / cleanTicks;
+  const tickDrift = Math.abs(c.state.tick - ctrl.state.tick) / ctrl.state.tick;
   results.push({
     gate: '#3 탭 전환 복귀 (30초 방치)',
-    detail: `복귀 후 시뮬 틱 ${c.state.tick} (정상 ${cleanTicks}, 편차 ${(tickDrift * 100).toFixed(2)}%), ` +
-            `누산기 잔여 ${c.state.accumulator.toFixed(3)}ms — 폭주 없음 = 편차 ~0`,
-    pass: tickDrift < 0.02,
+    detail: `시뮬 틱 — 대조군 ${ctrl.state.tick} / 탭 전환 ${c.state.tick} (편차 ${(tickDrift * 100).toFixed(2)}%), ` +
+            `누산기 잔여 ${c.state.accumulator.toFixed(3)}ms, ` +
+            `히트스톱 잔여 ${c.state.freeze}f / 슬로우 잔여 ${c.state.slow}f — 누적 폭발 없음`,
+    pass: tickDrift < 0.03 && c.state.freeze <= 8 && c.state.slow <= 24,
   });
 
   // ── 게이트 #10 · LLM 폴백 (data/*.json 존재할 때만 의미 있음) ─

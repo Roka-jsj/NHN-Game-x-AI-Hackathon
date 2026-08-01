@@ -51,6 +51,10 @@ export class Game {
     this.bestY = 0;            // 최고 기록. 메모리에만 둔다 (localStorage 금지)
     this.runs = 0;
 
+    // main이 프레임 시작에서 심어주는 시각 기준점. 판 리셋과 무관하므로 여기서만 잡는다.
+    this.frameWall = 0;
+    this.frameSimBase = 0;
+
     this.reset();
   }
 
@@ -127,6 +131,12 @@ export class Game {
     this.chargePressWall = 0;
     this.overchargeFlagged = false;
 
+    // 입력 버퍼 (패스 2)
+    this.bufferTick = -1;
+    this.bufferWall = 0;
+    this.bufferReleased = false;
+    this.bufferReleaseWall = 0;
+
     // 도약
     this.leapFromX = 0; this.leapFromY = 0;
     this.leapToX = 0;   this.leapToY = 0;
@@ -169,7 +179,34 @@ export class Game {
       this.beginCharge(simTs, wallTs);
       return true;
     }
-    return false;   // 소비되지 않은 입력. 패스 2의 입력 버퍼가 주워간다
+    // 착지 직전 입력을 기억한다. "눌렀는데 안 먹었다"를 제거한다.
+    this.bufferTick = this.tick;
+    this.bufferWall = wallTs;
+    this.bufferReleased = false;
+    return false;
+  }
+
+  // 착지 직후 READY 로 넘어올 때만 불린다.
+  tryBufferedCharge() {
+    if (this.bufferTick < 0) return;
+    if (this.tick - this.bufferTick > C.INPUT_BUFFER_FRAMES) { this.bufferTick = -1; return; }
+
+    // 차지 시작 시각은 "착지한 순간"이다. 버퍼에 머문 시간만큼 차지가 부풀면 안 된다.
+    const startWall = this.nowWall();
+    this.beginCharge(this.simTime, startWall);
+    this.bufferTick = -1;
+
+    // 착지 전에 이미 손을 뗐다면, 플레이어가 실제로 누른 만큼을 그대로 재현한다.
+    // 그러지 않으면 짧은 탭이 무한 차지로 남는다.
+    if (this.bufferReleased) {
+      const held = this.bufferReleaseWall - this.bufferWall;
+      this.fire(this.simTime + held, held, false);
+    }
+  }
+
+  // 시뮬 시각 → 벽시계 시각. 프레임 시작에서 main이 기준점을 심어준다.
+  nowWall() {
+    return this.frameWall + (this.simTime - this.frameSimBase);
   }
 
   beginCharge(simTs, wallTs) {
@@ -186,7 +223,14 @@ export class Game {
   }
 
   release(wallTs) {
-    if (this.state !== S.CHARGING) return;
+    if (this.state !== S.CHARGING) {
+      // 버퍼에 들어간 입력의 릴리스. 착지 시점에 그대로 재현하기 위해 기억한다.
+      if (this.bufferTick >= 0 && !this.bufferReleased) {
+        this.bufferReleased = true;
+        this.bufferReleaseWall = wallTs;
+      }
+      return;
+    }
     const rawMs = wallTs - this.chargePressWall;
     // 조준 진동은 "실제로 뗀 순간"의 위상으로 판정한다. 보이는 것과 판정이 어긋나지 않게.
     this.fire(this.chargePressSim + rawMs, rawMs, false);
@@ -309,6 +353,7 @@ export class Game {
       case S.LANDED:
         // 착지 판정은 진입 시점에 이미 끝났다. 이 상태는 1스텝짜리 비트다.
         this.setState(this.landedResolveTo);
+        if (this.state === S.READY) this.tryBufferedCharge();
         break;
 
       case S.FALLING: {

@@ -7,12 +7,15 @@
 
 import * as C from './config.js';
 import { Game, S } from './game.js';
+import { Feel, easeOutBack, easeOutCubic } from './feel.js';
 
 const stage = document.getElementById('stage');
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d', { alpha: false });
 
 const game = new Game();
+const feel = new Feel();
+game.onEvent = (type, a, b) => feel.onEvent(type, a, b, game);
 
 // ─────────────────────────────────────────────────────────────
 // 입력 큐 — 핸들러는 여기에 기록만 한다. 상태는 프레임 시작에서만 바뀐다.
@@ -113,6 +116,7 @@ document.addEventListener('visibilitychange', () => {
     paused = true;
     clearQueue();
     game.cancelCharge();      // 복귀 시 30분짜리 차지가 되지 않게
+    feel.clearTransient();    // 히트스톱·셰이크가 누적되어 터지지 않게
   } else {
     paused = false;
     needsTimeReset = true;    // 누산기 리셋은 다음 프레임에서
@@ -138,16 +142,32 @@ function frame(nowWall) {
   if (delta > C.MAX_FRAME_DELTA) delta = C.MAX_FRAME_DELTA;   // 죽음의 나선 차단
   accumulator += delta;
 
+  // 이 프레임 시작 시각(nowWall)에 대응하는 시뮬레이션 시각.
+  // game.simTime 은 "마지막으로 시뮬레이션된 순간"이고, 누산기에는 아직 시뮬레이션되지
+  // 않은 시간이 담겨 있다. 그래서 둘을 더해야 지금 이 순간의 시뮬 시각이 된다.
+  //
+  // 이 한 줄이 빠지면 기준점이 누산기 잔여분(0~16.7ms)만큼 뒤처지고,
+  // 그 잔여분은 주사율마다 다르다. 조준 진동 위상이 그만큼 흔들려서
+  // 완벽 착지(±2.4px) 판정이 60Hz와 120Hz에서 갈린다. 실측으로 잡았다.
   frameWall = nowWall;
-  frameSimBase = game.simTime;
+  frameSimBase = game.simTime + accumulator;
+  game.frameWall = nowWall;
+  game.frameSimBase = frameSimBase;
 
   drainInput();
   game.checkOvercharge(nowWall);
 
   let steps = 0;
   while (accumulator >= C.SIM_DT) {
-    game.step();
     accumulator -= C.SIM_DT;
+    // 히트스톱은 누산기를 건드리지 않는다. 이 스텝의 시뮬레이션만 건너뛴다.
+    // 렌더는 계속 돈다 — 화면이 굳으면 버그처럼 보인다.
+    if (feel.consumeFreeze()) {
+      feel.stepFrozen();
+    } else {
+      game.step();
+      feel.step(game);
+    }
     if (++steps >= C.MAX_STEPS_PER_FRAME) { accumulator = 0; break; }
   }
 
@@ -155,19 +175,42 @@ function frame(nowWall) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 렌더 — 패스 1은 최소한만 그린다. 색·레이아웃 다듬기는 패스 5의 영역.
+// 렌더 — 패스 5에서 다듬는다. 지금은 게임필이 보이는 데까지만.
 // ─────────────────────────────────────────────────────────────
 const ANCHOR_Y = C.CAM_ANCHOR * C.VIEW_H;
+const HALF_W = C.VIEW_W * 0.5;
+const HALF_H = C.VIEW_H * 0.5;
+
+// 물 근접 경고 그라디언트. 화면 좌표 고정이라 한 번만 만든다 (루프 안 할당 금지).
+let waterGrad = null;
+function ensureGradients() {
+  if (waterGrad) return;
+  waterGrad = ctx.createLinearGradient(0, C.VIEW_H - 260, 0, C.VIEW_H);
+  waterGrad.addColorStop(0, C.RAMP_DANGER[0]);
+  waterGrad.addColorStop(1, C.RAMP_DANGER[C.rampIndex(0.45)]);
+}
 
 function render(alpha) {
+  ensureGradients();
+
   const camY = game.prevCamY + (game.camY - game.prevCamY) * alpha;
   const px = game.prevPlayerX + (game.playerX - game.prevPlayerX) * alpha;
   const py = game.prevPlayerY + (game.playerY - game.prevPlayerY) * alpha;
   const wy = game.prevWaterY + (game.waterY - game.prevWaterY) * alpha;
 
+  // 카메라 리드 — 상승 방향으로 살짝 앞을 본다. 렌더 전용이다.
+  const vy = game.playerY - game.prevPlayerY;
+  const lead = vy * C.CAM_LEAD;
+  const camEff = camY + lead;
+
   ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
   ctx.fillStyle = C.COL_BG;
   ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
+
+  // 스크린 셰이크 — 이동 + 미세 회전
+  ctx.translate(HALF_W + feel.shakeX, HALF_H + feel.shakeY);
+  if (feel.shakeA !== 0) ctx.rotate(feel.shakeA);
+  ctx.translate(-HALF_W, -HALF_H);
 
   // 벽
   ctx.fillStyle = C.COL_GRID;
@@ -177,7 +220,7 @@ function render(alpha) {
   // 발판
   ctx.fillStyle = C.COL_STRUCT;
   for (let i = 0; i <= game.platMade; i++) {
-    const sy = ANCHOR_Y + camY - game.platYAt(i);
+    const sy = ANCHOR_Y + camEff - game.platYAt(i);
     if (sy < -40 || sy > C.VIEW_H + 40) continue;
     const th = C.PLATFORM_THICKNESS * game.platThickAt(i);
     const x = game.platSideAt(i) === 0
@@ -187,31 +230,57 @@ function render(alpha) {
   }
 
   // 물
-  const waterSy = ANCHOR_Y + camY - wy;
+  const waterSy = ANCHOR_Y + camEff - wy;
   if (waterSy < C.VIEW_H) {
     ctx.fillStyle = C.COL_DANGER;
-    ctx.fillRect(0, waterSy, C.VIEW_W, C.VIEW_H - waterSy + 4);
+    ctx.fillRect(0, waterSy, C.VIEW_W, C.VIEW_H - waterSy + 8);
+  }
+
+  // 물 근접 경고 — 시각보다 청각이 먼저 오지만, 눈으로도 보인다
+  const margin = game.waterMargin();
+  if (margin < C.WATER_NEAR_PX) {
+    const near = margin <= 0 ? 1 : 1 - margin / C.WATER_NEAR_PX;
+    ctx.globalAlpha = near * near;
+    ctx.fillStyle = waterGrad;
+    ctx.fillRect(0, C.VIEW_H - 260, C.VIEW_W, 260);
+    ctx.globalAlpha = 1;
+  }
+
+  const playerSy = ANCHOR_Y + camEff - py;
+
+  // 트레일 — 도약 잔상
+  for (let i = 0; i < C.TRAIL_MAX; i++) {
+    const age = feel.tAge[i];
+    if (age < 0) continue;
+    const a = (1 - age / C.TRAIL_FRAMES) * 0.30;
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(a)];
+    ctx.beginPath();
+    ctx.arc(feel.tX[i], ANCHOR_Y + camEff - feel.tY[i], C.PLAYER_RADIUS * 0.7, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   // 조준선 — 선형이다. 이징 금지.
-  const playerSy = ANCHOR_Y + camY - py;
   if (game.state === S.CHARGING) {
     const nowSim = game.simTime + alpha * C.SIM_DT;
     const dist = game.aimPreview(nowSim);
     const wob = game.wobbleOffset(dist, nowSim);
-    ctx.strokeStyle = C.COL_PLAYER;
+    // 오버차지 경고: 6프레임 주기 점멸
+    const blink = feel.overcharge && (((game.tick / 6) | 0) & 1) === 0;
+    ctx.strokeStyle = blink ? C.COL_DANGER : C.COL_PLAYER;
     ctx.lineWidth = C.STROKE;
     ctx.beginPath();
     ctx.moveTo(px, playerSy);
     ctx.lineTo(px, playerSy - dist);
     ctx.stroke();
+    // 제도 눈금 — 90px마다
+    ctx.beginPath();
     for (let d = C.LEAP_DIST_MIN; d <= dist; d += 90) {
       const ty = playerSy - d;
-      ctx.beginPath();
       ctx.moveTo(px - 6, ty);
       ctx.lineTo(px + 6, ty);
-      ctx.stroke();
     }
+    ctx.stroke();
+    // 십자 조준점 — 사인파로 진동한다
     const cy = playerSy - dist - wob;
     ctx.beginPath();
     ctx.moveTo(px - 10, cy); ctx.lineTo(px + 10, cy);
@@ -219,26 +288,74 @@ function render(alpha) {
     ctx.stroke();
   }
 
-  // 플레이어
+  // 링 — 완벽 착지 확산
+  ctx.lineWidth = C.STROKE;
+  for (let i = 0; i < C.RING_MAX; i++) {
+    const st = feel.ringStep[i];
+    if (st < 0) continue;
+    const t = st / feel.ringSteps;
+    const e = easeOutCubic(t);
+    const r = C.RING_R0 + (C.RING_R1 - C.RING_R0) * e;
+    ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(1 - t)];
+    ctx.beginPath();
+    ctx.arc(feel.ringX[i], ANCHOR_Y + camEff - feel.ringY[i], r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // 파티클
+  for (let i = 0; i < C.PARTICLE_MAX; i++) {
+    const life = feel.pLife[i];
+    if (life <= 0) continue;
+    const a = life / feel.pMax[i];
+    const kind = feel.pKind[i];
+    const ramp = kind === 2 ? C.RAMP_DANGER : (kind === 1 ? C.RAMP_PLAYER : C.RAMP_STRUCT);
+    ctx.fillStyle = ramp[C.rampIndex(a)];
+    const s = feel.pSize[i];
+    ctx.fillRect(feel.pX[i] - s, ANCHOR_Y + camEff - feel.pY[i] - s, s * 2, s * 2);
+  }
+
+  // 플레이어 — 스쿼시 & 스트레치
+  ctx.save();
+  ctx.translate(px, playerSy);
+  ctx.scale(feel.sx, feel.sy);
   ctx.fillStyle = C.COL_PLAYER;
   ctx.beginPath();
-  ctx.arc(px, playerSy, C.PLAYER_RADIUS, 0, Math.PI * 2);
+  ctx.arc(0, 0, C.PLAYER_RADIUS, 0, Math.PI * 2);
   ctx.fill();
+  ctx.restore();
+
+  // 셰이크 변환 해제
+  ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
+
+  // 신기록 섬광
+  if (feel.flashFrames > 0) {
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(feel.flashFrames / 3 * 0.35)];
+    ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
+  }
 
   // 점수
   ctx.fillStyle = C.COL_PLAYER;
   ctx.font = '28px ' + C.FONT_STACK;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillText(Math.floor(game.heightMeters()) + 'm', C.VIEW_W * 0.5, C.UNIT * 4);
+  ctx.fillText(Math.floor(game.heightMeters()) + 'm', HALF_W, C.UNIT * 4);
 
-  if (game.state === S.DEAD) {
+  // 결과 UI — easeOutBack 260ms
+  if (game.state === S.DEAD && feel.resultStep >= 0) {
+    const t = feel.resultStep / feel.resultSteps;
+    const e = t >= 1 ? 1 : easeOutBack(t);
+    ctx.save();
+    ctx.translate(HALF_W, HALF_H);
+    ctx.scale(e, e);
+    ctx.fillStyle = C.COL_PLAYER;
+    ctx.font = '44px ' + C.FONT_STACK;
+    ctx.fillText(Math.floor(game.heightMeters()) + 'm', 0, -C.UNIT * 9);
     ctx.font = '20px ' + C.FONT_STACK;
-    ctx.fillText('탭하면 다시', C.VIEW_W * 0.5, C.VIEW_H * 0.5);
+    ctx.fillText('완벽 착지 ' + game.perfectCount, 0, C.UNIT * 2);
+    ctx.fillText('탭하면 다시', 0, C.UNIT * 7);
+    ctx.restore();
   }
 }
-
-game.onEvent = null;   // 패스 2에서 게임필이, 패스 6에서 오디오가 붙는다
 
 requestAnimationFrame(frame);
 
@@ -247,7 +364,7 @@ requestAnimationFrame(frame);
 // 합성 클록 위에서 60Hz/120Hz 동일성을 재려면 이벤트 timeStamp를 우리가 정해야 하고,
 // 브라우저가 만든 PointerEvent의 timeStamp는 가짜 클록과 다른 시간축을 쓴다. 그래서 필요하다.
 window.__rising = {
-  game, C,
+  game, feel, C,
   inject(type, wallTs) { enqueue(type === 'down' ? IN_DOWN : IN_UP, wallTs); },
   get accumulator() { return accumulator; },
 };
