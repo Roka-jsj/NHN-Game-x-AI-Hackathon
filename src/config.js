@@ -13,10 +13,15 @@ export const MAX_FRAME_DELTA = 250;           // 탭 복귀 시 누산기 폭주
 export const MAX_STEPS_PER_FRAME = 8;         // 위 클램프의 이중 안전판
 
 // ─── 기하 ────────────────────────────────────────────────────
+export const UNIT_PX = 8;                     // 여백 단위. 8의 배수만 쓴다
 export const PLAYER_RADIUS = 14;
 export const PLATFORM_THICKNESS = 12;         // 세로 두께. 착지 판정에 쓰이는 치수다
 export const PLATFORM_REACH = 76;             // 벽에서 튀어나온 길이. 렌더 전용, 판정 무관
 export const WALL_INSET = 64;                 // 화면 가장자리 → 벽면
+// 발판이 시작되는 x. 벽면이 아니라 **플레이어 지름 + 여백 8px** 만큼 떨어져서 시작한다.
+// 실루엣 테스트에서 플레이어 원과 발판 막대가 한 덩어리로 뭉쳐 읽히지 않았다.
+// 색으로 때우지 않고 형태를 고쳤다 — 플레이어는 벽을 잡고, 선반은 그 옆에서 뻗어 나온다.
+export const PLATFORM_X0 = WALL_INSET + PLAYER_RADIUS * 2 + UNIT_PX;
 
 // 착지 허용폭 = 발판 반두께 + 플레이어 반지름.
 // aimError는 이 값으로 정규화한다. 디렉터 임계값 0.4/0.6이 의미를 갖는 유일한 기준이다.
@@ -256,7 +261,7 @@ export const RAMP_BG = makeRamp(COL_BG);
 // ─── 통일 규칙 ───────────────────────────────────────────────
 export const RADIUS = 4;                      // 모서리 반경은 이거 하나 (플레이어는 원)
 export const STROKE = 2;                      // 선 굵기는 이거 하나
-export const UNIT = 8;                        // 여백은 8의 배수만
+export const UNIT = UNIT_PX;                  // 여백은 8의 배수만
 export const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 
 // ─── 디바이스 ────────────────────────────────────────────────

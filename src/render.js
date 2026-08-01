@@ -82,9 +82,21 @@ export class Renderer {
     this.wallPath.rect(0, 0, C.WALL_INSET, C.VIEW_H);
     this.wallPath.rect(C.VIEW_W - C.WALL_INSET, 0, C.WALL_INSET, C.VIEW_H);
 
-    // 제도 격자 — 패스 5에서 내용이 채워진다. 스크롤용으로 타일 2장 높이만큼 만든다.
+    // 제도 격자 — 거의 안 보인다. 깊이감만 담당한다.
+    // 타일 하나(TILE_H)만큼 밀어 그리므로, 화면 높이 + 타일 하나를 덮도록 만든다.
+    // 여백 단위 8의 배수만 쓴다 — 격자 간격도 예외가 아니다.
     this.gridPath = new Path2D();
-    this.hasGrid = false;
+    const G = C.UNIT * 6;                       // 48px
+    const span = C.VIEW_H + TILE_H;
+    for (let gy = 0; gy <= span; gy += G) {
+      this.gridPath.moveTo(C.WALL_INSET, gy);
+      this.gridPath.lineTo(C.VIEW_W - C.WALL_INSET, gy);
+    }
+    for (let gx = C.WALL_INSET + G; gx < C.VIEW_W - C.WALL_INSET; gx += G) {
+      this.gridPath.moveTo(gx, 0);
+      this.gridPath.lineTo(gx, span);
+    }
+    this.hasGrid = true;
 
     // 십자 조준점은 모양이 늘 같다. 한 번 만들어 두고 위치만 옮긴다.
     this.crosshair = new Path2D();
@@ -154,8 +166,10 @@ export class Renderer {
       let off = originY % TILE_H;
       if (off > 0) off -= TILE_H;
       ctx.translate(0, off);
+      // 선 굵기는 프로젝트 전체에서 2px 하나뿐이다. 격자도 예외가 아니다.
+      // 격자색(#1B3341)이 배경(#12242E)과 거의 같아서 2px 이어도 조용하다.
       ctx.strokeStyle = C.COL_GRID;
-      ctx.lineWidth = 1;
+      ctx.lineWidth = C.STROKE;
       ctx.stroke(this.gridPath);
       ctx.translate(0, -off);
     }
@@ -178,8 +192,8 @@ export class Renderer {
       const cy = originY - game.platBaseY(i);
       if (cy < -60 || cy > C.VIEW_H + 60) continue;
       const cx = game.platSideAt(i) === 0
-        ? C.WALL_INSET + C.PLATFORM_REACH * 0.5
-        : C.VIEW_W - C.WALL_INSET - C.PLATFORM_REACH * 0.5;
+        ? C.PLATFORM_X0 + C.PLATFORM_REACH * 0.5
+        : C.VIEW_W - C.PLATFORM_X0 - C.PLATFORM_REACH * 0.5;
       ctx.moveTo(cx, cy - C.MOVE_AMP);
       ctx.lineTo(cx, cy + C.MOVE_AMP);
     }
@@ -194,7 +208,7 @@ export class Renderer {
       if (sy < -40 || sy > C.VIEW_H + 40) continue;
       const th = C.PLATFORM_THICKNESS * game.platThickAt(i);
       const x = game.platSideAt(i) === 0
-        ? C.WALL_INSET : C.VIEW_W - C.WALL_INSET - C.PLATFORM_REACH;
+        ? C.PLATFORM_X0 : C.VIEW_W - C.PLATFORM_X0 - C.PLATFORM_REACH;
       ctx.fillRect(x, sy - th * 0.5, C.PLATFORM_REACH, th);
     }
 
@@ -208,7 +222,7 @@ export class Renderer {
       const live = left > 0 ? left / C.CRUMBLE_FRAMES : 1;
       const th = C.PLATFORM_THICKNESS * game.platThickAt(i) * (0.4 + 0.6 * live);
       const x = game.platSideAt(i) === 0
-        ? C.WALL_INSET : C.VIEW_W - C.WALL_INSET - C.PLATFORM_REACH;
+        ? C.PLATFORM_X0 : C.VIEW_W - C.PLATFORM_X0 - C.PLATFORM_REACH;
       // 무너지기 시작하면 위험색으로 넘어간다
       ctx.fillStyle = left > 0 ? C.RAMP_DANGER[C.rampIndex(0.45 + 0.55 * (1 - live))]
                                : C.RAMP_STRUCT[C.rampIndex(0.55)];
@@ -227,7 +241,7 @@ export class Renderer {
       if (sy < -40 || sy > C.VIEW_H + 40) continue;
       const th = C.PLATFORM_THICKNESS * game.platThickAt(i);
       const x = game.platSideAt(i) === 0
-        ? C.WALL_INSET : C.VIEW_W - C.WALL_INSET - C.PLATFORM_REACH;
+        ? C.PLATFORM_X0 : C.VIEW_W - C.PLATFORM_X0 - C.PLATFORM_REACH;
       ctx.fillRect(x, sy - th * 0.5, C.PLATFORM_REACH, th);
     }
 
@@ -314,7 +328,7 @@ export class Renderer {
         const gy = originY - game.platYAtTime(pi, game.previewArrive);
         const gth = C.PLATFORM_THICKNESS * game.platThickAt(pi);
         const gx = game.platSideAt(pi) === 0
-          ? C.WALL_INSET : C.VIEW_W - C.WALL_INSET - C.PLATFORM_REACH;
+          ? C.PLATFORM_X0 : C.VIEW_W - C.PLATFORM_X0 - C.PLATFORM_REACH;
         ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(0.55)];
         ctx.strokeRect(gx, gy - gth * 0.5, C.PLATFORM_REACH, gth);
         ctx.strokeStyle = blink ? C.COL_DANGER : C.COL_PLAYER;
