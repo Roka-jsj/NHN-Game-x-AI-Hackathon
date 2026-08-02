@@ -89,6 +89,11 @@ stage.addEventListener('pointerdown', (e) => {
     return;
   }
 
+  // 증원은 우하단 원형 버튼. 줄에 넣으면 11개가 되어 버튼이 더 좁아진다.
+  if (Renderer.hitRally && Renderer.hitRally(ptrLX, ptrLY)) {
+    enqueue(ACT.RALLY, e.timeStamp);
+    return;
+  }
   const b = Renderer.hitButton(ptrLX, ptrLY);
   if (b >= 0) enqueue(b, e.timeStamp);
 }, { passive: false });
@@ -101,12 +106,20 @@ window.addEventListener('pointercancel', () => {});
 window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   let act = -1;
+  // 유닛 여섯은 1~6, 진화 7, 포탑 8, 해일 9, 화살비 0, 증원 R.
+  // 손가락 하나로 끝나야 한다 — 플래시게임의 조작은 반사가 아니라 누르기다.
   switch (e.key) {
-    case '1': case 'q': case 'Q': act = ACT.SWORD; break;
-    case '2': case 'w': case 'W': act = ACT.ARCHER; break;
-    case '3': case 'e': case 'E': act = ACT.GIANT; break;
-    case '4': case 'r': case 'R': act = ACT.ERA; break;
-    case '5': case ' ': act = ACT.NUKE; break;
+    case '1': act = ACT.SWORD; break;
+    case '2': act = ACT.SPEAR; break;
+    case '3': act = ACT.ARCHER; break;
+    case '4': act = ACT.CAV; break;
+    case '5': act = ACT.GIANT; break;
+    case '6': act = ACT.CATA; break;
+    case '7': act = ACT.ERA; break;
+    case '8': act = ACT.TOWER; break;
+    case '9': case ' ': act = ACT.TIDE; break;
+    case '0': act = ACT.VOLLEY; break;
+    case 'r': case 'R': act = ACT.RALLY; break;
     default: return;
   }
   e.preventDefault();

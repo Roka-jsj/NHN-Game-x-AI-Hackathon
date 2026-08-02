@@ -54,31 +54,50 @@ export const BASE_DMG_MUL = 9;
 //   0 검사   싸고 빠르다. 물량
 //   1 궁수   멀리서 때린다. 근접에 약하다
 //   2 거인   느리고 비싸다. 앞을 막는다
-export const U_SWORD = 0, U_ARCHER = 1, U_GIANT = 2;
-export const UNIT_KINDS = 3;
-export const UNIT_MAX = 96;                   // 양쪽 합계. 풀 크기
+// 여섯 종류가 삼각형으로 맞물린다. 하나로 전부를 이길 수 없다.
+//   창병 > 기병      기병 > 궁수·투석기      궁수 > 검사·거인      검사 > 창병
+export const U_SWORD = 0, U_SPEAR = 1, U_ARCHER = 2, U_CAV = 3, U_GIANT = 4, U_CATA = 5;
+export const UNIT_KINDS = 6;
+export const UNIT_NAME = ['검사', '창병', '궁수', '기병', '거인', '투석기'];
+export const UNIT_MAX = 128;                  // 양쪽 합계. 풀 크기
 
 // 시대별 배수. 시대가 오르면 **같은 버튼이 다른 유닛을 뽑는다.**
-export const ERA_COUNT = 4;
-export const ERA_NAME = ['돌', '청동', '강철', '기계'];
-export const ERA_HP_MUL = [1, 1.7, 2.9, 4.8];
-export const ERA_DMG_MUL = [1, 1.75, 3.0, 5.0];
-export const ERA_COST_MUL = [1, 1.6, 2.5, 3.9];
+export const ERA_COUNT = 5;
+export const ERA_NAME = ['돌', '청동', '강철', '화약', '기계'];
+export const ERA_HP_MUL = [1, 1.6, 2.6, 4.1, 6.4];
+export const ERA_DMG_MUL = [1, 1.65, 2.7, 4.3, 6.8];
+export const ERA_COST_MUL = [1, 1.5, 2.2, 3.2, 4.6];
 
-// 기본 스탯 (돌 시대 기준)
-export const U_HP = [58, 40, 165];
-export const U_DMG = [11, 9, 22];
-export const U_RANGE = [22, 128, 26];         // 사거리
-export const U_SPEED = [46, 34, 24];          // 초당 전진
-export const U_COOLDOWN = [640, 880, 1150];   // ms
-export const U_COST = [28, 44, 92];
-export const U_XP = [10, 14, 26];             // 처치 시 얻는 경험치
-export const U_BOUNTY = [16, 22, 44];         // 처치 시 얻는 금
-// 실루엣이 작으면 종류가 안 읽힌다. 첫 스크린샷에서 검사·궁수·거인이
-// 전부 같은 막대로 보였다 — 색이 아니라 크기와 형태로 구분돼야 한다.
-export const U_W = [23, 19, 36];              // 그리는 폭
-export const U_H = [46, 39, 70];
-export const U_SPAWN_CD = [420, 620, 1050];   // 소환 쿨다운 ms
+//                     검사  창병  궁수  기병  거인  투석기
+export const U_HP =       [58,  66,  40,  54, 165, 46];
+export const U_DMG =      [11,  10,   9,  14,  22, 34];
+export const U_RANGE =    [22,  38, 128,  24,  26, 300];   // 투석기는 초장거리
+export const U_SPEED =    [46,  38,  34,  74,  24, 15];    // 기병이 가장 빠르다
+export const U_COOLDOWN = [640, 760, 880, 700, 1150, 2400];
+export const U_COST =     [28,  40,  44,  62,  92, 120];
+export const U_XP =       [10,  13,  14,  18,  26, 30];
+export const U_BOUNTY =   [16,  20,  22,  30,  44, 52];
+export const U_W =        [23,  22,  19,  30,  36, 34];
+export const U_H =        [46,  48,  39,  44,  70, 40];
+export const U_SPAWN_CD = [420, 520, 620, 700, 1050, 1500];
+
+// 투석기는 기지를 부수라고 있는 유닛이다. 유닛 상대로는 느려서 잘 못 맞힌다.
+export const U_BASE_MUL = [1, 1, 1, 1, 1, 2.6];
+
+// ── 상성표 — COUNTER[공격자 * UNIT_KINDS + 방어자] ──
+// 삼각형이 돌아야 한다. 표를 손으로 쓰면 반드시 어긋나므로 규칙에서 생성한다.
+export const COUNTER_STRONG = 1.75;
+export const COUNTER = (() => {
+  const t = new Float32Array(UNIT_KINDS * UNIT_KINDS).fill(1);
+  const beats = [
+    [U_SPEAR, U_CAV],
+    [U_CAV, U_ARCHER], [U_CAV, U_CATA],
+    [U_ARCHER, U_SWORD], [U_ARCHER, U_GIANT],
+    [U_SWORD, U_SPEAR],
+  ];
+  for (const [a, d] of beats) t[a * UNIT_KINDS + d] = COUNTER_STRONG;
+  return t;
+})();
 
 // 유닛끼리 겹치지 않게 하는 최소 간격. 이게 없으면 전부 한 점에 뭉친다.
 export const UNIT_GAP = 21;
@@ -94,7 +113,7 @@ export const GOLD_START = 120;
 export const GOLD_RATE = 16;                  // 초당 자동 수입
 export const GOLD_CAP = 1600;
 // 시대를 올리는 데 필요한 경험치. 마지막 값 뒤로는 더 오를 곳이 없다.
-export const ERA_XP = [0, 260, 720, 1500];
+export const ERA_XP = [0, 240, 640, 1300, 2400];
 export const ERA_UP_GOLD = 60;                // 진화 시 보너스 금
 
 // ─── 물 ──────────────────────────────────────────────────────
@@ -119,27 +138,46 @@ export const WATER_DPS = 10;
 export const WATER_BASE_AT = GROUND_Y - BASE_H * 0.5;
 export const WATER_WARN = 70;                 // 수면이 지면에서 이만큼 안이면 경고
 
-// ─── 특수기 ───────────────────────────────────────────────────
+// ─── 기지 포탑 ────────────────────────────────────────────────
+// 사면 기지가 스스로 싸운다. 수비형 플레이에 실체를 준다 —
+// 지금까지 "웅크리기"는 그냥 지는 선택지였다.
+export const TOWER_MAX = 2;
+export const TOWER_COST = [180, 420];
+export const TOWER_DMG = [16, 34];
+export const TOWER_RANGE = 330;
+export const TOWER_CD = 1400;                 // ms
+
+// ─── 스킬 셋 ──────────────────────────────────────────────────
 // 플래시게임의 "필살기" 자리. 쿨다운이 길고 화면이 크게 바뀐다.
-export const NUKE_CD = 42000;                 // ms
-export const NUKE_DMG = 260;
+export const SK_TIDE = 0, SK_VOLLEY = 1, SK_RALLY = 2;
+export const SKILL_COUNT = 3;
+export const SKILL_NAME = ['해일', '화살비', '증원'];
+export const SKILL_CD = [42000, 26000, 34000];
+export const SKILL_DMG = [260, 150, 0];
+export const VOLLEY_RADIUS = 190;             // 전선 중심 반경
+export const RALLY_COUNT = 3;
 export const NUKE_WATER_PUSH = 70;
 
 // ─── 버튼 ────────────────────────────────────────────────────
 // 화면 아래 한 줄. 유닛 3 + 진화 1 + 특수기 1.
-export const BTN_COUNT = 5;
-export const BTN_W = 148;
-export const BTN_H = 74;
-export const BTN_GAP = 12;
-export const BTN_Y = VIEW_H - BTN_H - UNIT * 2;
-export const BTN_X0 = (VIEW_W - (BTN_W * BTN_COUNT + BTN_GAP * (BTN_COUNT - 1))) * 0.5;
-export const B_SWORD = 0, B_ARCHER = 1, B_GIANT = 2, B_ERA = 3, B_NUKE = 4;
+// 유닛 6 + 진화 + 포탑 + 해일 + 화살비 = 10. 증원은 별도 원형 버튼(키 R).
+export const BTN_COUNT = 10;
+export const BTN_W = 88;
+export const BTN_H = 66;
+export const BTN_GAP = 6;
+export const BTN_Y = VIEW_H - BTN_H - UNIT * 1.5;
+export const BTN_X0 = (VIEW_W - (BTN_W * BTN_COUNT + BTN_GAP * (BTN_COUNT - 1))) * 0.5 - 26;
+export const B_ERA = 6, B_TOWER = 7, B_TIDE = 8, B_VOLLEY = 9;
+export const RALLY_R = 26;                    // 우하단 원형 버튼 반지름
+export const RALLY_CX = VIEW_W - 44;
+export const RALLY_CY = BTN_Y + BTN_H * 0.5;
+export const KEY_HINT = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 
 // ─── 적 AI (디렉터가 조종한다) ────────────────────────────────
 export const AI_GOLD_RATE = 9.2;             // 적의 기본 수입. 레버가 곱한다
 export const AI_GOLD_START = 110;
 export const AI_THINK_MS = 620;               // 적이 판단하는 주기
-export const AI_ERA_XP = [0, 300, 800, 1650];
+export const AI_ERA_XP = [0, 280, 720, 1450, 2700];
 
 // ─── 승패 ────────────────────────────────────────────────────
 export const RESULT_UI_MS = 420;
@@ -265,4 +303,3 @@ export const TRAITS = [
 ];
 
 // ─── 접근성 · 입력 ────────────────────────────────────────────
-export const KEY_HINT = ['1', '2', '3', '4', '5'];

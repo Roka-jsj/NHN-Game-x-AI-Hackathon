@@ -219,6 +219,45 @@ export class Feel {
         }
         break;
 
+      case EV.TOWER_FIRE:
+        // 포탑은 자주 쏜다. 히트스톱을 걸면 화면이 계속 굳는다 — 아주 약하게만.
+        this.addShake(C.SHAKE_HIT * 0.8, 0);
+        break;
+
+      case EV.TOWER_UP:
+        this.freezeFrames = C.HITSTOP_ERA;
+        this.addShake(C.SHAKE_ERA, 0);
+        this.ring(C.BASE_L_X, C.GROUND_Y - C.BASE_H);
+        this.burst(C.BASE_L_X, C.GROUND_Y - C.BASE_H, C.PART_ERA, 1);
+        break;
+
+      case EV.COUNTER_HIT:
+        // 상성 우위 — 일반 타격보다 확실히 세게 느껴져야 한다.
+        // "제대로 먹혔다"가 손에 오는 지점이다.
+        this.freezeFrames = C.HITSTOP_HIT + 1;
+        this.addShake(C.SHAKE_KILL * 0.7, 0);
+        break;
+
+      case EV.SKILL:
+        // 셋이 서로 다르게 느껴져야 한다. 해일이 가장 무겁다.
+        if (a === 0) {
+          this.freezeFrames = C.HITSTOP_NUKE;
+          this.addShake(C.SHAKE_NUKE, 0.01);
+          this.flashFrames = C.FLASH_FRAMES;
+          this.ring(C.VIEW_W * 0.62, C.GROUND_Y - 40);
+          this.burst(C.VIEW_W * 0.62, C.GROUND_Y - 40, C.PART_NUKE, 2);
+          this.banner(C.BAN_NUKE);
+        } else if (a === 1) {
+          this.freezeFrames = C.HITSTOP_BASE;
+          this.addShake(C.SHAKE_BASE * 1.4, 0);
+          const fx = game.frontlineX ? game.frontlineX() : C.VIEW_W * 0.5;
+          this.burst(fx, C.GROUND_Y - 60, C.PART_KILL * 2, 2);
+        } else {
+          this.addShake(C.SHAKE_ERA * 0.6, 0);
+          this.burst(C.SPAWN_L_X, C.GROUND_Y - 20, C.PART_ERA, 0);
+        }
+        break;
+
       case EV.NUKE:
         this.freezeFrames = C.HITSTOP_NUKE;
         this.addShake(C.SHAKE_NUKE, 0.01);
