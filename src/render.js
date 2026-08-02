@@ -81,6 +81,10 @@ const DV_WATER = '수위 배수';
 
 const TOGGLE_SIZE = 40;
 
+// 매 프레임 배열 리터럴을 만들면 그게 곧 GC 스파이크다. 상수는 모듈에 굽는다.
+const DV_MET_NAME = [DV_AGGRO, DV_HOARD, DV_ECON, DV_SWARM];
+const DV_MET_THR = Float32Array.from([C.TH_AGGRO_HIGH, C.TH_HOARD_HIGH, C.TH_ECON_HIGH, C.TH_SWARM_HIGH]);
+
 // 상성 탐지용 공간 버킷. 32px 씩 끊어 진영별로 "이 칸에 어떤 종류가 있나"를
 // 비트마스크로 들고 있는다. 공격 모션 중인 유닛만 앞쪽 칸을 훑으면
 // **상성 우위로 때리는 중인지**를 O(1) 에 가깝게 알 수 있다.
@@ -101,6 +105,10 @@ const BTN_H = C.BTN_H, BTN_Y = C.BTN_Y;
 const BTN_R = 5;                       // 버튼 모서리
 const BTN_ICON_DX = 60;                // 칸 안 아이콘 중심
 const BTN_ICON_DY = 40;
+// 버튼 열 전체가 차지하는 상자 — 통째로 구워 두고 붙이기 위한 것
+const STRIP_X = BTN_X0 - 3, STRIP_Y = C.BTN_Y - 3;
+const STRIP_W = C.BTN_COUNT * (BTN_W + BTN_GAP) - BTN_GAP + 6;
+const STRIP_H = C.BTN_H + 6;
 
 // 상단 HUD
 const HUD_HP_W = 92, HUD_HP_H = 13;
@@ -111,6 +119,11 @@ const HUD_X0 = HALF_W - HUD_TOTAL * 0.5;
 
 // 수위 게이지 — 오른쪽 세로. 물은 위로 차오르므로 세로로 읽혀야 한다
 const WG_X = 932, WG_Y = 158, WG_W = 18, WG_H = 174;
+// 눈금 두 개 — 협곡 바닥, 기지 발밑. 상수다
+const WG_MARKS = Float32Array.from([
+  (C.VIEW_H - (C.GROUND_Y + C.FLOOR_DIP)) / (C.VIEW_H - C.WATER_MIN_Y),
+  (C.VIEW_H - C.WATER_BASE_AT) / (C.VIEW_H - C.WATER_MIN_Y),
+]);
 
 // 드래프트 카드
 const CARD_H = 92, CARD_GAP = C.UNIT * 2;
@@ -119,8 +132,8 @@ const CARD_TOP = HALF_H - (CARD_H * 3 + CARD_GAP * 2) * 0.5 + 8;
 // 배경 층
 const SKY_BANDS = 12;
 const RAIN_N = 64;
-const FALL_X_L = 26, FALL_X_R = C.VIEW_W - 26;
-const FALL_TOP = 118, FALL_W = 21;
+const FALL_X_L = 28;
+const FALL_TOP = 118, FALL_W = 26;
 const RND_N = 256;
 
 // 공성 병기는 **대열을 통과한다** (game.js §U_SIEGE). 남의 몸에 묻히면
@@ -135,6 +148,17 @@ export class Renderer {
     this.ctx = ctx;
     this.viewScale = 1;
     this.digits = new Uint8Array(12);
+    this.metVal = new Float32Array(4);
+    this.btnOk = new Uint8Array(C.BTN_COUNT);
+    this.btnCd = new Float32Array(C.BTN_COUNT);
+    this.btnCost = new Int32Array(C.BTN_COUNT);
+    this.btnMode = new Uint8Array(C.BTN_COUNT);
+    this.bgCanvas = null;
+    this.btnCanvas = null;
+    this.btnSig = -1;
+    this.btnScale = -1;
+    this.bakedScale = -1;
+    this.bakedEra = -1;
 
     // 결정론적 잡음. Math.random 을 쓰면 프레임마다 지형이 바뀐다.
     this.rnd = new Float32Array(RND_N);
@@ -435,7 +459,7 @@ export class Renderer {
     }
   }
 
-  resize(viewScale) { this.viewScale = viewScale; }
+  resize(viewScale) { this.viewScale = viewScale; this.bakedScale = -1; this.btnScale = -1; }
 
   // ── 경로 조각 — 전부 현재 경로에 더하기만 한다. 칠하지 않는다 ──
   // 방향(ux,uy) 으로 len 만큼 뻗고 뒤로 back 만큼 나온 막대.
@@ -582,8 +606,11 @@ export class Renderer {
       ctx.translate(-HALF_W, -HALF_H);
     }
 
-    this.drawSky(game);
-    this.drawTerrain(game);
+    // 배경은 **정적이다.** 하늘·능선·시대 스카이라인·협곡·지층·벽까지
+    // 스무 번 넘는 큰 채우기가 매 프레임 같은 그림을 다시 래스터한다.
+    // 한 번 구워 두고 한 번 붙인다. 시대가 바뀌거나 해상도가 바뀔 때만 다시 굽는다.
+    this.paintBackground(game);
+    this.drawRain(game);
     this.drawBase(game, SIDE_R);
     this.drawBase(game, SIDE_L);
     this.drawUnits(game, alpha);
@@ -651,23 +678,56 @@ export class Renderer {
     }
   }
 
-  // ── 원경 — 하늘 · 능선 세 겹 · 시대 스카이라인 · 비 ─────────
+  // ── 배경 굽기 ───────────────────────────────────────────────
+  // 오프스크린 캔버스 하나에 정적 배경 전체를 굽고 매 프레임 한 번 붙인다.
+  // p50 은 원래도 0.5ms 였다 — 문제는 JS 가 아니라 **래스터 양**이었고,
+  // 큰 채우기 스무 번이 합성 스레드에 밀려 스파이크로 돌아왔다.
+  // document 가 없는 환경(도구 스크립트)에서는 조용히 예전처럼 직접 그린다.
+  paintBackground(game) {
+    const era = game.era | 0;
+    const e = era < 0 ? 0 : (era >= C.ERA_COUNT ? C.ERA_COUNT - 1 : era);
+    if (typeof document === 'undefined') { this.drawSky(e); this.drawTerrain(); return; }
+    const s = this.viewScale > 2 ? 2 : (this.viewScale < 0.25 ? 0.25 : this.viewScale);
+    if (this.bakedScale !== s || this.bakedEra !== e) {
+      const w = Math.ceil(C.VIEW_W * s), h = Math.ceil(C.VIEW_H * s);
+      if (!this.bgCanvas) this.bgCanvas = document.createElement('canvas');
+      if (this.bgCanvas.width !== w || this.bgCanvas.height !== h) {
+        this.bgCanvas.width = w; this.bgCanvas.height = h;
+      }
+      const octx = this.bgCanvas.getContext('2d');
+      const prev = this.ctx;
+      this.ctx = octx;                      // 경로 헬퍼가 this.ctx 를 쓴다
+      octx.setTransform(s, 0, 0, s, 0, 0);
+      octx.clearRect(0, 0, C.VIEW_W, C.VIEW_H);
+      octx.fillStyle = C.COL_BG;
+      octx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
+      this.drawSky(e);
+      this.drawTerrain();
+      this.ctx = prev;
+      this.bakedScale = s; this.bakedEra = e;
+    }
+    // 원본과 대상 픽셀 수가 같다. 보간을 끄면 더 또렷하고 복사 경로도 짧다
+    this.ctx.imageSmoothingEnabled = false;
+    this.ctx.drawImage(this.bgCanvas, 0, 0, C.VIEW_W, C.VIEW_H);
+    this.ctx.imageSmoothingEnabled = true;
+  }
+
+  // ── 원경 — 하늘 · 능선 세 겹 · 시대 스카이라인 ──────────────
   // createLinearGradient 를 안 쓰는 이유는 리사이즈마다 다시 만들어야 하고
   // 알파 램프로 같은 결과를 공짜로 얻을 수 있기 때문이다.
-  drawSky(game) {
+  drawSky(era) {
     const ctx = this.ctx;
     // 위가 어둡고 지평선이 밝다. 다만 **맨 위도 배경색보다는 확실히 밝아야** 한다 —
     // 그래야 순수 배경색으로 칠한 근경(처마)이 검은 덩어리로 읽힌다.
     const bh = C.GROUND_Y / SKY_BANDS;
     for (let i = 0; i < SKY_BANDS; i++) {
       const t = i / (SKY_BANDS - 1);
-      ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.22 + t * t * 0.52)];
+      ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.32 + t * t * 0.46)];
       ctx.fillRect(0, bh * i, C.VIEW_W, bh + 1);
     }
 
     // 안개 낀 해 — 새 색이 아니라 금색의 아주 낮은 알파다.
     // 시대가 오를수록 밝아진다. 세계가 밝아지는 것이 곧 진보다.
-    const era = game.era | 0;
     ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.035 + era * 0.012)];
     ctx.beginPath();
     this.addCircle(HALF_W + 168, 104, 46);
@@ -686,13 +746,13 @@ export class Renderer {
     ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.52)];
     ctx.fill(this.ridgeFar);
     ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.86)];
-    ctx.fill(this.skyline[era < 0 ? 0 : (era >= C.ERA_COUNT ? C.ERA_COUNT - 1 : era)]);
+    ctx.fill(this.skyline[era]);
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.55)];
     ctx.fill(this.ridgeMid);
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.86)];
     ctx.fill(this.ridgeNear);
     // 능선의 등줄기 — 검은 덩어리로 남지 않게 결을 넣는다
-    ctx.strokeStyle = C.RAMP_GRID[C.rampIndex(0.30)];
+    ctx.strokeStyle = C.RAMP_GRID[C.rampIndex(0.55)];
     ctx.lineWidth = 1.5;
     ctx.stroke(this.ridgeLines);
     ctx.lineWidth = C.STROKE;
@@ -701,14 +761,31 @@ export class Renderer {
       ctx.fill(this.skyLamp);
     }
 
+    // 건너편 둑 — 능선 발치와 지면 사이가 통짜 검정으로 남아 있었다.
+    // 가로 결 몇 줄이면 그게 절벽면으로 읽힌다
+    ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.09)];
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < 5; i++) {
+      const yy = C.GROUND_Y - 10 - i * 15;
+      ctx.moveTo(0, yy + this.rn(i * 17) * 6);
+      ctx.lineTo(C.VIEW_W, yy - this.rn(i * 17 + 3) * 6);
+    }
+    ctx.stroke();
+    ctx.lineWidth = C.STROKE;
+
     // 지평선 안개 — 능선 발치를 흐려 원경과 근경을 분리한다
     for (let i = 0; i < 4; i++) {
       ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.20 - i * 0.045)];
       ctx.fillRect(0, C.GROUND_Y - 58 + i * 15, C.VIEW_W, 15);
     }
 
-    // 비 — 물이 어디서 오는가. 수위가 오를수록 굵어진다.
-    // 텅 빈 하늘을 채우면서 제목을 매 프레임 설명한다.
+  }
+
+  // 비 — 물이 어디서 오는가. 수위가 오를수록 굵어진다.
+  // 텅 빈 하늘을 채우면서 제목을 매 프레임 설명한다. 유일하게 살아 있는 원경이다.
+  drawRain(game) {
+    const ctx = this.ctx;
     const rise = (C.VIEW_H - game.water) / (C.VIEW_H - C.WATER_MIN_Y);
     const amt = rise < 0 ? 0 : (rise > 1 ? 1 : rise);
     const t = game.simTime * 0.001;
@@ -729,7 +806,7 @@ export class Renderer {
   }
 
   // ── 근경 — 협곡 바닥 · 지층 · 벽 ────────────────────────────
-  drawTerrain(game) {
+  drawTerrain() {
     const ctx = this.ctx;
 
     ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.95)];
@@ -769,8 +846,9 @@ export class Renderer {
     const wy = game.prevWater + (game.water - game.prevWater) * alpha;
     const t = game.simTime * 0.001;
 
-    for (let s = 0; s < 2; s++) {
-      const x = s === 0 ? FALL_X_L : FALL_X_R;
+    {
+      const s = 0;
+      const x = FALL_X_L;
       const g = groundAt(x);
       const bot = wy < g ? wy : g;
 
@@ -809,9 +887,10 @@ export class Renderer {
     ctx.fillStyle = C.COL_BG;
     ctx.fill(this.overhangL);
     ctx.fill(this.overhangR);
-    ctx.strokeStyle = C.RAMP_GRID[C.rampIndex(0.85)];
-    ctx.lineWidth = C.STROKE;
+    ctx.strokeStyle = C.RAMP_GRID[C.rampIndex(1)];
+    ctx.lineWidth = 2.5;
     ctx.stroke(this.overhangLip);
+    ctx.lineWidth = C.STROKE;
   }
 
   // ── 기지 — 사각형 하나가 아니라 성채로 보여야 한다 ─────────
@@ -840,30 +919,25 @@ export class Renderer {
     this.addTrap(cx, gy - 6, gy + 26, w + 14, w + 40, 0);
     ctx.fill();
 
-    // 본체
-    ctx.fillStyle = main;
-    ctx.fillRect(x, y, w, h);
-
-    // 버팀벽 — 아래가 넓다. 무게가 보인다
-    ctx.beginPath();
-    this.addTrap(x + 11, y + h * 0.42, gy, 14, 22, 0);
-    this.addTrap(x + w - 11, y + h * 0.42, gy, 14, 22, 0);
-    ctx.fill();
-
-    // 총안 — 위쪽 요철. 이 하나로 "성"이 된다.
-    // 체력이 깎이면 뒤쪽부터 무너져 없어진다
+    // 본체 · 버팀벽 · 총안 · 망루 — 전부 같은 색이다. **경로 하나에 모아 한 번에** 칠한다.
+    // 칸마다 fillRect 를 부르면 성 하나에 열 번, 두 성이면 스무 번이 되고
+    // 그 호출 수가 그대로 프레임 스파이크로 돌아온다 (실측으로 확인했다).
     const merlonW = w / 7;
-    const gone = k > 0.66 ? 0 : (k > 0.33 ? 1 : 2);
+    const gone = k > 0.66 ? 0 : (k > 0.33 ? 1 : 2);   // 깎이면 뒤쪽 총안부터 무너진다
+    const tw = 30, tx = mine ? x - 6 : x + w - tw + 6;
+    ctx.fillStyle = main;
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);                                            // 본체
+    this.addTrap(x + 11, y + h * 0.42, gy, 14, 22, 0);               // 버팀벽
+    this.addTrap(x + w - 11, y + h * 0.42, gy, 14, 22, 0);
     for (let i = 0; i < 7; i += 2) {
       const slot = mine ? (3 - (i >> 1)) : (i >> 1);
       if (slot < gone) continue;
-      ctx.fillRect(x + i * merlonW, y - 14, merlonW, 14);
+      ctx.rect(x + i * merlonW, y - 14, merlonW, 14);                // 총안
     }
-
-    // 망루 — 바깥쪽에 하나 더 높게. 실루엣이 대칭이 아니어야 방향이 읽힌다
-    const tw = 30, tx = mine ? x - 6 : x + w - tw + 6;
-    ctx.fillRect(tx, y - 46, tw, 46 + h * 0.55);
-    for (let i = 0; i < 3; i += 2) ctx.fillRect(tx + i * (tw / 3), y - 56, tw / 3, 10);
+    ctx.rect(tx, y - 46, tw, 46 + h * 0.55);                         // 망루
+    for (let i = 0; i < 3; i += 2) ctx.rect(tx + i * (tw / 3), y - 56, tw / 3, 10);
+    ctx.fill();
 
     // 석재 줄눈 — 어두운 색으로 한 번에
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.45)];
@@ -922,15 +996,21 @@ export class Renderer {
     const era = mine ? game.era : game.aiEra;
     const px = mine ? x + w - 14 : x + 14;
     ctx.fillStyle = main;
-    ctx.fillRect(px - 1.5, y - 66, 3, 50);
-    for (let f = 0; f <= era; f++) {
-      ctx.fillStyle = f === 0 ? main : C.COL_BONUS;
-      const fy = y - 62 + f * 9;
+    ctx.beginPath();
+    ctx.rect(px - 1.5, y - 66, 3, 50);
+    ctx.moveTo(px, y - 62); ctx.lineTo(px + dir * 17, y - 58.5); ctx.lineTo(px, y - 55);
+    ctx.closePath();
+    ctx.fill();
+    if (era > 0) {                    // 시대 깃발 — 금색 한 번에
+      ctx.fillStyle = C.COL_BONUS;
       ctx.beginPath();
-      ctx.moveTo(px, fy);
-      ctx.lineTo(px + dir * 17, fy + 3.5);
-      ctx.lineTo(px, fy + 7);
-      ctx.closePath();
+      for (let f = 1; f <= era; f++) {
+        const fy = y - 62 + f * 9;
+        ctx.moveTo(px, fy);
+        ctx.lineTo(px + dir * 17, fy + 3.5);
+        ctx.lineTo(px, fy + 7);
+        ctx.closePath();
+      }
       ctx.fill();
     }
 
@@ -947,7 +1027,9 @@ export class Renderer {
     ctx.fillStyle = k > 0.3 ? (mine ? C.COL_PLAYER : C.COL_STRUCT) : C.COL_DANGER;
     ctx.fillRect(bx, by, bw * k, bh);
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.95)];
-    for (let i = 1; i < 5; i++) ctx.fillRect(bx + bw * i * 0.2 - 0.5, by, 1, bh);
+    ctx.beginPath();
+    for (let i = 1; i < 5; i++) ctx.rect(bx + bw * i * 0.2 - 0.5, by, 1, bh);
+    ctx.fill();
   }
 
   // ── 포탑 — 기지 옥상. 단계(0/1/2)가 형태로 읽혀야 한다 ──────
@@ -1788,16 +1870,31 @@ export class Renderer {
     }
   }
 
+  // 파티클 — 최대 160개다. 하나씩 fillStyle 을 갈고 fillRect 를 부르면
+  // 난전 한 프레임에 320번의 그리기 호출이 된다. 그게 그대로 스파이크다.
+  // 색 3종 × 밝기 4단으로 **12묶음**으로 줄인다. 눈으로는 차이가 없다.
   drawParticles(feel) {
     const ctx = this.ctx;
-    for (let i = 0; i < C.PARTICLE_MAX; i++) {
-      if (feel.pLife[i] <= 0) continue;
-      const a = feel.pLife[i] / feel.pMax[i];
-      const ramp = feel.pKind[i] === 1 ? C.RAMP_BONUS
-        : (feel.pKind[i] === 2 ? C.RAMP_DANGER : C.RAMP_PLAYER);
-      ctx.fillStyle = ramp[C.rampIndex(a)];
-      const s = feel.pSize[i] * a;
-      ctx.fillRect(feel.pX[i] - s * 0.5, feel.pY[i] - s * 0.5, s, s);
+    let live = 0;
+    for (let i = 0; i < C.PARTICLE_MAX; i++) if (feel.pLife[i] > 0) { live = 1; break; }
+    if (!live) return;
+    for (let k = 0; k < 3; k++) {
+      const ramp = k === 1 ? C.RAMP_BONUS : (k === 2 ? C.RAMP_DANGER : C.RAMP_PLAYER);
+      for (let b = 3; b >= 0; b--) {
+        ctx.fillStyle = ramp[C.rampIndex((b + 1) * 0.25)];
+        ctx.beginPath();
+        let any = 0;
+        for (let i = 0; i < C.PARTICLE_MAX; i++) {
+          if (feel.pLife[i] <= 0 || feel.pKind[i] !== k) continue;
+          const a = feel.pLife[i] / feel.pMax[i];
+          let bb = (a * 4) | 0; if (bb > 3) bb = 3; if (bb < 0) bb = 0;
+          if (bb !== b) continue;
+          const sz = feel.pSize[i] * a;
+          ctx.rect(feel.pX[i] - sz * 0.5, feel.pY[i] - sz * 0.5, sz, sz);
+          any = 1;
+        }
+        if (any) ctx.fill();
+      }
     }
   }
 
@@ -1821,12 +1918,22 @@ export class Renderer {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.font = FONT_SMALL;
-    for (let i = 0; i < C.FLOAT_MAX; i++) {
-      if (feel.fStep[i] < 0) continue;
-      const t = feel.fStep[i] / feel.fSteps;
-      const ramp = feel.fKind[i] === 1 ? C.RAMP_BONUS : C.RAMP_DANGER;
-      ctx.fillStyle = ramp[C.rampIndex(1 - t)];
-      this.drawNumber(feel.fVal[i], feel.fX[i], feel.fY[i] - C.FLOAT_RISE * easeOutCubic(t), 9);
+    let live = 0;
+    for (let i = 0; i < C.FLOAT_MAX; i++) if (feel.fStep[i] >= 0) { live = 1; break; }
+    if (!live) return;
+    for (let k = 0; k < 2; k++) {
+      const ramp = k === 1 ? C.RAMP_BONUS : C.RAMP_DANGER;
+      for (let b = 3; b >= 0; b--) {
+        let set = 0;
+        for (let i = 0; i < C.FLOAT_MAX; i++) {
+          if (feel.fStep[i] < 0 || (feel.fKind[i] === 1) !== (k === 1)) continue;
+          const t = feel.fStep[i] / feel.fSteps;
+          let bb = ((1 - t) * 4) | 0; if (bb > 3) bb = 3; if (bb < 0) bb = 0;
+          if (bb !== b) continue;
+          if (!set) { ctx.fillStyle = ramp[C.rampIndex((b + 1) * 0.25)]; set = 1; }
+          this.drawNumber(feel.fVal[i], feel.fX[i], feel.fY[i] - C.FLOAT_RISE * easeOutCubic(t), 9);
+        }
+      }
     }
   }
 
@@ -1942,29 +2049,43 @@ export class Renderer {
         ctx.fillStyle = C.COL_BONUS;
         ctx.fillRect(bx, by, bw, bh);
       }
-      // 다섯 시대 눈금. 지나온 칸은 금색 점
-      for (let i = 1; i < C.ERA_COUNT; i++) {
-        ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.95)];
-        ctx.fillRect(bx + bw * (i / C.ERA_COUNT), by - 1, 2, bh + 2);
+      // 다섯 시대 눈금. 지나온 칸은 금색 점. 같은 색은 경로 하나에 모은다
+      ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.95)];
+      ctx.beginPath();
+      for (let i = 1; i < C.ERA_COUNT; i++) ctx.rect(bx + bw * (i / C.ERA_COUNT), by - 1, 2, bh + 2);
+      ctx.fill();
+      if (game.era > 0) {
+        ctx.fillStyle = C.COL_BONUS;
+        ctx.beginPath();
+        for (let i = 0; i < game.era; i++) ctx.rect(bx - 1 + bw * (i / C.ERA_COUNT), by - 5, 3, 3);
+        ctx.fill();
       }
-      ctx.fillStyle = C.COL_BONUS;
-      for (let i = 0; i < game.era; i++) ctx.fillRect(bx - 1 + bw * (i / C.ERA_COUNT), by - 5, 3, 3);
     }
 
     // 획득 특성 — 금 아래에 알약으로. 내 것은 내 쪽에 모아 둔다
     ctx.font = FONT_MICRO;
     let px = 60;
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.20)];
+    ctx.beginPath();
+    let anyT = 0;
     for (let i = 0; i < C.TRAITS.length; i++) {
       if (!game.traits[i]) continue;
       const tw = C.TRAITS[i].name.length * 11 + 10;
-      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.20)];
-      ctx.beginPath();
       ctx.roundRect(px, 68, tw, 15, 7);
+      px += tw + 5; anyT = 1;
+      if (px > 300) break;
+    }
+    if (anyT) {
       ctx.fill();
       ctx.fillStyle = C.COL_BONUS;
-      ctx.fillText(C.TRAITS[i].name, px + 5, 71);
-      px += tw + 5;
-      if (px > 300) break;
+      px = 60;
+      for (let i = 0; i < C.TRAITS.length; i++) {
+        if (!game.traits[i]) continue;
+        const tw = C.TRAITS[i].name.length * 11 + 10;
+        ctx.fillText(C.TRAITS[i].name, px + 5, 71);
+        px += tw + 5;
+        if (px > 300) break;
+      }
     }
 
     this.drawFrontBar(game);
@@ -2000,16 +2121,17 @@ export class Renderer {
       ctx.fillRect(bx - 1, hy - 1, HUD_HP_W + 2, HUD_HP_H + 2);
       ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.22)];
       ctx.fillRect(bx, hy, HUD_HP_W, HUD_HP_H);
-      ctx.fillStyle = col;
+      // 남은 체력 + 성 표식 — 같은 색이므로 한 경로에 모은다.
       // 안쪽(전장 쪽)에서 바깥으로 줄어든다 — 적이 밀고 들어오는 방향과 같다
-      if (s === 0) ctx.fillRect(bx, hy, HUD_HP_W * k, HUD_HP_H);
-      else ctx.fillRect(bx + HUD_HP_W * (1 - k), hy, HUD_HP_W * k, HUD_HP_H);
-      // 성 표식 — 이게 기지 체력임을 알린다
-      ctx.fillStyle = col;
       const mx = s === 0 ? bx - 12 : bx + HUD_HP_W + 3;
-      ctx.fillRect(mx, hy + 2, 9, HUD_HP_H - 2);
-      ctx.fillRect(mx, hy - 2, 3, 4);
-      ctx.fillRect(mx + 6, hy - 2, 3, 4);
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      if (s === 0) ctx.rect(bx, hy, HUD_HP_W * k, HUD_HP_H);
+      else ctx.rect(bx + HUD_HP_W * (1 - k), hy, HUD_HP_W * k, HUD_HP_H);
+      ctx.rect(mx, hy + 2, 9, HUD_HP_H - 2);
+      ctx.rect(mx, hy - 2, 3, 4);
+      ctx.rect(mx + 6, hy - 2, 3, 4);
+      ctx.fill();
       // 라벨은 바깥쪽, 숫자는 안쪽. 서로 겹치지 않는다
       ctx.font = FONT_MICRO;
       ctx.textAlign = 'left';
@@ -2067,139 +2189,263 @@ export class Renderer {
     ctx.fillStyle = C.COL_DANGER;
     ctx.fillRect(WG_X, WG_Y + WG_H - fh - 2, WG_W, 2.5);
 
-    // 눈금 — 협곡 바닥과 기지 발밑이 어디인지. 여기 닿으면 무슨 일이 나는지가 보인다
-    const marks = [(C.VIEW_H - groundAt(HALF_W)) / span, (C.VIEW_H - C.WATER_BASE_AT) / span];
-    for (let i = 0; i < 2; i++) {
-      const my = WG_Y + WG_H - WG_H * marks[i];
-      ctx.fillStyle = i === 0 ? C.RAMP_PLAYER[C.rampIndex(0.45)] : C.RAMP_BONUS[C.rampIndex(0.7)];
-      ctx.fillRect(WG_X - 7, my - 1, WG_W + 14, 1.6);
-    }
+    // 눈금 — 협곡 바닥과 기지 발밑. 여기 닿으면 무슨 일이 나는지가 보인다
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.45)];
+    ctx.fillRect(WG_X - 7, WG_Y + WG_H - WG_H * WG_MARKS[0] - 1, WG_W + 14, 1.6);
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.7)];
+    ctx.fillRect(WG_X - 7, WG_Y + WG_H - WG_H * WG_MARKS[1] - 1, WG_W + 14, 1.6);
 
     ctx.font = FONT_MICRO;
     ctx.textAlign = 'center';
-    ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(pulse)];
-    ctx.fillText(LABEL_WATER, WG_X + WG_W * 0.5, WG_Y - 15);
+    ctx.fillStyle = C.COL_DANGER;
+    ctx.fillText(LABEL_WATER, WG_X + WG_W * 0.5 - 4, WG_Y - 16);
     ctx.textAlign = 'left';
   }
 
   // ── 버튼 열 — 이 게임의 조작 전부 ───────────────────────────
   // 열 칸이라 한 칸이 83×66 이다. **가격·쿨다운·살 수 있는가·무슨 유닛인가**가
   // 한눈에 들어와야 한다. 쿨다운은 원호로, 못 사는 상태는 알파로.
+  // 버튼 열은 **글자가 많다.** 이름 10 + 키 10 + 값의 자릿수 30 ≈ 50번의 fillText 다.
+  // 자리별로 그리는 규칙(문자열을 안 만든다)은 유지해야 하고, fillText 호출 수가
+  // 곧 프레임 스파이크다 — 실측에서 버튼만 빼도 초과가 61→37 로 떨어졌다.
+  // 그런데 **버튼 그림은 거의 안 바뀐다.** 가격·구매가능·모드가 그대로면 같은 그림이다.
+  // 그래서 상태 서명이 바뀔 때만 굽고, 매 프레임은 한 번 붙이고 쿨다운 원호만 얹는다.
   drawButtons(game) {
     const ctx = this.ctx;
-    ctx.textBaseline = 'top';
-    const skillCd = game.skillCd;
-    for (let i = 0; i < C.BTN_COUNT; i++) {
-      const x = BTN_X0 + i * (BTN_W + BTN_GAP);
-      const y = BTN_Y;
+    const sig = this.computeButtonState(game);
+    if (typeof document !== 'undefined') {
+      const s = this.viewScale > 2 ? 2 : (this.viewScale < 0.25 ? 0.25 : this.viewScale);
+      if (this.btnSig !== sig || this.btnScale !== s) {
+        const w = Math.ceil(STRIP_W * s), h = Math.ceil(STRIP_H * s);
+        if (!this.btnCanvas) this.btnCanvas = document.createElement('canvas');
+        if (this.btnCanvas.width !== w || this.btnCanvas.height !== h) {
+          this.btnCanvas.width = w; this.btnCanvas.height = h;
+        }
+        const octx = this.btnCanvas.getContext('2d');
+        const prev = this.ctx;
+        this.ctx = octx;
+        octx.setTransform(s, 0, 0, s, -STRIP_X * s, -STRIP_Y * s);
+        octx.clearRect(STRIP_X, STRIP_Y, STRIP_W, STRIP_H);
+        this.paintButtonStrip(game);
+        this.ctx = prev;
+        this.btnSig = sig; this.btnScale = s;
+      }
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(this.btnCanvas, STRIP_X, STRIP_Y, STRIP_W, STRIP_H);
+      ctx.imageSmoothingEnabled = true;
+    } else {
+      this.paintButtonStrip(game);
+    }
+    this.drawButtonCooldowns();
+  }
 
-      let ok = true, cd = 0, cost = -1, ready = true, maxed = false, secs = 0;
+  // 무엇이 바뀌면 다시 구워야 하는가 — 가격·구매가능·모드·남은 초·시대.
+  // 쿨다운 원호는 서명에 넣지 않는다. 그건 매 프레임 위에 따로 그린다.
+  computeButtonState(game) {
+    const skillCd = game.skillCd;
+    const ok = this.btnOk, cd = this.btnCd, cost = this.btnCost, mode = this.btnMode;
+    let sig = (game.era | 0) * 7919;
+    for (let i = 0; i < C.BTN_COUNT; i++) {
+      let o = 1, c = 0, price = -1, m = 0;
       if (i < C.UNIT_KINDS) {
-        cost = game.cost(i);
-        ok = game.gold >= cost;
+        price = game.cost(i);
+        o = game.gold >= price ? 1 : 0;
         const full = game.spawnCooldown ? game.spawnCooldown(i) : C.U_SPAWN_CD[i];
-        cd = full > 0 ? game.spawnCd[i] / full : 0;
-        if (cd > 0) ok = false;
+        c = full > 0 ? game.spawnCd[i] / full : 0;
+        if (c > 0) o = 0;
+        m = 0;                                     // 가격
       } else if (i === C.B_ERA) {
-        ready = game.eraReady();
-        ok = ready;
+        o = game.eraReady() ? 1 : 0;
+        m = 1;                                     // 다음 시대 이름 / 준비
       } else if (i === C.B_TOWER) {
-        cost = game.towerCost ? game.towerCost() : -1;
-        maxed = cost < 0;
-        ok = !maxed && game.gold >= cost;
+        price = game.towerCost ? game.towerCost() : -1;
+        if (price < 0) { m = 2; o = 0; }           // 최대
+        else { m = 0; o = game.gold >= price ? 1 : 0; }
       } else {
         const sk = i === C.B_TIDE ? C.SK_TIDE : C.SK_VOLLEY;
         const raw = skillCd ? (skillCd[sk] || 0) : (sk === C.SK_TIDE ? (game.nukeCd || 0) : 0);
-        cd = raw / C.SKILL_CD[sk];
-        secs = Math.ceil(raw / 1000);
-        ok = raw <= 0;
-        ready = ok;
+        c = raw / C.SKILL_CD[sk];
+        o = raw <= 0 ? 1 : 0;
+        m = o ? 3 : 4;                             // 준비 / 남은 초
+        price = o ? -1 : Math.ceil(raw / 1000);
       }
+      ok[i] = o; cd[i] = c; cost[i] = price; mode[i] = m;
+      sig = (sig * 131 + o * 3 + m * 11 + (price + 1) * 37) | 0;
+    }
+    return sig;
+  }
 
-      const accent = i >= C.B_ERA;
-      const base = accent ? C.RAMP_BONUS : C.RAMP_PLAYER;
-      const a = ok ? 1 : 0.32;
-
-      // 카드 — 살 수 있으면 테두리가 밝고 안이 살짝 물든다
-      ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.96)];
+  // 쿨다운 원호 — 매 프레임 바뀐다. 구운 그림 위에 얹는다
+  drawButtonCooldowns() {
+    const ctx = this.ctx;
+    const cd = this.btnCd;
+    let anyCd = 0;
+    for (let i = 0; i < C.BTN_COUNT; i++) if (cd[i] > 0) { anyCd = 1; break; }
+    if (!anyCd) return;
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = C.RAMP_BG[C.rampIndex(0.85)];
+    ctx.beginPath();
+    for (let i = 0; i < C.BTN_COUNT; i++) {
+      if (cd[i] <= 0) continue;
+      const icx = BTN_X0 + i * (BTN_W + BTN_GAP) + BTN_ICON_DX;
+      ctx.moveTo(icx + 19, C.BTN_Y + BTN_ICON_DY);
+      ctx.arc(icx, C.BTN_Y + BTN_ICON_DY, 19, 0, TAU);
+    }
+    ctx.stroke();
+    for (let g = 0; g < 2; g++) {
+      ctx.strokeStyle = (g ? C.RAMP_BONUS : C.RAMP_PLAYER)[C.rampIndex(0.8)];
       ctx.beginPath();
-      ctx.roundRect(x, y, BTN_W, BTN_H, BTN_R);
-      ctx.fill();
-      if (ok) {
-        ctx.fillStyle = base[C.rampIndex(0.07)];
-        ctx.beginPath();
-        ctx.roundRect(x, y, BTN_W, BTN_H, BTN_R);
-        ctx.fill();
+      let any = 0;
+      for (let i = 0; i < C.BTN_COUNT; i++) {
+        if (cd[i] <= 0 || (i >= C.B_ERA) !== !!g) continue;
+        const icx = BTN_X0 + i * (BTN_W + BTN_GAP) + BTN_ICON_DX;
+        const a0 = -Math.PI * 0.5;
+        ctx.moveTo(icx, C.BTN_Y + BTN_ICON_DY - 19);
+        ctx.arc(icx, C.BTN_Y + BTN_ICON_DY, 19, a0, a0 + TAU * cd[i]);
+        any = 1;
       }
-      ctx.strokeStyle = base[C.rampIndex(ok ? 0.92 : 0.24)];
-      ctx.lineWidth = ok ? C.STROKE : 1;
+      if (any) ctx.stroke();
+    }
+    ctx.lineWidth = C.STROKE;
+  }
+
+  // 버튼 열 한 장 — 카드 · 아이콘 · 글자. 쿨다운 원호는 여기 없다
+  paintButtonStrip(game) {
+    const ctx = this.ctx;
+    const ok = this.btnOk, cost = this.btnCost, mode = this.btnMode;
+    ctx.textBaseline = 'top';
+
+    // 2) 카드 — **그리기 호출 수가 곧 비용이다.** 칸마다 fill/stroke 를 부르면
+    //    열 칸에서 서른 번이 되고, 그 서른 번이 합성 스레드를 밀어 스파이크가 된다.
+    //    같은 색으로 칠할 것은 경로 하나에 모아 한 번에 칠한다.
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.96)];
+    ctx.beginPath();
+    for (let i = 0; i < C.BTN_COUNT; i++) {
+      ctx.roundRect(BTN_X0 + i * (BTN_W + BTN_GAP), BTN_Y, BTN_W, BTN_H, BTN_R);
+    }
+    ctx.fill();
+    for (let g = 0; g < 2; g++) {                    // 물든 안쪽 — 유닛/특수기 두 계열
+      ctx.fillStyle = (g ? C.RAMP_BONUS : C.RAMP_PLAYER)[C.rampIndex(0.07)];
       ctx.beginPath();
-      ctx.roundRect(x + 0.5, y + 0.5, BTN_W - 1, BTN_H - 1, BTN_R);
-      ctx.stroke();
-      ctx.lineWidth = C.STROKE;
-
-      // 아이콘
-      const icx = x + BTN_ICON_DX, icy = y + BTN_ICON_DY;
-      this.drawBtnIcon(i, icx, icy, base[C.rampIndex(a * 0.95)]);
-
-      // 쿨다운 — **원호**로 아이콘을 두른다. 남은 만큼 시계 반대로 줄어든다
-      if (cd > 0) {
-        ctx.strokeStyle = C.RAMP_BG[C.rampIndex(0.85)];
-        ctx.lineWidth = 4;
-        ctx.beginPath();
-        ctx.arc(icx, icy, 19, 0, TAU);
-        ctx.stroke();
-        ctx.strokeStyle = base[C.rampIndex(0.8)];
-        ctx.beginPath();
-        ctx.arc(icx, icy, 19, -Math.PI * 0.5, -Math.PI * 0.5 + TAU * cd);
-        ctx.stroke();
-        ctx.lineWidth = C.STROKE;
+      let any = 0;
+      for (let i = 0; i < C.BTN_COUNT; i++) {
+        if (!ok[i] || (i >= C.B_ERA) !== !!g) continue;
+        ctx.roundRect(BTN_X0 + i * (BTN_W + BTN_GAP), BTN_Y, BTN_W, BTN_H, BTN_R);
+        any = 1;
       }
+      if (any) ctx.fill();
+    }
+    for (let g = 0; g < 4; g++) {                    // 테두리 — 계열×가능여부 넷
+      const acc = g & 1, on = g >> 1;
+      ctx.strokeStyle = (acc ? C.RAMP_BONUS : C.RAMP_PLAYER)[C.rampIndex(on ? 0.92 : 0.24)];
+      ctx.lineWidth = on ? C.STROKE : 1;
+      ctx.beginPath();
+      let any = 0;
+      for (let i = 0; i < C.BTN_COUNT; i++) {
+        if ((i >= C.B_ERA) !== !!acc || (!!ok[i]) !== !!on) continue;
+        ctx.roundRect(BTN_X0 + i * (BTN_W + BTN_GAP) + 0.5, BTN_Y + 0.5, BTN_W - 1, BTN_H - 1, BTN_R);
+        any = 1;
+      }
+      if (any) ctx.stroke();
+    }
+    ctx.lineWidth = C.STROKE;
 
-      // 이름 · 키 힌트
-      ctx.textAlign = 'left';
-      ctx.font = FONT_BTN;
-      ctx.fillStyle = base[C.rampIndex(ok ? 1 : 0.4)];
-      ctx.fillText(BTN_NAME[i], x + 7, y + 6);
+    // 3) 아이콘 — 채우는 것 넷 묶음, 선인 것 둘 묶음, 파낸 구멍 한 묶음
+    for (let g = 0; g < 4; g++) {
+      const acc = g & 1, on = g >> 1;
+      ctx.fillStyle = (acc ? C.RAMP_BONUS : C.RAMP_PLAYER)[C.rampIndex(on ? 0.95 : 0.30)];
+      ctx.beginPath();
+      let any = 0;
+      for (let i = 0; i < C.BTN_COUNT; i++) {
+        if ((i >= C.B_ERA) !== !!acc || (!!ok[i]) !== !!on) continue;
+        const x = BTN_X0 + i * (BTN_W + BTN_GAP);
+        if (this.addBtnIconFill(i, x + BTN_ICON_DX, BTN_Y + BTN_ICON_DY)) any = 1;
+      }
+      if (any) ctx.fill();
+    }
+    ctx.lineWidth = 2;
+    for (let g = 0; g < 4; g++) {
+      const acc = g & 1, on = g >> 1;
+      ctx.strokeStyle = (acc ? C.RAMP_BONUS : C.RAMP_PLAYER)[C.rampIndex(on ? 0.95 : 0.30)];
+      ctx.beginPath();
+      let any = 0;
+      for (let i = 0; i < C.BTN_COUNT; i++) {
+        if ((i >= C.B_ERA) !== !!acc || (!!ok[i]) !== !!on) continue;
+        const x = BTN_X0 + i * (BTN_W + BTN_GAP);
+        if (this.addBtnIconStroke(i, x + BTN_ICON_DX, BTN_Y + BTN_ICON_DY)) any = 1;
+      }
+      if (any) ctx.stroke();
+    }
+    ctx.lineWidth = C.STROKE;
+    ctx.fillStyle = C.COL_BG;                        // 방패 보스·바퀴 축 구멍
+    ctx.beginPath();
+    for (let i = 0; i < C.BTN_COUNT; i++) {
+      const x = BTN_X0 + i * (BTN_W + BTN_GAP);
+      this.addBtnIconHole(i, x + BTN_ICON_DX, BTN_Y + BTN_ICON_DY);
+    }
+    ctx.fill();
 
-      ctx.font = FONT_MICRO;
-      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.38)];
-      ctx.textAlign = 'right';
-      ctx.fillText(C.KEY_HINT[i], x + BTN_W - 5, y + 6);
-      ctx.textAlign = 'left';
 
-      // 아래줄 — 가격 / 준비 / 남은 초
-      ctx.font = FONT_SMALL;
-      const ly = y + BTN_H - 22;
-      if (cost >= 0) {
-        // 동전 표식 + 숫자. 숫자만 있으면 무슨 수인지 모른다
-        ctx.fillStyle = ok ? C.COL_BONUS : C.RAMP_BONUS[C.rampIndex(0.3)];
-        ctx.beginPath();
-        this.addCircle(x + 12, ly + 8, 4.5);
-        ctx.fill();
-        ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.95)];
-        ctx.beginPath();
-        this.addCircle(x + 12, ly + 8, 1.8);
-        ctx.fill();
-        ctx.fillStyle = ok ? C.COL_BONUS : C.RAMP_BONUS[C.rampIndex(0.34)];
-        this.drawLeft(cost, x + 20, ly, 9);
-      } else if (i === C.B_ERA) {
-        ctx.fillStyle = ready ? C.COL_BONUS : C.RAMP_PLAYER[C.rampIndex(0.32)];
-        ctx.fillText(ready ? READY : C.ERA_NAME[Math.min(C.ERA_COUNT - 1, game.era + 1)], x + 7, ly);
-      } else if (maxed) {
+    // 4) 동전 표식 — 색이 둘뿐이다. 경로를 모아 두 번에 칠한다
+    for (let pass = 0; pass < 3; pass++) {
+      ctx.fillStyle = pass === 0 ? C.COL_BONUS
+        : (pass === 1 ? C.RAMP_BONUS[C.rampIndex(0.30)] : C.RAMP_BG[C.rampIndex(0.95)]);
+      ctx.beginPath();
+      let any = 0;
+      for (let i = 0; i < C.BTN_COUNT; i++) {
+        if (mode[i] !== 0 || cost[i] < 0) continue;
+        if (pass < 2 && (ok[i] === 1) !== (pass === 0)) continue;
+        const x = BTN_X0 + i * (BTN_W + BTN_GAP);
+        const cyy = BTN_Y + BTN_H - 14;
+        this.addCircle(x + 12, cyy, pass === 2 ? 1.8 : 4.5);
+        any = 1;
+      }
+      if (any) ctx.fill();
+    }
+
+    // 5) 글자 — **폰트를 세 번만 간다.** ctx.font 교체는 비싸고,
+    //    칸마다 갈면 한 프레임에 서른 번이 된다. 실측에서 이게 스파이크의 주범이었다.
+    ctx.textAlign = 'left';
+    ctx.font = FONT_BTN;
+    for (let i = 0; i < C.BTN_COUNT; i++) {
+      const base = i >= C.B_ERA ? C.RAMP_BONUS : C.RAMP_PLAYER;
+      ctx.fillStyle = base[C.rampIndex(ok[i] ? 1 : 0.4)];
+      ctx.fillText(BTN_NAME[i], BTN_X0 + i * (BTN_W + BTN_GAP) + 7, BTN_Y + 6);
+    }
+
+    ctx.font = FONT_SMALL;
+    const ly = BTN_Y + BTN_H - 22;
+    for (let i = 0; i < C.BTN_COUNT; i++) {
+      const x = BTN_X0 + i * (BTN_W + BTN_GAP);
+      const m = mode[i];
+      if (m === 0) {
+        ctx.fillStyle = ok[i] ? C.COL_BONUS : C.RAMP_BONUS[C.rampIndex(0.34)];
+        this.drawLeft(cost[i], x + 20, ly, 9);
+      } else if (m === 1) {
+        ctx.fillStyle = ok[i] ? C.COL_BONUS : C.RAMP_PLAYER[C.rampIndex(0.32)];
+        ctx.fillText(ok[i] ? READY : C.ERA_NAME[Math.min(C.ERA_COUNT - 1, game.era + 1)], x + 7, ly);
+      } else if (m === 2) {
         ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.5)];
         ctx.fillText(LABEL_MAX, x + 7, ly);
-      } else if (ok) {
+      } else if (m === 3) {
         ctx.fillStyle = C.COL_BONUS;
         ctx.fillText(READY, x + 7, ly);
       } else {
         ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.34)];
-        const wsec = this.drawLeft(secs, x + 7, ly, 9);
-        ctx.font = FONT_MICRO;
-        ctx.fillText(LABEL_S, x + 7 + wsec + 1, ly + 4);
+        const wsec = this.drawLeft(cost[i], x + 7, ly, 9);
+        ctx.fillText(LABEL_S, x + 7 + wsec + 1, ly);
       }
     }
+
+    ctx.font = FONT_MICRO;
+    ctx.textAlign = 'right';
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.38)];
+    for (let i = 0; i < C.BTN_COUNT; i++) {
+      ctx.fillText(C.KEY_HINT[i], BTN_X0 + i * (BTN_W + BTN_GAP) + BTN_W - 5, BTN_Y + 6);
+    }
+    ctx.textAlign = 'left';
   }
+
 
   // ── 증원 — 우하단 원형. 키보드 R ────────────────────────────
   drawRally(game) {
@@ -2253,119 +2499,101 @@ export class Renderer {
   }
 
   // 버튼 아이콘 — 전장 유닛 실루엣의 축소판. 형태만으로 구분돼야 한다.
-  drawBtnIcon(i, cx, cy, color) {
+  // **칠하지 않는다.** 현재 경로에 더하기만 하고 호출한 쪽이 묶어서 칠한다.
+  // 그려야 할 게 있으면 1 을 돌려준다 (빈 경로에 fill 을 부르지 않기 위해).
+  addBtnIconFill(i, cx, cy) {
     const ctx = this.ctx;
-    ctx.fillStyle = color;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
     if (i === C.U_SWORD) {
       // 검사 — 큰 둥근 방패 + 짧은 칼
-      ctx.beginPath();
-      this.addBar(cx - 1, cy + 8, 0.15, -1, 15, 0, 3.4, 2.8);   // 몸통
+      this.addBar(cx - 1, cy + 8, 0.15, -1, 15, 0, 3.4, 2.8);
       this.addCircle(cx + 1, cy - 10, 3.6);
-      this.addBar(cx + 4, cy - 3, 0.66, -0.75, 14, 3, 2, 1.2);  // 칼
+      this.addBar(cx + 4, cy - 3, 0.66, -0.75, 14, 3, 2, 1.2);
       this.addBar(cx + 4, cy - 3, 0.75, 0.66, 5, 5, 1.6, 1.6);
-      ctx.fill();
-      ctx.beginPath();
-      this.addCircle(cx - 6, cy + 1, 6);                        // 방패
-      ctx.fill();
-      ctx.fillStyle = C.COL_BG;
-      ctx.beginPath();
-      this.addCircle(cx - 6, cy + 1, 2.1);
-      ctx.fill();
+      this.addCircle(cx - 6, cy + 1, 6);
     } else if (i === C.U_SPEAR) {
-      ctx.beginPath();
       this.addBar(cx - 2, cy + 8, 0, -1, 15, 0, 3, 2.6);
       this.addCircle(cx - 2, cy - 10, 3.4);
-      this.addSpike(cx - 2, cy - 15, 0, -1, 5, 3);              // 뾰족 투구
-      this.addBar(cx - 11, cy - 2, 1, -0.08, 25, 0, 1.5, 1.3);  // 길게 뻗은 창
+      this.addSpike(cx - 2, cy - 15, 0, -1, 5, 3);
+      this.addBar(cx - 11, cy - 2, 1, -0.08, 25, 0, 1.5, 1.3);
       this.addSpike(cx + 14, cy - 3, 1, -0.08, 7, 2.8);
-      ctx.fill();
     } else if (i === C.U_ARCHER) {
-      // 궁수 — 뒤로 젖힌 몸 + 큰 활 + 등의 화살깃
-      ctx.beginPath();
+      // 궁수 — 뒤로 젖힌 몸 + 등의 화살깃 (활은 선 패스에서)
       this.addBar(cx - 3, cy + 8, -0.26, -1, 14, 0, 3, 2.6);
       this.addCircle(cx - 7, cy - 8, 3.2);
       for (let k = -1; k <= 1; k++) this.addSpike(cx - 10 + k * 2.6, cy - 4, -0.2 + k * 0.1, -1, 7, 1.4);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(cx + 5, cy - 1, 9, -1.15, 1.15);
-      ctx.moveTo(cx + 5 + 9 * Math.cos(1.15), cy - 1 - 9 * Math.sin(1.15));
-      ctx.lineTo(cx - 1, cy - 1);
-      ctx.lineTo(cx + 5 + 9 * Math.cos(1.15), cy - 1 + 9 * Math.sin(1.15));
-      ctx.stroke();
     } else if (i === C.U_CAV) {
-      ctx.beginPath();
-      ctx.rect(cx - 11, cy - 1, 17, 6);                 // 말 몸통
+      ctx.rect(cx - 11, cy - 1, 17, 6);
       this.addBar(cx + 5, cy, 0.62, -0.78, 9, 2, 3.2, 2);
       this.addBar(cx + 10, cy - 6, 0.94, 0.34, 6, 1, 2.4, 1.6);
       this.addBar(cx - 9, cy + 5, -0.3, 1, 7, 0, 1.7, 1.2);
       this.addBar(cx - 5, cy + 5, 0.3, 1, 7, 0, 1.7, 1.2);
       this.addBar(cx + 1, cy + 5, -0.3, 1, 7, 0, 1.7, 1.2);
       this.addBar(cx + 4, cy + 5, 0.3, 1, 7, 0, 1.7, 1.2);
-      this.addBar(cx - 11, cy - 1, -0.7, -0.7, 6, 0, 1.6, 1);   // 꼬리
-      ctx.rect(cx - 4, cy - 10, 5, 9);                  // 기수
+      this.addBar(cx - 11, cy - 1, -0.7, -0.7, 6, 0, 1.6, 1);
+      ctx.rect(cx - 4, cy - 10, 5, 9);
       this.addCircle(cx - 1.5, cy - 12, 2.6);
-      this.addBar(cx - 2, cy - 6, 1, 0.16, 16, 3, 1.3, 1);      // 창
-      ctx.fill();
+      this.addBar(cx - 2, cy - 6, 1, 0.16, 16, 3, 1.3, 1);
     } else if (i === C.U_GIANT) {
-      ctx.beginPath();
-      this.addTrap(cx - 1, cy - 7, cy + 9, 15, 11, 0);   // 몸통
-      ctx.rect(cx - 11, cy - 11, 21, 5);                 // 어깨
-      this.addCircle(cx - 1, cy - 13, 3);                // 작은 머리
-      this.addCircle(cx - 10, cy - 6, 4);                // 등 혹
+      this.addTrap(cx - 1, cy - 7, cy + 9, 15, 11, 0);
+      ctx.rect(cx - 11, cy - 11, 21, 5);
+      this.addCircle(cx - 1, cy - 13, 3);
+      this.addCircle(cx - 10, cy - 6, 4);
       this.addBar(cx + 8, cy - 3, 0.72, -0.69, 11, 2, 2, 4);
-      this.addCircle(cx + 16, cy - 11, 4.2);             // 몽둥이 대가리
-      ctx.fill();
+      this.addCircle(cx + 16, cy - 11, 4.2);
     } else if (i === C.U_CATA) {
-      ctx.beginPath();
-      this.addCircle(cx - 9, cy + 8, 5);                          // 뒷바퀴
-      this.addCircle(cx + 7, cy + 8, 3.4);                        // 앞바퀴
-      this.addBar(cx - 9, cy + 8, 1, 0, 16, 0, 1.8, 1.8);         // 차대
-      this.addBar(cx - 2, cy + 8, 0, -1, 12, 0, 2.2, 1.7);        // 기둥
-      this.addBar(cx - 2, cy - 4, 0.64, -0.77, 13, 5, 1.9, 1.4);  // 던지는 팔
-      this.addCircle(cx + 6.3, cy - 14, 2.8);                     // 바구니
-      ctx.fill();
-      ctx.fillStyle = C.COL_BG;
-      ctx.beginPath();
-      this.addCircle(cx - 9, cy + 8, 1.7);
-      ctx.fill();
+      this.addCircle(cx - 9, cy + 8, 5);
+      this.addCircle(cx + 7, cy + 8, 3.4);
+      this.addBar(cx - 9, cy + 8, 1, 0, 16, 0, 1.8, 1.8);
+      this.addBar(cx - 2, cy + 8, 0, -1, 12, 0, 2.2, 1.7);
+      this.addBar(cx - 2, cy - 4, 0.64, -0.77, 13, 5, 1.9, 1.4);
+      this.addCircle(cx + 6.3, cy - 14, 2.8);
     } else if (i === C.B_ERA) {
-      ctx.beginPath();
       ctx.moveTo(cx, cy - 12); ctx.lineTo(cx + 10, cy + 1); ctx.lineTo(cx + 4.5, cy + 1);
       ctx.lineTo(cx + 4.5, cy + 10); ctx.lineTo(cx - 4.5, cy + 10); ctx.lineTo(cx - 4.5, cy + 1);
-      ctx.lineTo(cx - 10, cy + 1); ctx.closePath(); ctx.fill();
+      ctx.lineTo(cx - 10, cy + 1); ctx.closePath();
     } else if (i === C.B_TOWER) {
-      ctx.beginPath();
-      ctx.rect(cx - 10, cy + 3, 20, 8);                 // 옥상
+      ctx.rect(cx - 10, cy + 3, 20, 8);
       for (let m = 0; m < 3; m++) ctx.rect(cx - 10 + m * 8, cy, 5, 3);
-      ctx.rect(cx - 6, cy - 6, 12, 7);                  // 받침
-      this.addBar(cx + 3, cy - 4, 1, -0.2, 13, 2, 2.6, 1.9);   // 포신
-      ctx.fill();
+      ctx.rect(cx - 6, cy - 6, 12, 7);
+      this.addBar(cx + 3, cy - 4, 1, -0.2, 13, 2, 2.6, 1.9);
     } else if (i === C.B_TIDE) {
-      // 해일 — 가로로 흐르는 물결 셋
-      ctx.beginPath();
+      return 0;                                    // 해일은 선으로만 그린다
+    } else {
+      // 화살비 — 화살 셋이 지면으로 쏟아진다
+      for (let k = 0; k < 3; k++) {
+        const px = cx - 8 + k * 8, oy = (k & 1) * 4;
+        this.addBar(px - 3, cy - 13 + oy, 0.2, 1, 13, 0, 1.2, 0.6);
+        this.addSpike(px - 0.4, cy + 0.5 + oy, 0.2, 1, 4.5, 2);
+      }
+      ctx.rect(cx - 12, cy + 8, 24, 2.4);
+    }
+    return 1;
+  }
+
+  addBtnIconStroke(i, cx, cy) {
+    const ctx = this.ctx;
+    if (i === C.U_ARCHER) {
+      ctx.moveTo(cx + 5 + 9 * Math.cos(1.15), cy - 1 - 9 * Math.sin(1.15));
+      ctx.arc(cx + 5, cy - 1, 9, -1.15, 1.15);
+      ctx.lineTo(cx - 1, cy - 1);
+      ctx.lineTo(cx + 5 + 9 * Math.cos(1.15), cy - 1 + 9 * Math.sin(1.15));
+      return 1;
+    }
+    if (i === C.B_TIDE) {                          // 해일 — 가로로 흐르는 물결 셋
       for (let k = 0; k < 3; k++) {
         const yy = cy - 7 + k * 7;
         ctx.moveTo(cx - 12, yy);
         ctx.quadraticCurveTo(cx - 6, yy - 5, cx, yy);
         ctx.quadraticCurveTo(cx + 6, yy + 5, cx + 12, yy);
       }
-      ctx.stroke();
-    } else {
-      // 화살비 — 화살 셋이 지면으로 쏟아진다
-      ctx.beginPath();
-      for (let k = 0; k < 3; k++) {
-        const px = cx - 8 + k * 8;
-        const oy = (k & 1) * 4;
-        this.addBar(px - 3, cy - 13 + oy, 0.2, 1, 13, 0, 1.2, 0.6);
-        this.addSpike(px - 0.4, cy + 0.5 + oy, 0.2, 1, 4.5, 2);
-      }
-      ctx.fill();
-      ctx.beginPath();
-      ctx.rect(cx - 12, cy + 8, 24, 2.4);
-      ctx.fill();
+      return 1;
     }
+    return 0;
+  }
+
+  addBtnIconHole(i, cx, cy) {
+    if (i === C.U_SWORD) this.addCircle(cx - 6, cy + 1, 2.1);
+    else if (i === C.U_CATA) this.addCircle(cx - 9, cy + 8, 1.7);
   }
 
   drawBanner(feel) {
@@ -2657,9 +2885,9 @@ export class Renderer {
 
     // 지표 넷 — 막대 하나에 값과 임계선을 같이 얹는다
     const MET_X = x + 54, MET_W = w - 64;
-    const met = [DV_AGGRO, DV_HOARD, DV_ECON, DV_SWARM];
-    const val = [d.metricAggro, d.metricHoard, d.metricEcon, d.metricSwarm];
-    const thr = [C.TH_AGGRO_HIGH, C.TH_HOARD_HIGH, C.TH_ECON_HIGH, C.TH_SWARM_HIGH];
+    const met = DV_MET_NAME, thr = DV_MET_THR;
+    const val = this.metVal;
+    val[0] = d.metricAggro; val[1] = d.metricHoard; val[2] = d.metricEcon; val[3] = d.metricSwarm;
     for (let i = 0; i < 4; i++) {
       const my = y + 50 + i * 15;
       ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
