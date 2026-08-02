@@ -70,6 +70,16 @@ export const FALLBACK_WAVE = new Int16Array([
 
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+// 최소 사거리 — 이보다 가까운 적에게는 공격이 성립하지 않는다.
+// **상성 배수로는 "닿기 전에 죽는 것"을 못 뒤집는다.** 기병이 궁수·투석기를
+// 잡는다는 계약이 4/6 에서 깨져 있었고, 실패한 두 변이 전부 방어자 사거리가
+// 더 긴 조합이었다. 배수를 올리는 것은 대증요법이고 사거리 300 앞에서는
+// 어차피 안 된다. 그래서 배수가 아니라 **구조**로 돌린다 —
+// 활을 당길 공간이 없고 투석기는 코앞에 못 쏜다.
+// config 이 아직 이 상수를 안 줬으면 전부 0 이다 = 예전 그대로 동작한다.
+const U_MIN_RANGE = (C.U_MIN_RANGE && C.U_MIN_RANGE.length >= C.UNIT_KINDS)
+  ? C.U_MIN_RANGE : new Float32Array(C.UNIT_KINDS);
+
 // 협곡 바닥. 가운데가 FLOOR_DIP 만큼 낮다.
 // 이 한 줄이 이 게임의 교착을 푼다 — 전선이 기지보다 먼저 잠긴다.
 export function groundAt(x) {

@@ -34,7 +34,7 @@ export const REASONS = [
   '관찰 중',
   '쉬지 않고 병력을 쏟아붓는다',
   '금을 쌓아 두고 나오지 않는다',
-  '병력보다 시대에 먼저 투자한다',
+  '금을 모아 두었다가 한 번에 쏟는다',
   '싼 유닛만 끝없이 뽑는다',
   '어느 쪽으로도 치우치지 않았다',
 ];
@@ -476,9 +476,15 @@ export class Director {
     for (let k = 0; k < KINDS; k++) m[k] = num(base[k], 0);
     this.applyCounter(m, p);
 
+    // 구운 웨이브의 tempo 에는 **난이도가 이미 들어 있다** (베이크가 난이도별로 굽고,
+    // 검수가 단조성을 확인한다). 여기서 또 깎으면 두 번 깎인다 —
+    // 계측에서 다섯 프로파일의 간격이 전부 하한 420ms 에 붙어 버렸다.
+    // 정책의 기본 템포를 쓸 때만 난이도를 곱한다.
+    const tempo = ch ? num(ch.tempo, p.tempo) : p.tempo * (1 - d * 0.11);
+
     this.levers = {
       mix: m,
-      tempo: Math.max(420, (ch ? num(ch.tempo, p.tempo) : p.tempo) * (1 - d * 0.11)),
+      tempo: Math.max(420, tempo),
       goldMul: p.goldMul * (1 + d * 0.1),
       eraThresh: p.eraThresh,
       waterMul: p.waterMul,
@@ -620,22 +626,33 @@ export class Director {
 //   SWARMER    금의 62% 이상을 병력에 쓰고, 그 병력의 평균 단가가 싸다(검·창·궁)
 //   RUSHER     금의 62% 이상을 병력에 쓰는데 비싼 것(기병·거인·투석기)이 섞인다
 //   BALANCED   그 사이 어디도 아니다 — 실제로 존재하는 넓은 영역이다
-const MID_AGGRO = (C.TH_AGGRO_HIGH + C.TH_AGGRO_LOW) * 0.5;
-
 // eps 는 **들어가는 조건에만** 붙는다. 0이면 순수 판정, HYSTERESIS 면
 // "이 판정으로 갈아탈 만큼 확실한가"를 묻는 것이다.
-// 자격을 깎는 조건(econ 이 높으면 수비형이 아니다 같은)에는 안 붙인다 —
-// 거기 붙이면 경계에 걸친 사람이 어느 칸에도 못 들어간다.
+//
+// ★ 경제형을 무엇으로 잡는가 — 여기서 한 번 크게 틀렸고 계측으로 잡았다.
+//   처음엔 "번 경험치 중 시대에 넣은 비중(econ)"으로 잡았다. 단위도 맞고
+//   말도 되는데, **재 보니 0.30~0.42 를 못 벗어났다.** 이유는 게임 구조다:
+//   시대 요구치가 240·640·1300·2400 으로 벌이보다 훨씬 느리게 열려서,
+//   아무리 진화를 서둘러도 번 경험치의 대부분은 아직 안 쓰인 채 쌓여 있다.
+//   TH_ECON_HIGH(0.55)는 **구조적으로 도달 불가능**했다 — 러너에서 겪은 것과
+//   똑같은 실패다. 그래서 판정에서 뺐다. (지표 자체는 디렉터 뷰에 남는다.
+//   진화를 아예 안 하는 사람은 0.05, 하는 사람은 0.35 로 실제로 갈린다)
+//
+//   대신 실제로 넓게 퍼지는 축을 썼다. 봇 여섯을 재보니 hoard 는
+//   0.14 → 1.00 으로 깨끗하게 퍼졌고 TH_HOARD_HIGH(0.45)가 정확히 그 한가운데다.
+//   이 게임에서 "경제형"은 **금을 안고 있다가 한 번에 쏟는 사람**이다.
 function classify(aggro, hoard, econ, swarm, tower, eps) {
   const e = eps || 0;
   // 순서가 곧 우선순위다. 웅크리는 사람을 먼저 잡아야 한다 —
   // 물이 차오르는 게임에서 가장 위험한 습관이기 때문이다.
-  // 단, **웅크리면서 진화는 앞서는 사람은 경제형이다.** 이 단서가 없으면
-  // 경제형이 수비형에 통째로 먹혀 구조적으로 판정 불가능해진다.
-  if (aggro < C.TH_AGGRO_LOW - e && econ <= C.TH_ECON_HIGH
+  // 포탑에 묻은 금도 "전선에 안 나온 금"이라 같은 축으로 센다.
+  if (aggro < C.TH_AGGRO_LOW - e
       && (hoard > C.TH_HOARD_HIGH + e || tower > C.TH_HOARD_HIGH + e)) return 'TURTLE';
-  if (econ > C.TH_ECON_HIGH + e && aggro < MID_AGGRO) return 'ECONOMIST';
+  // 쓰기는 쓰는데 늘 큰 잔고를 안고 있다 — 모았다가 쏟는 사람이다.
+  if (hoard > C.TH_HOARD_HIGH + e) return 'ECONOMIST';
+  // 잔고 없이 싼 것을 끝없이 — 물량.
   if (aggro > C.TH_AGGRO_HIGH + e && swarm > C.TH_SWARM_HIGH + e) return 'SWARMER';
+  // 잔고 없이 비싼 것까지 섞어 계속 밀어붙인다 — 돌격.
   if (aggro > C.TH_AGGRO_HIGH + e) return 'RUSHER';
   return 'BALANCED';
 }

@@ -176,6 +176,7 @@ export class Renderer {
     this.fxTower = new Int16Array(2);
     this.fxTowerX = new Float32Array(2);
     this.prevTowerCd = new Float32Array(2);
+    this.prevTowerLv = new Int8Array(2);
     this.prevTick = -1;
 
     // 화살비 — 결정론적 산포. Math.random 을 쓰면 매 프레임 화살이 순간이동한다.
@@ -358,6 +359,7 @@ export class Renderer {
       this.fxTower.fill(0);
       this.prevSkillCd.fill(0);
       this.prevTowerCd.fill(0);
+      this.prevTowerLv.fill(0);
     }
     this.prevTick = game.tick;
 
@@ -375,7 +377,10 @@ export class Renderer {
 
     for (let s = 0; s < 2; s++) {
       const cd = (s === SIDE_L ? game.towerCd : game.aiTowerCd) || 0;
-      if (cd > this.prevTowerCd[s] + 1) {
+      const lv = ((s === SIDE_L ? game.towerLv : game.aiTowerLv) | 0);
+      const bought = lv !== this.prevTowerLv[s];   // 사는 순간에도 쿨다운이 찬다. 그건 사격이 아니다
+      this.prevTowerLv[s] = lv;
+      if (!bought && cd > this.prevTowerCd[s] + 1) {
         this.fxTower[s] = FX_TOWER_F;
         this.fxTowerX[s] = front;
       }
@@ -866,7 +871,7 @@ export class Renderer {
       const c = Math.cos(a), s = Math.sin(a);
       this.addBar(hx, handY - 3, dir * c, -s, h * 0.52, 7, 2.6, 1.4);
       this.addBar(hx, handY - 3, s, dir * c, 6, 6, 1.8, 1.8);   // 손잡이 가드
-      this.addCircle(x + lunge + dir * bw * 0.72, handY + torsoH * 0.42, w * 0.32);
+      this.addCircle(x + lunge + dir * bw * 0.78, handY + torsoH * 0.5, w * 0.27);
       this.wtX[i] = hx + dir * c * h * 0.52; this.wtY[i] = handY - 3 - s * h * 0.52;
     } else if (kind === C.U_SPEAR) {
       // 창 — **몸 길이보다 앞으로 더 나간다.** 이게 사거리다
@@ -951,7 +956,7 @@ export class Renderer {
     if (giant) ctx.rect(x - w * 0.52 + lunge, shY - 3, w * 1.04, h * 0.11);
     if (kind === C.U_SWORD) {
       const handY = shY + torsoH * 0.30;
-      this.addCircle(x + lunge + dir * bw * 0.62, handY + torsoH * 0.25, w * 0.30);
+      this.addCircle(x + lunge + dir * bw * 0.78, handY + torsoH * 0.5, w * 0.27);
     }
   }
 
