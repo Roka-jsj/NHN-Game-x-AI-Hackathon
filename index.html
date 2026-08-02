@@ -9,7 +9,26 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>차오른다 (RISING)</title>
+<meta name="description" content="물이 차오르는 협곡에서 벌어지는 한 화면 레인 전투. 유닛을 소환하고 시대를 올려 적 기지를 무너뜨려라 — 버티는 쪽이 먼저 잠긴다.">
+<meta name="author" content="NHN Game x AI Hackathon">
+
+<!-- 소셜 프리뷰. og:image 는 일부러 넣지 않는다 —
+     외부 에셋 0개 규칙 아래 쓸 수 있는 건 data URI 뿐인데,
+     카카오톡·슬랙·트위터 크롤러는 data URI og:image 를 전부 무시한다.
+     무시될 태그를 넣느니 title/description 을 제대로 채우는 편이 프리뷰가 낫다. -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="차오른다 RISING">
+<meta property="og:title" content="차오른다 (RISING)">
+<meta property="og:description" content="물이 차오르는 협곡에서 벌어지는 한 화면 레인 전투. 유닛을 소환하고 시대를 올려 적 기지를 무너뜨려라 — 버티는 쪽이 먼저 잠긴다.">
+<meta property="og:locale" content="ko_KR">
+<meta property="og:url" content="https://roka-jsj.github.io/NHN-Game-x-AI-Hackathon/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="차오른다 (RISING)">
+<meta name="twitter:description" content="물이 차오르는 협곡에서 벌어지는 한 화면 레인 전투. 버티는 쪽이 먼저 잠긴다.">
+
 <style>
+  /* 팔레트는 src/config.js 의 COL_* 여섯 색이 전부다. 대비는 알파로 번다.
+     BG #12242E · GRID #1B3341 · STRUCT #7E9AA6 · PLAYER #F4F7F5 · DANGER #C4463A · BONUS #F2B441 */
   html {
     background: #12242E;
     height: 100%;
@@ -27,6 +46,7 @@
     -webkit-tap-highlight-color: transparent;
     overscroll-behavior: none;
   }
+  [hidden] { display: none !important; }
   #stage {
     position: fixed;
     inset: 0;
@@ -41,10 +61,378 @@
     display: block;
     touch-action: none;
   }
+
+  /* ── 세로 화면 힌트 ────────────────────────────────────────────
+     막지 않는다. 알려만 준다. JS 0줄 — 미디어 쿼리와 키프레임만 쓴다. */
+  #rotate {
+    position: fixed;
+    left: 50%;
+    bottom: calc(env(safe-area-inset-bottom) + 14px);
+    transform: translateX(-50%);
+    z-index: 5;
+    display: none;
+    pointer-events: none;
+    padding: 7px 14px;
+    border-radius: 999px;
+    border: 1px solid rgba(126,154,166,.34);
+    background: rgba(27,51,65,.86);
+    color: #7E9AA6;
+    font-size: 12px;
+    line-height: 1;
+    white-space: nowrap;
+    opacity: 0;
+  }
+  #rotate svg { vertical-align: -2px; margin-right: 5px; }
+  @media (orientation: portrait) {
+    #rotate {
+      display: block;
+      animation: rotHint 7s ease-in-out 1.6s 1 forwards;
+    }
+  }
+  @keyframes rotHint {
+    0%   { opacity: 0; transform: translate(-50%, 6px); }
+    9%   { opacity: 1; transform: translate(-50%, 0); }
+    72%  { opacity: 1; transform: translate(-50%, 0); }
+    100% { opacity: 0; transform: translate(-50%, 0); }
+  }
+
+  /* ── 부팅 오버레이 ─────────────────────────────────────────────
+     첫 페인트부터 제목이 보인다. 전부 CSS 애니메이션이다 — JS 타이머 0개. */
+  .bootpane {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: max(env(safe-area-inset-top), 16px) max(env(safe-area-inset-right), 18px)
+             max(env(safe-area-inset-bottom), 16px) max(env(safe-area-inset-left), 18px);
+    box-sizing: border-box;
+    background: #12242E;
+    overflow: hidden;
+    transition: opacity .32s ease;
+  }
+  .bootpane.gone { opacity: 0; pointer-events: none; }
+
+  /* 차오르는 물. 제목이 곧 로딩 인디케이터다. */
+  .bootpane .tide {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 42%;
+    background: linear-gradient(to bottom, rgba(196,70,58,.30), rgba(196,70,58,.10));
+    border-top: 1px solid rgba(196,70,58,.55);
+    transform: translateY(76%);
+    animation: bootTide 3.4s cubic-bezier(.45,0,.55,1) infinite alternate;
+    will-change: transform;
+  }
+  @keyframes bootTide {
+    from { transform: translateY(84%); }
+    to   { transform: translateY(34%); }
+  }
+
+  .bootpane .body { position: relative; text-align: center; }
+  .bootpane .brand {
+    margin: 0;
+    font-size: clamp(30px, 9vw, 54px);
+    font-weight: 800;
+    letter-spacing: .14em;
+    text-indent: .14em;
+    color: #F4F7F5;
+    line-height: 1.1;
+  }
+  .bootpane .brand span {
+    display: block;
+    margin-top: 10px;
+    font-size: clamp(11px, 3vw, 15px);
+    font-weight: 600;
+    letter-spacing: .58em;
+    text-indent: .58em;
+    color: #7E9AA6;
+  }
+  .bootpane .bar {
+    position: relative;
+    width: min(58vw, 220px);
+    height: 3px;
+    margin: 26px auto 0;
+    border-radius: 2px;
+    background: rgba(126,154,166,.22);
+    overflow: hidden;
+  }
+  .bootpane .bar i {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 38%;
+    border-radius: 2px;
+    background: #C4463A;
+    animation: bootSweep 1.25s cubic-bezier(.5,0,.5,1) infinite;
+    will-change: transform;
+  }
+  @keyframes bootSweep {
+    0%   { transform: translateX(-105%); }
+    100% { transform: translateX(368%); }
+  }
+  .bootpane .cap {
+    margin: 14px 0 0;
+    font-size: 12px;
+    letter-spacing: .06em;
+    color: rgba(126,154,166,.9);
+  }
+
+  /* 실패 카드. 심사자가 스크린샷 한 장으로 상황을 전할 수 있어야 한다. */
+  .bootpane .fail {
+    position: relative;
+    max-width: 30rem;
+    text-align: left;
+    padding: 20px 20px 18px;
+    border: 1px solid rgba(196,70,58,.55);
+    border-radius: 6px;
+    background: rgba(27,51,65,.94);
+  }
+  .bootpane .fail h2 {
+    margin: 0 0 10px;
+    font-size: 17px;
+    color: #C4463A;
+    letter-spacing: .02em;
+  }
+  .bootpane .fail p {
+    margin: 0 0 12px;
+    font-size: 13.5px;
+    line-height: 1.65;
+    color: rgba(244,247,245,.88);
+  }
+  .bootpane .fail pre {
+    margin: 0 0 14px;
+    padding: 10px 11px;
+    max-height: 8.5em;
+    overflow: auto;
+    border-radius: 4px;
+    background: rgba(18,36,46,.9);
+    color: #F2B441;
+    font-size: 11.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .bootpane .fail button {
+    -webkit-appearance: none;
+    appearance: none;
+    display: block;
+    width: 100%;
+    padding: 11px 14px;
+    border: 1px solid rgba(244,247,245,.42);
+    border-radius: 4px;
+    background: transparent;
+    color: #F4F7F5;
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    cursor: pointer;
+  }
+  .bootpane .fail button:active { background: rgba(244,247,245,.12); }
+
+
+  @media (prefers-reduced-motion: reduce) {
+    .bootpane { transition: none; }
+    .bootpane .tide { animation: none; transform: translateY(58%); }
+    .bootpane .bar i { animation: none; width: 100%; opacity: .55; }
+    #rotate { animation: none; opacity: 1; }
+  }
 </style>
+<noscript><style>#boot { display: none !important; }</style></noscript>
 </head>
 <body>
-<div id="stage"><canvas id="game"></canvas></div>
+
+<div id="stage">
+  <canvas id="game" width="960" height="540"
+          aria-label="차오른다 RISING — 물이 차오르는 협곡의 레인 전투 게임 화면">
+    이 게임은 HTML5 캔버스로 그려집니다. 사용 중인 브라우저가 캔버스를 지원하지 않아
+    화면을 표시할 수 없습니다. 최신 Chrome, Safari, Edge 에서 열어 주세요.
+  </canvas>
+</div>
+
+<p id="rotate" role="note"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7E9AA6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M12 4.2v-.2M12 20.2v-.2"/></svg>가로로 돌리면 전장이 넓게 보입니다</p>
+
+<div id="boot" class="bootpane" role="status" aria-live="polite">
+  <div class="tide" aria-hidden="true"></div>
+  <div class="body" id="bootBody">
+    <h1 class="brand">차오른다<span>RISING</span></h1>
+    <div class="bar" aria-hidden="true"><i></i></div>
+    <p class="cap">전장을 준비하는 중…</p>
+  </div>
+  <div class="fail" id="bootFail" hidden>
+    <h2>게임을 시작하지 못했습니다</h2>
+    <p>브라우저가 게임 코드를 불러오지 못했습니다. 네트워크를 확인하고 새로고침하거나,
+       최신 Chrome · Safari · Edge 에서 열어 주세요.</p>
+    <pre id="bootErr">원인을 확인할 수 없습니다.</pre>
+    <button type="button" id="bootRetry">다시 시도</button>
+  </div>
+</div>
+
+<noscript>
+  <div class="bootpane">
+    <div class="fail">
+      <h2>자바스크립트가 꺼져 있습니다</h2>
+      <p>「차오른다 RISING」은 자바스크립트로 동작합니다.
+         브라우저 설정에서 자바스크립트를 켠 뒤 새로고침해 주세요.</p>
+    </div>
+  </div>
+</noscript>
+
 <script type="module" src="./src/main.js"></script>
+
+<!-- ES 모듈을 지원하지 않는 브라우저 전용. 여기는 반드시 ES5 문법이어야 한다 —
+     화살표 함수 하나만 써도 이 스크립트 자체가 파싱되지 않는다. -->
+<script nomodule>
+(function () {
+  var b = document.getElementById('bootBody');
+  var f = document.getElementById('bootFail');
+  var e = document.getElementById('bootErr');
+  if (!b || !f) return;
+  b.hidden = true;
+  f.hidden = false;
+  f.getElementsByTagName('h2')[0].firstChild.nodeValue = '브라우저가 너무 오래된 버전입니다';
+  f.getElementsByTagName('p')[0].firstChild.nodeValue =
+    '이 게임은 ES 모듈을 사용합니다. 사용 중인 브라우저는 이를 지원하지 않습니다. Chrome, Safari, Edge, Samsung Internet 의 최신 버전에서 열어 주세요.';
+  if (e) e.firstChild.nodeValue = 'ES modules not supported by this browser (nomodule fallback)';
+})();
+</script>
+
+<!-- 부팅 감시자. 정상 경로에서는 오버레이를 한 번 지우고 스스로 전부 해제한다.
+     상시 도는 타이머·옵저버를 남기지 않는다. -->
+<script>
+(function () {
+  'use strict';
+  var boot = document.getElementById('boot');
+  if (!boot) return;
+
+  var HARD_MS = 4500;      // 감지에 실패해도 여기서는 무조건 사라진다
+  var CONFIRM_MS = 700;    // 예외를 본 뒤 "그래도 살아났는가"를 확인하는 유예
+  var done = false;        // 오버레이가 이미 치워졌는가
+  var failed = false;
+  var raf = window.requestAnimationFrame ? window.requestAnimationFrame.bind(window) : null;
+  var hardTimer = 0;
+
+  // 게임이 실제로 붙었는지 판정한다.
+  // 주의: 캔버스의 기본 크기는 0 이 아니라 300x150 이다. 그래서 width>0 만으로는
+  // main.js 가 돌기 전에도 참이 되어 버린다. main.js 의 resize() 가 남기는
+  // 인라인 CSS 크기, 또는 모듈 평가 완료 표식(__rising)을 함께 본다.
+  function isReady() {
+    if (window.__rising) return true;
+    var c = document.getElementById('game');
+    return !!(c && c.style && c.style.width && c.width > 0);
+  }
+
+  function teardown() {
+    if (hardTimer) { clearTimeout(hardTimer); hardTimer = 0; }
+    try {
+      window.removeEventListener('error', onError, true);
+      window.removeEventListener('unhandledrejection', onReject);
+    } catch (_) {}
+  }
+
+  function dismiss() {
+    if (done) return;
+    done = true;
+    teardown();
+    boot.className = 'bootpane gone';
+    boot.setAttribute('aria-hidden', 'true');
+    var kill = function () {
+      if (boot.parentNode) boot.parentNode.removeChild(boot);
+    };
+    // transitionend 를 못 받는 경우(reduced-motion, 백그라운드 탭)를 위한 보험
+    setTimeout(kill, 420);
+    boot.addEventListener('transitionend', kill);
+  }
+
+  function showFail(msg) {
+    if (done || failed) return;
+    failed = true;
+    teardown();
+    var b = document.getElementById('bootBody');
+    var f = document.getElementById('bootFail');
+    var e = document.getElementById('bootErr');
+    if (e && msg) e.textContent = String(msg).slice(0, 400);
+    if (b) b.hidden = true;
+    if (f) f.hidden = false;
+    var r = document.getElementById('bootRetry');
+    if (r) r.addEventListener('click', function () { location.reload(); });
+  }
+
+  // 예외를 봤다고 곧바로 실패로 단정하지 않는다.
+  // data/*.json 이 막혀도 director 는 내장 폴백으로 살아난다 —
+  // 그런 상황에 실패 카드를 띄우면 없느니만 못하다.
+  // 자원(script/link) 로드 실패만 즉시 확정하고, 나머지는 유예 뒤 재확인한다.
+  function fatal(msg, immediate) {
+    if (done || failed) return;
+    if (immediate) { showFail(msg); return; }
+    setTimeout(function () {
+      if (done || failed) return;
+      if (isReady()) return;      // 살아났다. 없던 일로 한다
+      showFail(msg);
+    }, CONFIRM_MS);
+  }
+
+  function onError(ev) {
+    var t = ev.target;
+    if (t && t !== window && t.tagName) {
+      var tag = t.tagName.toUpperCase();
+      if (tag !== 'SCRIPT' && tag !== 'LINK') return;   // 그 외 자원은 치명적이지 않다
+      fatal('불러오지 못함: ' + (t.src || t.href || tag), true);
+      return;
+    }
+    var m = ev.message || (ev.error && ev.error.message) || '알 수 없는 오류';
+    if (ev.filename) {
+      m += '\n' + ev.filename + ':' + (ev.lineno || 0) + ':' + (ev.colno || 0);
+    }
+    fatal(m, false);
+  }
+
+  function onReject(ev) {
+    var r = ev.reason;
+    var m = (r && (r.message || r.toString && r.toString())) || '처리되지 않은 오류';
+    fatal('Unhandled rejection: ' + m, false);
+  }
+
+  window.addEventListener('error', onError, true);
+  window.addEventListener('unhandledrejection', onReject);
+
+  // 안전장치. 감지가 영원히 실패해도 로딩 화면이 계속 남지는 않는다.
+  //
+  // 여기서 그냥 dismiss 하면 **아무 예외도 안 나면서 게임이 안 붙는 경우**
+  // (모듈은 200으로 받았는데 내용이 비었다든지)에 심사자가 까만 화면만 본다.
+  // 그래서 준비됐으면 치우고, 아니면 이유를 적은 카드로 바꾼다.
+  // 다만 이건 **되돌릴 수 있는 판정**이다 — 느린 회선에서 4.5초를 넘겨 뒤늦게
+  // 살아나는 경우가 있으므로 카드를 띄운 뒤에도 폴링을 계속하고,
+  // 게임이 붙으면 카드째로 걷어낸다. 정상 플레이 위에 실패 카드를 덮는 것이
+  // 이 안전장치가 저지를 수 있는 가장 나쁜 실수다.
+  hardTimer = setTimeout(function () {
+    if (done || failed) return;
+    if (isReady()) dismiss();
+    else showFail('게임 코드를 ' + (HARD_MS / 1000) + '초 안에 시작하지 못했습니다. '
+                + '(모듈은 받았으나 초기화 신호 window.__rising 이 오지 않음)');
+  }, HARD_MS);
+
+  // 캔버스가 실제로 준비되는 순간을 폴링한다.
+  // 성공하면 스스로 멈춘다 — 상시 도는 rAF 를 남기지 않는다.
+  if (!raf) { setTimeout(function () { if (!failed) dismiss(); }, 900); return; }
+  var settle = 0;
+  var giveUpAt = (window.performance && performance.now ? performance.now() : 0) + HARD_MS * 4;
+  (function poll() {
+    if (done) return;                       // failed 여도 계속 본다. 늦게 살아날 수 있다
+    if (isReady()) {
+      // 한 프레임 더 준다. main.js 의 첫 draw 가 이 프레임 뒤에 온다.
+      if (++settle >= 2) { dismiss(); return; }
+    }
+    // 실패가 확정된 뒤에도 무한히 돌지는 않는다. 죽은 화면에서 rAF 를 계속
+    // 돌리면 배터리만 먹는다. 18초면 늦은 회복도 충분히 잡힌다.
+    if (failed && (window.performance && performance.now ? performance.now() : giveUpAt) > giveUpAt) return;
+    raf(poll);
+  })();
+})();
+</script>
+
 </body>
 </html>
