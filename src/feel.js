@@ -660,6 +660,8 @@ export class Feel {
 
       case E_STAGE_CLEAR: {
         // **"다음"이다.** 밝고 짧게 끝난다 — 앞으로 나아가는 느낌.
+        // 배너는 render 의 BAN_TXT 가 3칸뿐이라 못 쓰고 있었다. 이제 5칸이다.
+        if (C.BAN_STAGE !== undefined) this.banner(C.BAN_STAGE);
         const bx = C.BASE_R_X;
         const top = gy(bx) - C.BASE_H;
         this.freeze(C.HITSTOP_ERA, PR_ALWAYS);
@@ -675,6 +677,7 @@ export class Feel {
         // 길게 멈추고, 화면이 기울고(회전은 여기와 승패에만 있다),
         // 고리가 셋이다. 하나는 다음이고 셋은 마지막이다.
         this.freeze(C.HITSTOP_NUKE, PR_ALWAYS);
+        if (C.BAN_CAMPAIGN !== undefined) this.banner(C.BAN_CAMPAIGN);
         const lx = C.BASE_L_X, rx = C.BASE_R_X, mx = C.VIEW_W * 0.5;
         if (b === 1) {
           // 완주. 이 게임에서 가장 밝은 순간이다.

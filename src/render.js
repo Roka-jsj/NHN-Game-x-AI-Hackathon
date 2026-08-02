@@ -86,7 +86,9 @@ const PROFILE_UNKNOWN = '—';
 const KIND_NAME = ['공격', '방어', '경제'];
 const READY = '준비';
 
-const BAN_TXT = ['시대가 바뀌었다', '해일', '물이 차오른다'];
+// **config 의 BAN_* 코드와 길이가 반드시 같아야 한다.** 코드가 더 많으면
+// 화면에 `undefined` 가 찍힌다. 그려질 때 범위를 한 번 더 막는다.
+const BAN_TXT = ['시대가 바뀌었다', '해일', '물이 차오른다', '전투를 이겼다', '원정이 끝났다'];
 
 // ── 원정·사령관 (spec-v3 §3) ──
 // game.js 가 아직 이 필드를 안 줬으면 **아무것도 그리지 않는다.** 예외를 던지지 않는다.
@@ -3224,7 +3226,8 @@ export class Renderer {
     ctx.lineWidth = C.STROKE;
     ctx.font = FONT_BIG;
     ctx.fillStyle = col[C.rampIndex(fade)];
-    ctx.fillText(BAN_TXT[feel.bannerCode], HALF_W, y);
+    const banTxt = BAN_TXT[feel.bannerCode];
+    if (banTxt) ctx.fillText(banTxt, HALF_W, y);
     ctx.textBaseline = 'top';
   }
 

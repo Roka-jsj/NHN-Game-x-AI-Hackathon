@@ -484,6 +484,12 @@ export const BANNER_MS = 1100;
 export const BAN_ERA = 0;
 export const BAN_NUKE = 1;
 export const BAN_WATER = 2;
+// 원정이 생기면서 두 순간이 더 생겼다. **render 의 BAN_TXT 와 길이가 같아야 한다** —
+// 코드만 늘리고 문구를 안 늘리면 화면에 그대로 `undefined` 가 찍힌다.
+// 게임필이 이 이유로 배너를 못 쓰고 고리·섬광으로만 구분하고 있었다.
+export const BAN_STAGE = 3;
+export const BAN_CAMPAIGN = 4;
+export const BAN_COUNT = 5;
 export const FLASH_FRAMES = 4;
 
 // ─── 팔레트 — 정확히 6색 ──────────────────────────────────────
