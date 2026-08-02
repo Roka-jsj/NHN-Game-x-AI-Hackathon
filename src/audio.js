@@ -18,9 +18,9 @@ import { EV, S, SIDE_L } from './game.js';
 const MASTER_CAP = 0.7;
 
 // ─── 이벤트 코드 방어 ─────────────────────────────────────────
-// game.js 를 다른 사람이 동시에 고치고 있다. 16~19 가 아직 없을 수 있다.
-// 계약(spec-v2 §7)이 번호를 못 박아 뒀으므로 없으면 그 번호로 대신한다.
-// 기존 0~15 와 절대 겹치지 않으므로 오작동하지 않는다.
+// game.js 에 16~19 가 들어왔지만 이 우회로는 남겨 둔다.
+// 계약(spec-v2 §7)이 번호를 못 박아 뒀고, 기존 0~15 와 겹칠 수 없으므로
+// game.js 가 잠깐 되돌아가도 오디오는 터지지 않고 default 로 빠진다.
 const E_TOWER_FIRE  = EV.TOWER_FIRE  !== undefined ? EV.TOWER_FIRE  : 16;
 const E_SKILL       = EV.SKILL       !== undefined ? EV.SKILL       : 17;
 const E_TOWER_UP    = EV.TOWER_UP    !== undefined ? EV.TOWER_UP    : 18;
@@ -94,6 +94,12 @@ const MEL = [
 // 8마디마다 한 번, 마지막 마디에 채움 악구가 들어간다
 const MEL_FILL = Int8Array.of(4, 3, 4, 3, 2, 1, 2, 0);
 const ARPP = Int8Array.of(0, 2, 4, 2, 1, 3, 4, 3);
+// 기계 시대 진화 팡파르. 이벤트마다 배열을 새로 만들지 않는다
+const ERA4_SEQ = Float32Array.of(523.25, 698.46, 880, 1046.5, 1396.9, 1760);
+
+// 상성 타격이 초당 몇 번씩 터지면 소리가 기관총이 된다.
+// 이 간격 안에 겹치면 짧은 판(版)으로 대체한다 — 타격감은 남기고 비용만 줄인다.
+const COUNTER_DENSE = 0.085;
 
 // 구간별 층 게인 배수 — 판 안에서 곡이 자라야 한다.
 // 도입을 35초로 뒀더니 판의 앞 3분의 1이 베이스만 남아 비었다.
@@ -124,6 +130,7 @@ export class Audio {
 
     // BGM 층. 전부 지속 노드다 — 만들고 나면 게인·주파수만 만진다.
     this.bgm = null;
+    this.tCounter = 0;      // 마지막 상성 타격음 시각. 난전에서 소리를 솎는다
   }
 
   // 첫 사용자 제스처에서 반드시 불려야 한다.
@@ -603,7 +610,7 @@ export class Audio {
       this.blip('sawtooth', 587.33, 587.33, 150, 0.085, 0.30, 2600);
       this.blip('sawtooth', 783.99, 783.99, 340, 0.095, 0.40, 3200);
     } else {                // 기계 — 사각파 급속 아르페지오 + 래칫. 차갑다
-      const seq = [523.25, 698.46, 880, 1046.5, 1396.9, 1760];
+      const seq = ERA4_SEQ;
       for (let i = 0; i < seq.length; i++) {
         this.blip('square', seq[i], seq[i], 90, 0.070, i * 0.055, 5200);
         this.nz(26, 0.030, 5000, 3200, 'bandpass', i * 0.055, 8);
@@ -665,9 +672,19 @@ export class Audio {
         // **상성 우위.** 일반 타격(28ms 노이즈 한 장)과 확실히 달라야 한다.
         // 날카로운 파열 + 급강하 + 짧은 울림 + 배를 치는 서브. "제대로 먹혔다".
         // b = 때린 진영. 내가 먹였으면 밝게 울리고, 내가 맞았으면 낮고 둔탁하다.
+        if (!this.ready) break;
         const mine = b === SIDE_L;
         const p = mine ? 1 : 0.62;
         const v = mine ? 1 : 0.8;
+        // 난전에서는 초당 예닐곱 번 터진다. 그대로 다 내면 기관총이 된다.
+        const now = this.ctx.currentTime;
+        const dense = now - this.tCounter < COUNTER_DENSE;
+        this.tCounter = now;
+        if (dense) {
+          this.nz(55, 0.075 * v, 5200 * p, 1000, 'bandpass', 0, 1.6);
+          this.blip('square', 1050 * p, 320 * p, 55, 0.055 * v, 0);
+          break;
+        }
         this.nz(95, 0.125 * v, 5400 * p, 800, 'bandpass', 0, 1.6);
         this.blip('square', 1150 * p, 260 * p, 95, 0.095 * v, 0);
         // 울림은 내가 먹였을 때만. 이게 "제대로 먹혔다"의 정체다

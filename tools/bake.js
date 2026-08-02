@@ -91,13 +91,17 @@ const INTENT = {
 
 // 프로파일별 기본 구성 — [검사, 창병, 궁수, 기병, 거인, 투석기]
 // src/director.js 의 BUILTIN_POLICY 와 같은 표다. 여기가 구워져 policy.json 이 된다.
+// ★ 가중치 0 은 "안 뽑는다"가 아니라 **"이 종류로 때우지도 않는다"**이다.
+//   game.js 는 뽑기로 정한 유닛을 못 사면 가중치가 있는 것 중 가장 싼 것으로 때운다.
+//   벽을 세우라는 정책에 검사를 1이라도 남기면 적의 74%가 검사가 된다(계측함).
+//   프로파일마다 **가장 싼 가중치 유닛이 그 성향의 유닛**이어야 한다.
 const POLICY = {
   RUSHER: {
-    mix: [1, 3, 3, 0, 8, 1], tempo: 1900, goldMul: 1.0, eraThresh: 1.0,
+    mix: [0, 3, 3, 0, 8, 1], tempo: 1900, goldMul: 1.3, eraThresh: 1.0,
     waterMul: 0.9, draftSlant: 1, counterGain: 4, preferTags: ['wall', 'mix'],
   },
   TURTLE: {
-    mix: [1, 0, 6, 1, 0, 5], tempo: 1150, goldMul: 1.05, eraThresh: 1.0,
+    mix: [0, 0, 6, 1, 0, 5], tempo: 1150, goldMul: 1.2, eraThresh: 1.0,
     waterMul: 1.35, draftSlant: 0, counterGain: 3, preferTags: ['ranged', 'mix'],
   },
   ECONOMIST: {
@@ -105,7 +109,7 @@ const POLICY = {
     waterMul: 1.0, draftSlant: 1, counterGain: 3, preferTags: ['rush', 'mix'],
   },
   SWARMER: {
-    mix: [0, 1, 5, 0, 7, 2], tempo: 1700, goldMul: 1.0, eraThresh: 0.9,
+    mix: [0, 0, 6, 0, 7, 3], tempo: 1700, goldMul: 1.25, eraThresh: 0.9,
     waterMul: 1.0, draftSlant: 0, counterGain: 5, preferTags: ['heavy', 'mix'],
   },
   // 균형에서 레버를 완전 중립으로 두면 디렉터는 대부분의 판에서 장식이 된다.

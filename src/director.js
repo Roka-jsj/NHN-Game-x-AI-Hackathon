@@ -141,19 +141,26 @@ const FALLBACK_POLICY = {
 // mix = [검사, 창병, 궁수, 기병, 거인, 투석기]
 // counterGain = 플레이어 구성에 반응해 상성 유닛에 더 얹는 총 가중치.
 //   0이면 "구성을 안 본다". 클수록 플레이어가 뽑는 것에 직접 맞받는다.
+// ★ 계측에서 배운 규칙: **가중치 0 은 "안 뽑는다"가 아니라 "이 종류로 때우지도
+//   않는다"이다.** game.js 는 뽑기로 정한 유닛을 못 사면 잠시 기다렸다가
+//   *가중치가 있는 것 중 가장 싼 것*으로 때운다. 그래서 벽을 세우라는 정책에
+//   검사 가중치를 1이라도 남기면, 적의 수입으로는 검사만 계속 나와
+//   구성이 통째로 무너진다 (첫 계측에서 적의 74%가 검사였다).
+//   그래서 프로파일마다 **가장 싼 가중치 유닛이 그 성향에 맞는 유닛**이 되게 짠다.
 const BUILTIN_POLICY = {
   // 돌격형 — 쉬지 않고 쏟아붓는다. 그러면 **벽을 세워 소모를 강요한다.**
   // 거인이 앞을 막고 창병이 기병 돌파를 끊고 궁수가 뭉친 근접을 녹인다.
-  // 템포는 느리다 — 비싼 벽을 세우는 쪽이 급할 이유가 없다.
+  // 검사 0 — 못 사서 때울 때도 창병이어야 벽이 유지된다.
+  // 템포는 느리다. 비싼 벽은 수가 적고, 대신 하나하나가 안 죽는다.
   RUSHER: {
-    mix: [1, 3, 3, 0, 8, 1], tempo: 1900, goldMul: 1.0, eraThresh: 1.0,
+    mix: [0, 3, 3, 0, 8, 1], tempo: 1900, goldMul: 1.3, eraThresh: 1.0,
     waterMul: 0.9, draftSlant: 1, counterGain: 4, preferTags: ['wall', 'mix'],
   },
   // 수비형 — 웅크린다. **원거리로 찔러 끌어내고 물을 빠르게 민다.**
   // 투석기는 기지 피해 배수(U_BASE_MUL)가 붙어 있다 — 웅크리면 기지가 깎인다.
-  // 나오지 않으면 손해가 쌓이게 만드는 것이 요점이다.
+  // 근접은 0이다. 웅크린 상대에게 근접을 보내면 그건 상대가 원하는 판이다.
   TURTLE: {
-    mix: [1, 0, 6, 1, 0, 5], tempo: 1150, goldMul: 1.05, eraThresh: 1.0,
+    mix: [0, 0, 6, 1, 0, 5], tempo: 1150, goldMul: 1.2, eraThresh: 1.0,
     waterMul: 1.35, draftSlant: 0, counterGain: 3, preferTags: ['ranged', 'mix'],
   },
   // 경제형 — 진화가 앞선다. **진화가 끝나기 전에 싼 유닛으로 두들긴다.**
@@ -163,9 +170,10 @@ const BUILTIN_POLICY = {
     waterMul: 1.0, draftSlant: 1, counterGain: 3, preferTags: ['rush', 'mix'],
   },
   // 물량형 — 싼 유닛만 뽑는다. **큰 유닛으로 숫자를 무의미하게 만든다.**
-  // 거인이 좁은 전선을 막고, 궁수가 검사를 상성으로 녹이고, 투석기가 뒤에서 쓴다.
+  // 거인이 좁은 전선을 막고, 궁수가 검사를 상성으로 녹인다.
+  // 근접 싼 유닛(검사·창병)이 0이라 때울 때조차 궁수가 나온다 — 물량의 천적이다.
   SWARMER: {
-    mix: [0, 1, 5, 0, 7, 2], tempo: 1700, goldMul: 1.0, eraThresh: 0.9,
+    mix: [0, 0, 6, 0, 7, 3], tempo: 1700, goldMul: 1.25, eraThresh: 0.9,
     waterMul: 1.0, draftSlant: 0, counterGain: 5, preferTags: ['heavy', 'mix'],
   },
   // 균형 — 성향이 안 잡힌 상태다. 여기서 레버를 중립으로 두면 디렉터는
@@ -432,10 +440,14 @@ export class Director {
     const swarm = this.metricSwarm;
     const tower = this.metricTower;
 
-    const raw = classify(aggro, hoard, econ, swarm, tower);
+    // 히스테리시스 — **판정을 바꾸려면 경계를 0.05 만큼 넘어야 한다.**
+    // 유지하는 데는 아무 조건도 없다. 예전에는 "아무 지표든 아무 경계 근처면
+    // 직전 판정을 유지"였는데, 경계가 일곱 개라 지표 하나가 우연히 어딘가에
+    // 걸치면 **판정이 통째로 얼어붙었다** — 기병만 뽑는 봇이 aggro 0.98 로
+    // 명백한 돌격형인데도 swarm 이 0.63(경계 0.66 근처)이라 균형에 갇혔다.
+    const raw = classify(aggro, hoard, econ, swarm, tower, 0);
     let next = raw;
-    if (raw !== this.profile && nearBoundary(aggro, hoard, econ, swarm, tower)) {
-      // 히스테리시스 — 경계값 ±0.05 안에서는 직전 프로파일을 유지한다.
+    if (raw !== this.profile && classify(aggro, hoard, econ, swarm, tower, C.HYSTERESIS) !== raw) {
       next = this.profile;
     }
     // 방금 바꿨으면 잠시 유지한다. 레버가 세계를 바꾼 결과를 보고 다시 판정해야
@@ -610,28 +622,22 @@ export class Director {
 //   BALANCED   그 사이 어디도 아니다 — 실제로 존재하는 넓은 영역이다
 const MID_AGGRO = (C.TH_AGGRO_HIGH + C.TH_AGGRO_LOW) * 0.5;
 
-function classify(aggro, hoard, econ, swarm, tower) {
+// eps 는 **들어가는 조건에만** 붙는다. 0이면 순수 판정, HYSTERESIS 면
+// "이 판정으로 갈아탈 만큼 확실한가"를 묻는 것이다.
+// 자격을 깎는 조건(econ 이 높으면 수비형이 아니다 같은)에는 안 붙인다 —
+// 거기 붙이면 경계에 걸친 사람이 어느 칸에도 못 들어간다.
+function classify(aggro, hoard, econ, swarm, tower, eps) {
+  const e = eps || 0;
   // 순서가 곧 우선순위다. 웅크리는 사람을 먼저 잡아야 한다 —
   // 물이 차오르는 게임에서 가장 위험한 습관이기 때문이다.
   // 단, **웅크리면서 진화는 앞서는 사람은 경제형이다.** 이 단서가 없으면
   // 경제형이 수비형에 통째로 먹혀 구조적으로 판정 불가능해진다.
-  if (aggro < C.TH_AGGRO_LOW && econ <= C.TH_ECON_HIGH
-      && (hoard > C.TH_HOARD_HIGH || tower > C.TH_HOARD_HIGH)) return 'TURTLE';
-  if (econ > C.TH_ECON_HIGH && aggro < MID_AGGRO) return 'ECONOMIST';
-  if (aggro > C.TH_AGGRO_HIGH && swarm > C.TH_SWARM_HIGH) return 'SWARMER';
-  if (aggro > C.TH_AGGRO_HIGH) return 'RUSHER';
+  if (aggro < C.TH_AGGRO_LOW - e && econ <= C.TH_ECON_HIGH
+      && (hoard > C.TH_HOARD_HIGH + e || tower > C.TH_HOARD_HIGH + e)) return 'TURTLE';
+  if (econ > C.TH_ECON_HIGH + e && aggro < MID_AGGRO) return 'ECONOMIST';
+  if (aggro > C.TH_AGGRO_HIGH + e && swarm > C.TH_SWARM_HIGH + e) return 'SWARMER';
+  if (aggro > C.TH_AGGRO_HIGH + e) return 'RUSHER';
   return 'BALANCED';
-}
-
-function nearBoundary(aggro, hoard, econ, swarm, tower) {
-  const m = C.HYSTERESIS;
-  return Math.abs(aggro - C.TH_AGGRO_HIGH) < m
-      || Math.abs(aggro - C.TH_AGGRO_LOW) < m
-      || Math.abs(aggro - MID_AGGRO) < m
-      || Math.abs(hoard - C.TH_HOARD_HIGH) < m
-      || Math.abs(tower - C.TH_HOARD_HIGH) < m
-      || Math.abs(econ - C.TH_ECON_HIGH) < m
-      || Math.abs(swarm - C.TH_SWARM_HIGH) < m;
 }
 
 // ── 스키마 검증 — 파손된 데이터는 폴백으로 간다 ───────────────

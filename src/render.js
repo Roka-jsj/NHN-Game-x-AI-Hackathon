@@ -151,6 +151,10 @@ export class Renderer {
     this.sw = new Float32Array(N);
     this.sh = new Float32Array(N);
     this.sflag = new Uint8Array(N);        // 1 = 상성 우위로 때리는 중
+    this.smY = new Float32Array(N);        // 시대 표식이 붙는 높이 (종류마다 다르다)
+    this.smR = new Float32Array(N);        // 그 표식의 크기
+    this.wtX = new Float32Array(N);        // 무기 끝 — 화약 시대 화염이 여기서 난다
+    this.wtY = new Float32Array(N);
     this.aliveN = 0;
     this.bucket = new Uint8Array(BUCKET_N * 2);
 
@@ -696,7 +700,6 @@ export class Renderer {
     for (let j = 0; j < n; j++) {
       const i = list[j];
       const era = game.uEra[i];
-      const kind = game.uKind[i];
       const dir = game.uSide[i] === SIDE_L ? 1 : -1;
       const x = sx[i], w = sw[i], h = sh[i];
       if (sf[i]) {
@@ -705,14 +708,10 @@ export class Renderer {
         this.addSpike(fx, cy - 6, dir, -0.22, 13, 4.5);
         this.addSpike(fx + dir * 8, cy + 5, dir, 0.22, 13, 4.5);
       }
-      if (era === 3 && game.uAttack[i] && kind !== C.U_CATA) {
-        this.addSpike(x + dir * w * 0.62, sgy[i] - h * 0.6, dir, -0.1, 11, 4);
+      if (era === 3 && game.uAttack[i]) {
+        this.addSpike(this.wtX[i], this.wtY[i], dir, -0.1, 12, 4.5);
       }
-      if (era === 4) {
-        const headTop = kind === C.U_CATA ? sgy[i] - h * 1.05
-          : (kind === C.U_CAV ? sgy[i] - h * 1.02 : sgy[i] - h * 0.9);
-        this.addCircle(x, headTop - w * 0.42, 2.6);
-      }
+      if (era === 4) this.addCircle(x, this.smY[i] - this.smR[i] * 0.5 - 3.4, 2.6);
     }
     ctx.fill();
 
@@ -776,54 +775,71 @@ export class Renderer {
     const lunge = atk > 0 ? dir * 4 : 0;
 
     // ── 투석기 — 사람이 아니라 기계다. 사람 골격을 쓰지 않는다 ──
+    // 바퀴 둘을 멀리 떼고 그 사이에 삼각 프레임을 세운다. 팔은 평형추를 달고 돈다.
     if (kind === C.U_CATA) {
-      const wr = h * 0.27;
+      const wr = h * 0.25;
       const axY = gy - wr;
-      const bx = x - dir * w * 0.30, fx = x + dir * w * 0.18;
+      const bx = x - dir * w * 0.36, fx = x + dir * w * 0.30;
       this.addCircle(bx, axY, wr);
-      this.addCircle(fx, axY, wr * 0.84);
-      this.addBar(bx, axY, dir, 0, w * 0.52, 4, 3.2, 3.2);        // 차대
-      const mastY = axY - h * 0.58;
-      this.addBar(x - dir * 2, axY, 0, -1, h * 0.58, 0, 3.4, 2.6); // 기둥
-      this.addBar(bx, axY - 2, dir * 0.72, -0.69, h * 0.5, 0, 2.6, 2.2); // 버팀대
-      const a = atk > 0 ? 0.55 : 2.3;
+      this.addCircle(fx, axY, wr * 0.76);
+      this.addBar(bx, axY, dir, 0, w * 0.70, 5, 3.4, 3.4);              // 차대
+      const mx = x - dir * w * 0.02;
+      const mastY = axY - h * 0.66;
+      this.addBar(mx, axY, 0, -1, h * 0.66, 0, 4.2, 2.8);               // 기둥
+      this.addBar(bx, axY - 3, dir * 0.62, -0.78, h * 0.62, 0, 2.6, 2); // 뒤 버팀대
+      this.addBar(fx, axY - 3, -dir * 0.52, -0.85, h * 0.5, 0, 2.4, 1.8); // 앞 버팀대
+      const a = atk > 0 ? 0.5 : 2.35;
       const c = Math.cos(a), s = Math.sin(a);
-      this.addBar(x - dir * 2, mastY, dir * c, -s, h * 0.72, 6, 3, 2);
-      this.addCircle(x - dir * 2 + dir * c * h * 0.72, mastY - s * h * 0.72, 4.4); // 투척 바구니
-      if (era >= 1) this.addEraMark(x, mastY - 8, w * 0.3, era, dir);
-      if (era === 3 && atk) this.addSpike(x - dir * 2 + dir * c * h * 0.8, mastY - s * h * 0.8, dir * c, -s, 10, 4);
+      const ax2 = dir * c, ay2 = -s;
+      this.addBar(mx, mastY, ax2, ay2, h * 0.80, h * 0.30, 3.2, 2);     // 던지는 팔
+      const tipX = mx + ax2 * h * 0.80, tipY = mastY + ay2 * h * 0.80;
+      this.addCircle(tipX, tipY, 4.6);                                   // 투척 바구니
+      this.addBar(mx - ax2 * h * 0.30, mastY - ay2 * h * 0.30, ax2, ay2, 8, 0, 6, 6); // 평형추
+      this.smY[i] = mastY - 10; this.smR[i] = w * 0.26;
+      this.wtX[i] = tipX; this.wtY[i] = tipY;
+      if (era >= 1) this.addEraMark(mx, this.smY[i], this.smR[i], era, dir);
       return;
     }
 
-    // ── 기병 — 말 위. 폭이 넓고 낮다. 네 다리가 달린다 ──
+    // ── 기병 — 말 위. 폭이 넓고 낮다. 목이 앞으로 길게 나가고 네 다리가 달린다 ──
     if (kind === C.U_CAV) {
-      const bodyH = h * 0.26;
-      const bodyY = gy - h * 0.60;
-      const bodyW = w * 0.86;
+      const bodyH = h * 0.28;
+      const bodyY = gy - h * 0.58;
+      const bodyW = w * 0.80;
       const belly = bodyY + bodyH;
-      ctx.rect(x - bodyW * 0.5 + lunge, bodyY, bodyW, bodyH);
+      const cxb = x + lunge;
+      ctx.rect(cxb - bodyW * 0.5, bodyY, bodyW, bodyH);
       // 네 다리 — 앞뒤가 엇갈려 달린다
-      const g1 = walk * 0.55, g2 = -walk * 0.55;
-      this.addBar(x + lunge + dir * bodyW * 0.34, belly, Math.sin(g1) * dir, Math.cos(g1), h * 0.38, 0, 2.4, 1.8);
-      this.addBar(x + lunge + dir * bodyW * 0.22, belly, Math.sin(g2) * dir, Math.cos(g2), h * 0.38, 0, 2.4, 1.8);
-      this.addBar(x + lunge - dir * bodyW * 0.34, belly, Math.sin(g2) * dir, Math.cos(g2), h * 0.38, 0, 2.4, 1.8);
-      this.addBar(x + lunge - dir * bodyW * 0.22, belly, Math.sin(g1) * dir, Math.cos(g1), h * 0.38, 0, 2.4, 1.8);
-      // 목과 머리 — 앞으로 낮게 뻗는다
-      const nx = x + lunge + dir * bodyW * 0.42, ny = bodyY + bodyH * 0.3;
-      this.addBar(nx, ny, dir * 0.72, -0.69, h * 0.3, 3, 4.5, 3);
-      const hx = nx + dir * 0.72 * h * 0.3, hy = ny - 0.69 * h * 0.3;
-      this.addBar(hx, hy, dir * 0.95, -0.31, h * 0.17, 2, 3, 2.4);
+      const g1 = walk * 0.6, g2 = -walk * 0.6;
+      const s1 = Math.sin(g1) * dir, c1 = Math.cos(g1);
+      const s2 = Math.sin(g2) * dir, c2 = Math.cos(g2);
+      this.addBar(cxb + dir * bodyW * 0.36, belly, s1, c1, h * 0.34, 0, 2.6, 1.8);
+      this.addBar(cxb + dir * bodyW * 0.24, belly, s2, c2, h * 0.34, 0, 2.6, 1.8);
+      this.addBar(cxb - dir * bodyW * 0.36, belly, s2, c2, h * 0.34, 0, 2.6, 1.8);
+      this.addBar(cxb - dir * bodyW * 0.24, belly, s1, c1, h * 0.34, 0, 2.6, 1.8);
+      // 목 — 가슴에서 앞위로 길게. 이게 있어야 말로 읽힌다
+      const nx = cxb + dir * bodyW * 0.42, ny = bodyY + bodyH * 0.5;
+      this.addBar(nx, ny, dir * 0.56, -0.83, h * 0.38, 3, 5, 3.4);
+      const hx2 = nx + dir * 0.56 * h * 0.38, hy2 = ny - 0.83 * h * 0.38;
+      this.addBar(hx2, hy2, dir * 0.90, 0.44, h * 0.22, 3, 3.6, 2.4);   // 머리는 앞아래로
+      this.addBar(hx2, hy2 - 2, -dir * 0.3, -0.95, h * 0.08, 0, 1.6, 1); // 귀
       // 꼬리
-      this.addBar(x + lunge - dir * bodyW * 0.5, bodyY + 3, -dir * 0.82, -0.57, h * 0.2, 0, 2.4, 1);
-      // 기수
-      const rY = bodyY - h * 0.30;
-      ctx.rect(x + lunge - w * 0.10, rY, w * 0.22, h * 0.32);
-      this.addCircle(x + lunge + dir * w * 0.02, rY - w * 0.17, w * 0.17);
+      this.addBar(cxb - dir * bodyW * 0.5, bodyY + 3, -dir * 0.78, -0.63, h * 0.24, 0, 2.6, 1);
+      // 기수 — 말등에 앉는다
+      const rY = bodyY - h * 0.32;
+      ctx.rect(cxb - w * 0.12, rY, w * 0.24, h * 0.34);
+      const rhR = w * 0.18;
+      this.addCircle(cxb + dir * w * 0.03, rY - rhR * 0.9, rhR);
       // 창 — 앞아래로 겨눈다. 공격하면 더 뻗는다
-      const la = atk > 0 ? -0.12 : 0.06;
-      this.addBar(x + lunge + w * 0.02 * dir, rY + h * 0.1, dir * Math.cos(la), -Math.sin(la),
-                  h * 0.85 + (atk > 0 ? 8 : 0), w * 0.4, 2.2, 1.6);
-      if (era >= 1) this.addEraMark(x + lunge + dir * w * 0.02, rY - w * 0.34, w * 0.17, era, dir);
+      const la = atk > 0 ? -0.10 : 0.08;
+      const lc = Math.cos(la), ls = Math.sin(la);
+      const lpx = cxb + dir * w * 0.06, lpy = rY + h * 0.14;
+      const llen = h * 0.88 + (atk > 0 ? 9 : 0);
+      this.addBar(lpx, lpy, dir * lc, -ls, llen, w * 0.42, 2.4, 1.6);
+      this.addSpike(lpx + dir * lc * llen, lpy - ls * llen, dir * lc, -ls, 10, 3.6);
+      this.smY[i] = rY - rhR * 1.9; this.smR[i] = rhR;
+      this.wtX[i] = lpx + dir * lc * llen; this.wtY[i] = lpy - ls * llen;
+      if (era >= 1) this.addEraMark(cxb + dir * w * 0.03, this.smY[i], rhR, era, dir);
       return;
     }
 
@@ -844,12 +860,14 @@ export class Renderer {
     const hx = x + lunge + dir * bw * 0.5;
 
     if (kind === C.U_SWORD) {
-      // 칼 — 들었다가 내려친다. 반대 손에 둥근 방패
-      const a = atk > 0 ? -0.35 : 0.95;
+      // 칼 — 높이 들었다가 내려친다. 반대 손에 둥근 방패.
+      // 칼과 방패가 겹치면 둘 다 안 읽힌다. 칼은 위, 방패는 아래앞에 둔다.
+      const a = atk > 0 ? -0.5 : 1.25;
       const c = Math.cos(a), s = Math.sin(a);
-      this.addBar(hx, handY, dir * c, -s, h * 0.50, 7, 2.4, 1.4);
-      this.addBar(hx, handY, s, dir * c, 6, 6, 1.8, 1.8);   // 손잡이 가드
-      this.addCircle(x + lunge + dir * bw * 0.62, handY + torsoH * 0.25, w * 0.30);
+      this.addBar(hx, handY - 3, dir * c, -s, h * 0.52, 7, 2.6, 1.4);
+      this.addBar(hx, handY - 3, s, dir * c, 6, 6, 1.8, 1.8);   // 손잡이 가드
+      this.addCircle(x + lunge + dir * bw * 0.72, handY + torsoH * 0.42, w * 0.32);
+      this.wtX[i] = hx + dir * c * h * 0.52; this.wtY[i] = handY - 3 - s * h * 0.52;
     } else if (kind === C.U_SPEAR) {
       // 창 — **몸 길이보다 앞으로 더 나간다.** 이게 사거리다
       const a = atk > 0 ? 0.02 : 0.13;
@@ -859,22 +877,26 @@ export class Renderer {
       this.addBar(px, handY, dir * c, -s, len, w * 0.62, 2.2, 2.0);
       this.addSpike(px + dir * c * len, handY - s * len, dir * c, -s, 12, 4.2);
       ctx.rect(x - bw * 0.62 + lunge, shY + torsoH * 0.12, bw * 0.24, torsoH * 0.6); // 작은 방패
+      this.wtX[i] = px + dir * c * (len + 12); this.wtY[i] = handY - s * (len + 12);
     } else if (kind === C.U_ARCHER) {
       // 화살 — 시위에 걸려 있다. 활은 선으로 따로 그린다
-      this.addBar(x + lunge + dir * bw * 0.1, handY, dir, 0, h * 0.38, 0, 1.3, 1.3);
-      this.addBar(x + lunge - dir * bw * 0.35, shY + 2, -dir * 0.34, -0.94, h * 0.26, 0, 3, 2.4); // 화살통
+      this.addBar(x + lunge - dir * bw * 0.2, handY, dir, 0, h * 0.5, 0, 1.4, 1.4);
+      this.addBar(x + lunge - dir * bw * 0.35, shY + 2, -dir * 0.34, -0.94, h * 0.30, 0, 3.2, 2.4); // 화살통
+      this.wtX[i] = x + lunge + dir * (bw * 0.2 + h * 0.3); this.wtY[i] = handY;
     } else {
       // 거인 — 어깨판과 몽둥이. 끝이 두꺼워야 무게가 보인다
       ctx.rect(x - w * 0.52 + lunge, shY - 3, w * 1.04, h * 0.11);
       const a = atk > 0 ? -0.45 : 0.55;
       const c = Math.cos(a), s = Math.sin(a);
       this.addBar(hx, handY, dir * c, -s, h * 0.42, 6, 3, 7);
+      this.wtX[i] = hx + dir * c * h * 0.42; this.wtY[i] = handY - s * h * 0.42;
     }
 
     // 시대 — 어깨·등의 실루엣도 같이 바뀐다
     if (era >= 2) ctx.rect(x - bw * 0.78 + lunge, shY - 2, bw * 1.56, h * 0.055);
     if (era >= 4) ctx.rect(x - dir * bw * 0.78 + lunge, shY + 3, bw * 0.5, torsoH * 0.62);
-    if (era >= 1) this.addEraMark(x + lunge, shY - headR * 1.8, headR, era, dir);
+    this.smY[i] = shY - headR * 1.8; this.smR[i] = headR;
+    if (era >= 1) this.addEraMark(x + lunge, this.smY[i], headR, era, dir);
   }
 
   // 머리 위 시대 표식 — 다섯 시대가 서로 달라야 한다
@@ -905,18 +927,20 @@ export class Renderer {
     const lunge = atk > 0 ? dir * 4 : 0;
 
     if (kind === C.U_CATA) {
-      const wr = h * 0.27, axY = gy - wr;
-      const bx = x - dir * w * 0.30, fx = x + dir * w * 0.18;
+      const wr = h * 0.25, axY = gy - wr;
+      const bx = x - dir * w * 0.36, fx = x + dir * w * 0.30;
       this.addCircle(bx, axY, wr);
-      this.addCircle(fx, axY, wr * 0.84);
-      ctx.moveTo(bx - wr * 0.7, axY - wr * 0.7); ctx.lineTo(bx + wr * 0.7, axY + wr * 0.7);
-      ctx.moveTo(bx - wr * 0.7, axY + wr * 0.7); ctx.lineTo(bx + wr * 0.7, axY - wr * 0.7);
+      this.addCircle(fx, axY, wr * 0.76);
+      // 바큇살 — 굴러가는 물건이라는 것을 이 두 줄이 말한다
+      const sp = wr * 0.72;
+      ctx.moveTo(bx - sp, axY - sp); ctx.lineTo(bx + sp, axY + sp);
+      ctx.moveTo(bx - sp, axY + sp); ctx.lineTo(bx + sp, axY - sp);
       return;
     }
     if (kind === C.U_CAV) {
-      const bodyH = h * 0.26, bodyY = gy - h * 0.60, bodyW = w * 0.86;
-      ctx.rect(x - bodyW * 0.5 + lunge, bodyY, bodyW, bodyH);
-      ctx.rect(x + lunge - w * 0.10, bodyY - h * 0.30, w * 0.22, h * 0.32);
+      const bodyH = h * 0.28, bodyY = gy - h * 0.58, bodyW = w * 0.80;
+      ctx.rect(x + lunge - bodyW * 0.5, bodyY, bodyW, bodyH);
+      ctx.rect(x + lunge - w * 0.12, bodyY - h * 0.32, w * 0.24, h * 0.34);
       return;
     }
     const giant = kind === C.U_GIANT;
@@ -939,24 +963,39 @@ export class Renderer {
     let f = this.fxSkill[C.SK_TIDE];
     if (f > 0) {
       const t = 1 - f / FX_TIDE_F;
-      const cx = -160 + (C.VIEW_W + 320) * easeOutCubic(t);
-      ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.55 * (1 - t * 0.7))];
+      const cx = -220 + (C.VIEW_W + 440) * easeOutCubic(t);
+      // 마루 — 뾰족한 산이 아니라 **물마루**여야 한다. 앞은 서고 뒤는 길게 끌린다
+      const R = 210, HGT = 118;
+      ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.5 * (1 - t * 0.55))];
       ctx.beginPath();
-      ctx.moveTo(cx - 170, C.VIEW_H);
-      for (let d = -170; d <= 170; d += 17) {
+      ctx.moveTo(cx - R, C.VIEW_H);
+      for (let d = -R; d <= R; d += 15) {
         const px = cx + d;
-        const k = 1 - Math.abs(d) / 170;
-        ctx.lineTo(px, groundAt(px) - 150 * k * k);
+        const k = d > 0 ? 1 - (d / R) * (d / R) * (d / R) : 1 - (d / R) * (d / R);
+        ctx.lineTo(px, groundAt(px) - HGT * (k > 0 ? Math.sqrt(k) : 0));
       }
-      ctx.lineTo(cx + 170, C.VIEW_H);
+      ctx.lineTo(cx + R, C.VIEW_H);
       ctx.closePath();
       ctx.fill();
-      // 물보라 — 마루 끝에서 튄다
-      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.55 * (1 - t))];
+      // 마루 위 흰 거품 — 물이라는 것을 이 선이 말한다
+      ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(0.7 * (1 - t))];
+      ctx.lineWidth = C.STROKE;
       ctx.beginPath();
-      for (let i = 0; i < 9; i++) {
-        const px = cx + (this.vOff[i] * 90);
-        const py = groundAt(px) - 150 * 0.6 - i * 9 - t * 40;
+      for (let d = -R; d <= R; d += 15) {
+        const px = cx + d;
+        const k = d > 0 ? 1 - (d / R) * (d / R) * (d / R) : 1 - (d / R) * (d / R);
+        const py = groundAt(px) - HGT * (k > 0 ? Math.sqrt(k) : 0);
+        if (d === -R) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+      // 물보라 — 마루 꼭대기에서 튄다
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.6 * (1 - t))];
+      ctx.beginPath();
+      for (let i = 0; i < 10; i++) {
+        const d = this.vOff[i] * 70;
+        const px = cx + d;
+        const k = 1 - (d / R) * (d / R);
+        const py = groundAt(px) - HGT * Math.sqrt(k) - 6 - (i * 7) - t * 26;
         ctx.rect(px, py, 4, 4);
       }
       ctx.fill();
@@ -967,13 +1006,17 @@ export class Renderer {
     if (f > 0) {
       const t = 1 - f / FX_VOLLEY_F;
       const bx = this.fxSkillX[C.SK_VOLLEY];
-      // 착탄 지대 — 두 벽
-      ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(0.75 * (1 - t))];
+      // 착탄 지대 — 지면에 그은 띠. 어디에 떨어지는지가 먼저 보여야 한다
+      ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(0.8 * (1 - t))];
       ctx.lineWidth = 2;
       ctx.beginPath();
+      for (let d = -C.VOLLEY_RADIUS; d <= C.VOLLEY_RADIUS; d += 24) {
+        const ex = bx + d;
+        if (d === -C.VOLLEY_RADIUS) ctx.moveTo(ex, groundAt(ex) - 2); else ctx.lineTo(ex, groundAt(ex) - 2);
+      }
       for (let s = -1; s <= 1; s += 2) {
         const ex = bx + s * C.VOLLEY_RADIUS;
-        ctx.moveTo(ex, groundAt(ex) - 130);
+        ctx.moveTo(ex, groundAt(ex) - 16);
         ctx.lineTo(ex, groundAt(ex));
       }
       ctx.stroke();
@@ -1243,10 +1286,12 @@ export class Renderer {
       // 아이콘 — 마지막 칸은 증원 원형 버튼에 가리므로 왼쪽으로 물린다
       this.drawBtnIcon(i, x + (i === C.BTN_COUNT - 1 ? 46 : C.BTN_W - 22), y + C.BTN_H * 0.60, lit);
 
+      // 첫 칸은 화면 왼쪽 밖에서 시작한다 (열 칸이 들어가느라). 글자는 안으로 민다
+      const tx = x < 0 ? 6 : x + 7;
       ctx.textAlign = 'left';
       ctx.font = FONT_BTN;
       ctx.fillStyle = base[C.rampIndex(ok ? 1 : 0.35)];
-      ctx.fillText(BTN_NAME[i], x + 7, y + 5);
+      ctx.fillText(BTN_NAME[i], tx, y + 5);
 
       ctx.font = FONT_TINY;
       ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.4)];
@@ -1256,20 +1301,20 @@ export class Renderer {
       const ly = y + C.BTN_H - 21;
       if (cost >= 0) {
         ctx.fillStyle = ok ? C.COL_BONUS : C.RAMP_BONUS[C.rampIndex(0.35)];
-        this.drawLeft(cost, x + 7, ly, 9);
+        this.drawLeft(cost, tx, ly, 9);
       } else if (i === C.B_ERA) {
         ctx.fillStyle = ready ? C.COL_BONUS : C.RAMP_PLAYER[C.rampIndex(0.35)];
-        ctx.fillText(ready ? READY : C.ERA_NAME[Math.min(C.ERA_COUNT - 1, game.era + 1)], x + 7, ly);
+        ctx.fillText(ready ? READY : C.ERA_NAME[Math.min(C.ERA_COUNT - 1, game.era + 1)], tx, ly);
       } else if (maxed) {
         ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.5)];
-        ctx.fillText(LABEL_MAX, x + 7, ly);
+        ctx.fillText(LABEL_MAX, tx, ly);
       } else {
         ctx.fillStyle = ok ? C.COL_BONUS : C.RAMP_PLAYER[C.rampIndex(0.35)];
-        if (ok) ctx.fillText(READY, x + 7, ly);
+        if (ok) ctx.fillText(READY, tx, ly);
         else {
           const sk = i === C.B_TIDE ? C.SK_TIDE : C.SK_VOLLEY;
           const raw = skillCd ? (skillCd[sk] || 0) : (game.nukeCd || 0);
-          this.drawLeft(Math.ceil(raw / 1000), x + 7, ly, 9);
+          this.drawLeft(Math.ceil(raw / 1000), tx, ly, 9);
         }
       }
     }
@@ -1370,11 +1415,12 @@ export class Renderer {
       ctx.fill();
     } else if (i === C.U_CATA) {
       ctx.beginPath();
-      this.addBar(cx - 9, cy + 5, 1, 0, 16, 0, 2.4, 2.4);
-      this.addBar(cx - 2, cy + 5, 0, -1, 12, 0, 2.4, 2);
-      this.addBar(cx - 2, cy - 7, -0.72, 0.69, 13, 2, 2, 1.6);
-      this.addCircle(cx - 9, cy + 5, 4.6);
-      this.addCircle(cx + 5, cy + 5, 3.6);
+      this.addCircle(cx - 8, cy + 7, 4.6);                        // 뒷바퀴
+      this.addCircle(cx + 7, cy + 7, 3.2);                        // 앞바퀴
+      this.addBar(cx - 8, cy + 7, 1, 0, 15, 0, 1.7, 1.7);         // 차대
+      this.addBar(cx - 1, cy + 7, 0, -1, 11, 0, 2, 1.6);          // 기둥
+      this.addBar(cx - 1, cy - 4, 0.64, -0.77, 12, 4, 1.8, 1.3);  // 던지는 팔
+      this.addCircle(cx + 6.7, cy - 13.2, 2.6);                   // 바구니
       ctx.fill();
     } else if (i === C.B_ERA) {
       ctx.beginPath();

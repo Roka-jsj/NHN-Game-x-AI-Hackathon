@@ -7,7 +7,7 @@
 //  - 루프 안에서 객체·배열·문자열을 만드는 것
 
 import * as C from './config.js';
-import { Game, ACT, S } from './game.js';
+import { Game, ACT, S, EV } from './game.js';
 import { Feel } from './feel.js';
 import { Renderer } from './render.js';
 import { Director } from './director.js';
@@ -250,7 +250,9 @@ requestAnimationFrame(frame);
 // 합성 클록 위에서 60Hz/120Hz 동일성을 재려면 이벤트 timeStamp를 우리가 정해야 하고,
 // 브라우저가 만든 이벤트의 timeStamp는 가짜 클록과 다른 시간축을 쓴다. 그래서 필요하다.
 window.__rising = {
-  game, feel, director, audio, renderer, C, ACT,
+  // EV 를 반드시 함께 노출한다. 없으면 검증 하네스가 이벤트 코드를 하드코딩하게 되고,
+  // 나중에 코드가 바뀌면 **경고 없이 틀린 숫자를 세게 된다.** 실제로 QA가 그 상태였다.
+  game, feel, director, audio, renderer, C, ACT, EV,
   inject(act, wallTs) { enqueue(act, wallTs); },
   setDirectorView(on) { directorView = !!on; },
   setMuted(on) { muted = !!on; audio.setMuted(muted); },
