@@ -208,19 +208,25 @@ const BUILTIN_POLICY = {
 //   "느린 사령관"이 아니라 "아무것도 안 나오는 사령관"이 된다.
 //   **소유가 갈린다: 스칼라는 config·game.js, 구성비는 디렉터.**
 //   여기 남은 eraThresh 는 game.js 가 levers 로만 받는 값이라 중복이 아니다.
-const PERSONA = [
-  // 0 무리 (SWARMER) — 싼 것을 빨리, 많이. 가장 읽기 쉬운 상대다 (가르치는 전투)
-  { mix: [8, 5, 2, 1, 0, 0], readW: 0.25, cg: 3, eraThresh: 1.05, tags: ['rush', 'mix'] },
-  // 1 쇄도 (RUSHER) — 빠른 것으로 계속 찌른다. 기병 중심
-  { mix: [4, 2, 0, 8, 1, 0], readW: 0.32, cg: 4, eraThresh: 1.00, tags: ['rush', 'mix'] },
-  // 2 금고 (ECONOMIST) — 모아서 비싼 것을 낸다. 진화가 가장 빠르다
-  { mix: [1, 1, 3, 2, 5, 4], readW: 0.42, cg: 4, eraThresh: 0.75, tags: ['heavy', 'mix'] },
-  // 3 성벽 (TURTLE) — 벽을 세우고 원거리로 갉는다. 물을 밀어 **시계**로 이긴다
-  { mix: [0, 5, 6, 0, 5, 3], readW: 0.42, cg: 4, eraThresh: 0.95, tags: ['wall', 'ranged'] },
-  // 4 거울 (BALANCED) — **플레이어를 읽고 따라온다.** 판독 지분이 가장 크고
+// ★ 인덱스가 아니라 **프로파일 이름**으로 건다. C.COMMANDER_PROFILE 은 config 에
+//   있고 config 는 메인 소유다 — 순서가 한 번 바뀌면 인덱스로 걸어 둔 인격은
+//   조용히 짝이 틀어진다 ("무리"라는 이름의 사령관이 기병 돌격을 한다).
+//   이름으로 걸면 순서가 바뀌어도 성격은 이름을 따라간다.
+const PERSONA_BY = {
+  // 무리 (SWARMER) — 싼 것을 빨리, 많이. 가장 읽기 쉬운 상대다 (가르치는 전투)
+  SWARMER: { mix: [8, 5, 2, 1, 0, 0], readW: 0.25, cg: 3, eraThresh: 1.05, tags: ['rush', 'mix'] },
+  // 쇄도 (RUSHER) — 빠른 것으로 계속 찌른다. 기병 중심
+  RUSHER: { mix: [4, 2, 0, 8, 1, 0], readW: 0.32, cg: 4, eraThresh: 1.00, tags: ['rush', 'mix'] },
+  // 금고 (ECONOMIST) — 모아서 비싼 것을 낸다. 진화가 가장 빠르다
+  ECONOMIST: { mix: [1, 1, 3, 2, 5, 4], readW: 0.42, cg: 4, eraThresh: 0.75, tags: ['heavy', 'mix'] },
+  // 성벽 (TURTLE) — 벽을 세우고 원거리로 갉는다. 물을 밀어 **시계**로 이긴다
+  TURTLE: { mix: [0, 5, 6, 0, 5, 3], readW: 0.42, cg: 4, eraThresh: 0.95, tags: ['wall', 'ranged'] },
+  // 거울 (BALANCED) — **플레이어를 읽고 따라온다.** 판독 지분이 가장 크고
   //   상성 대응이 가장 세다. 한 종류 도배는 여기서 반드시 벌을 받아야 한다
-  { mix: [3, 3, 3, 3, 2, 2], readW: 0.85, cg: 7, eraThresh: 0.90, tags: ['mix'] },
-];
+  BALANCED: { mix: [3, 3, 3, 3, 2, 2], readW: 0.85, cg: 7, eraThresh: 0.90, tags: ['mix'] },
+};
+// 이름을 못 받았을 때의 순서 폴백. 계약(§3)의 원정 순서다.
+const PERSONA_ORDER = ['SWARMER', 'RUSHER', 'ECONOMIST', 'TURTLE', 'BALANCED'];
 
 // ── 도배 처벌 계수 — "읽히면 손해" ───────────────────────────
 //
@@ -310,6 +316,7 @@ export class Director {
     // 예전과 똑같이 동작한다 (인격층 없이 판독층만).
     this.commanderIdx = -1;
     this.commanderProfile = null;
+    this.persona = null;      // 이름으로 고른 인격. null 이면 판독층만 돈다
     this.stage = 0;
     this.stageK = 1;
 
@@ -405,15 +412,21 @@ export class Director {
   // 서명은 계약이다: setCommander(사령관 인덱스, 전투 번호, 프로파일 이름).
   // **셋 다 없어도 안 죽는다.** game.js 가 아직 원정을 안 붙였으면 아예 안 불린다.
   setCommander(idx, stage, profileName) {
-    const n = PERSONA.length;
+    const n = PERSONA_ORDER.length;
     this.commanderIdx = Number.isInteger(idx) && idx >= 0 ? idx % n : -1;
     this.stage = Number.isInteger(stage) && stage >= 0 ? stage : 0;
     // 프로파일 이름은 game.js 가 주는 것을 그대로 믿지 않는다 — 오타 하나에
     // 정책이 통째로 BALANCED 로 떨어지면 원인을 아무도 못 찾는다.
+    // 이름 → config 표 → 순서 폴백 순으로 내려간다. 어디서 끊겨도 인격은 남는다.
     const p = typeof profileName === 'string' ? profileName : null;
-    this.commanderProfile = p && PROFILES.indexOf(p) >= 0
-      ? p : (this.commanderIdx >= 0 && C.COMMANDER_PROFILE
-        ? C.COMMANDER_PROFILE[this.commanderIdx] : null);
+    let name = p && PERSONA_BY[p] ? p : null;
+    if (!name && this.commanderIdx >= 0 && C.COMMANDER_PROFILE) {
+      const q = C.COMMANDER_PROFILE[this.commanderIdx];
+      if (typeof q === 'string' && PERSONA_BY[q]) name = q;
+    }
+    if (!name && this.commanderIdx >= 0) name = PERSONA_ORDER[this.commanderIdx];
+    this.commanderProfile = name;
+    this.persona = name ? PERSONA_BY[name] : null;
 
     // 스테이지 곡선을 **처벌 강도**에 태운다. 수입·체력 곡선은 game.js 소관이라
     // 여기서 또 곱하면 두 번 곱해진다 (계측에서 실제로 겪은 실패다).
@@ -642,7 +655,7 @@ export class Director {
     const p = this.policy[this.profile] || this.policy.BALANCED || FALLBACK_POLICY.BALANCED;
     const d = this.difficulty;
     // 사령관 인격. 원정이 안 붙었으면 null 이고, 그때는 예전과 똑같이 돈다.
-    const per = this.commanderIdx >= 0 ? PERSONA[this.commanderIdx] : null;
+    const per = this.persona || null;
 
     // 구운 웨이브가 있으면 판독층의 구성비를 거기서 가져온다 (계층2 산출물).
     // 없으면 정책의 기본 구성이다.
@@ -691,19 +704,22 @@ export class Director {
     const eraThresh = (per ? num(per.eraThresh, 1) : 1) * p.eraThresh
       * (1 - FOCUS_ERA * bite);
 
-    this.levers = {
-      mix: m,
-      tempo: Math.max(420, tempo),
-      goldMul,
-      eraThresh: Math.max(0.35, eraThresh),
-      waterMul: p.waterMul,
-      draftSlant: p.draftSlant,
-      preferTags: tags,
-      // ↓ game.js 가 아직 안 읽는다. 읽으면 사령관이 스킬·포탑까지 성격대로 쓴다.
-      //   (지금은 game.js 가 C.CMD_SKILL_MUL / C.CMD_TOWER 로 직접 정한다)
-      skillBias: 1 + 0.5 * bite,
-      towerWant: per && per.tags.indexOf('wall') >= 0 ? 2 : (this.stage > 1 ? 1 : 0),
-    };
+    // 레버 객체는 **한 번만 만들고 덮어쓴다.** 예전에는 여기서 매번 새로 만들었고
+    // 구간 경계에서만 불렸으니 9초에 하나였다. 지금은 3초마다 되읽으므로
+    // 판 하나에 40~80개가 된다. 게임이 이 객체를 들고 있으니 교체하면 참조도 튄다.
+    const lv = this.levers || (this.levers = {});
+    lv.mix = m;
+    lv.tempo = Math.max(420, tempo);
+    lv.goldMul = goldMul;
+    lv.eraThresh = Math.max(0.35, eraThresh);
+    lv.waterMul = p.waterMul;
+    lv.draftSlant = p.draftSlant;
+    lv.preferTags = tags;
+    // ↓ game.js 가 아직 안 읽는다. 읽으면 사령관이 스킬·포탑까지 **플레이어를 읽고**
+    //   쓴다 (지금은 C.CMD_SKILL_MUL / C.CMD_TOWER 로 성격만 정한다).
+    //   skillBias 는 "얼마나 자주" 가 아니라 "얼마나 읽혔는가"다 — 1.0~1.8.
+    lv.skillBias = 1 + 0.5 * bite;
+    lv.towerWant = per && per.tags.indexOf('wall') >= 0 ? 2 : (this.stage > 1 ? 1 : 0);
   }
 
   // ── 상성 대응 — "AI가 판단한다"의 가장 직접적인 증거 ─────────

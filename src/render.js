@@ -729,7 +729,6 @@ export class Renderer {
     // 한 번 구워 두고 한 번 붙인다. 시대가 바뀌거나 해상도가 바뀔 때만 다시 굽는다.
     this.paintBackground(game);
     this.drawRain(game);
-    this.drawTerritory(game);
     this.drawBase(game, SIDE_R);
     this.drawBase(game, SIDE_L);
     this.drawUnits(game, alpha);
@@ -927,44 +926,6 @@ export class Renderer {
       ctx.fillRect(0, C.GROUND_Y - 58 + i * 15, C.VIEW_W, 15);
     }
 
-  }
-
-  // ── 지배선 — 지면 자체가 진영을 말한다 ──────────────────────
-  // 난전에서 몸이 겹쳐도 **바닥은 안 겹친다.** 전선까지의 지면을 내 색으로,
-  // 그 너머를 적 색으로 칠하면 "어디까지가 내 편인가"가 글자 없이 읽힌다.
-  // 선 두 개와 표식 하나 — 그리기 호출 세 번이다.
-  drawTerritory(game) {
-    const ctx = this.ctx;
-    let fx = game.frontlineX ? game.frontlineX() : HALF_W;
-    if (!(fx > 0)) fx = HALF_W;
-    if (fx < 24) fx = 24; else if (fx > C.VIEW_W - 24) fx = C.VIEW_W - 24;
-
-    // **선이 아니라 띠로 채운다.** 긴 stroke 는 소프트웨어 래스터에서
-    // 눈에 띄게 비싸다 (실측: 이 한 줄이 avg +0.5ms · 초과 +5회였다).
-    // 같은 그림을 폴리곤 두 개의 fill 로 내면 그 비용이 사라진다.
-    for (let s = 0; s < 2; s++) {
-      const x0 = s ? fx : 0, x1 = s ? C.VIEW_W : fx;
-      ctx.fillStyle = s ? C.RAMP_STRUCT[C.rampIndex(0.62)] : C.RAMP_PLAYER[C.rampIndex(0.62)];
-      ctx.beginPath();
-      ctx.moveTo(x0, groundAt(x0) - 1);
-      for (let x = x0 + 48; x < x1; x += 48) ctx.lineTo(x, groundAt(x) - 1);
-      ctx.lineTo(x1, groundAt(x1) - 1);
-      ctx.lineTo(x1, groundAt(x1) + 3);
-      for (let x = x1 - 48; x > x0; x -= 48) ctx.lineTo(x, groundAt(x) + 3);
-      ctx.lineTo(x0, groundAt(x0) + 3);
-      ctx.closePath();
-      ctx.fill();
-    }
-    // 전선 말뚝 — 두 지배선이 맞닿는 자리
-    const gy = groundAt(fx);
-    ctx.fillStyle = C.COL_BONUS;
-    ctx.beginPath();
-    ctx.rect(fx - 1.5, gy - 22, 3, 24);
-    ctx.moveTo(fx, gy - 32); ctx.lineTo(fx + 7, gy - 25); ctx.lineTo(fx, gy - 18);
-    ctx.lineTo(fx - 7, gy - 25);
-    ctx.closePath();
-    ctx.fill();
-    ctx.lineWidth = C.STROKE;
   }
 
   // 비 — 물이 어디서 오는가. 수위가 오를수록 굵어진다.
@@ -1501,15 +1462,19 @@ export class Renderer {
       ctx.lineWidth = C.STROKE;
     }
 
-    // 2.5) 발판 — **진영을 방향으로 못 박는다.**
-    // 몸이 아무리 겹쳐도 지면선 아래 이 삼각형 줄은 안 겹친다.
-    // 오른쪽을 향한 흰 삼각형이 내 편, 왼쪽을 향한 회색이 적이다.
-    // 두 줄이 맞닿는 자리가 곧 전선이라 "어디까지가 내 편인가"가 한눈에 읽힌다.
+    // 2.5) 발판과 지배선 — **진영을 방향과 땅으로 못 박는다.**
+    // 몸이 아무리 겹쳐도 지면선의 이 줄은 안 겹친다. 오른쪽을 향한 흰 삼각형이
+    // 내 편, 왼쪽을 향한 회색이 적이다. 그리고 전선까지의 **지면 자체**를
+    // 같은 색으로 칠한다 — "어디까지가 내 편인가"가 글자 없이 읽힌다.
+    // 지배선을 따로 stroke 하면 그리기 호출이 둘 늘어난다. 색이 같으므로
+    // 같은 경로에 넣어 **호출을 늘리지 않고** 얻는다.
+    let fx = game.frontlineX ? game.frontlineX() : HALF_W;
+    if (!(fx > 0)) fx = HALF_W;
+    if (fx < 24) fx = 24; else if (fx > C.VIEW_W - 24) fx = C.VIEW_W - 24;
     for (let s = 0; s < 2; s++) {
       const dir = s === SIDE_L ? 1 : -1;
       ctx.fillStyle = s === SIDE_L ? C.COL_PLAYER : C.COL_STRUCT;
       ctx.beginPath();
-      let any = 0;
       for (let j = 0; j < n; j++) {
         const i = list[j];
         if (game.uSide[i] !== s) continue;
@@ -1518,9 +1483,16 @@ export class Renderer {
         ctx.lineTo(gx - dir * 3.5, gy - 4);
         ctx.lineTo(gx - dir * 3.5, gy + 4);
         ctx.closePath();
-        any = 1;
       }
-      if (any) ctx.fill();
+      const x0 = s ? fx : 0, x1 = s ? C.VIEW_W : fx;
+      ctx.moveTo(x0, groundAt(x0) - 1);
+      for (let x = x0 + 48; x < x1; x += 48) ctx.lineTo(x, groundAt(x) - 1);
+      ctx.lineTo(x1, groundAt(x1) - 1);
+      ctx.lineTo(x1, groundAt(x1) + 3);
+      for (let x = x1 - 48; x > x0; x -= 48) ctx.lineTo(x, groundAt(x) + 3);
+      ctx.lineTo(x0, groundAt(x0) + 3);
+      ctx.closePath();
+      ctx.fill();
     }
 
     // 3) 피격 — **몸 색으로 칠하지 않는다.** 밀집 전투에서 전원이 붉어지면
@@ -2484,10 +2456,6 @@ export class Renderer {
     // 지금 살아 있는 적 구성이다. 아이콘 줄은 카드에 구워져 있고 여기서는 막대만 칠한다.
     const mx = CMD_X + 10, mw = CMD_W - 20, cw = mw / C.UNIT_KINDS;
     const my = CMD_Y + 54, mh = 16;
-    ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.16)];
-    ctx.beginPath();
-    for (let k = 0; k < C.UNIT_KINDS; k++) ctx.rect(mx + cw * k + 2, my, cw - 4, mh);
-    ctx.fill();
     ctx.fillStyle = C.COL_STRUCT;
     ctx.beginPath();
     let anyF = 0;
@@ -2619,8 +2587,12 @@ export class Renderer {
     ctx.fillText(LBL_SLASH, tx + stageMax * 13 + 32, CMD_Y + 32);
     this.drawLeft(stageMax, tx + stageMax * 13 + 38, CMD_Y + 32, 7);
 
-    // 적 편성 아이콘 줄 — 막대는 매 프레임 위에 얹는다
+    // 적 편성 — 아이콘 줄과 막대 홈은 안 바뀐다. 여기 굽고 막대만 매 프레임 얹는다
     const mx = CMD_X + 10, mw = CMD_W - 20, cw = mw / C.UNIT_KINDS;
+    ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.16)];
+    ctx.beginPath();
+    for (let k = 0; k < C.UNIT_KINDS; k++) ctx.rect(mx + cw * k + 2, CMD_Y + 54, cw - 4, 16);
+    ctx.fill();
     for (let k = 0; k < C.UNIT_KINDS; k++) {
       this.drawMixIcon(k, mx + cw * (k + 0.5), CMD_Y + 83, C.RAMP_STRUCT[C.rampIndex(0.8)]);
     }

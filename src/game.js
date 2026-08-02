@@ -421,7 +421,14 @@ export class Game {
   spawnCooldown(kind) {
     return C.U_SPAWN_CD[kind] * (this.has('rush') ? 0.7 : 1);
   }
-  goldRate() { return C.GOLD_RATE * (this.has('mine') ? 1.3 : 1); }
+  // 수입과 지갑 크기는 **시대와 함께 큰다.** 상수로 두면 상한 420 이 화약·기계
+  // 시대(유닛 값 3.2~4.6배)에서 한 기도 못 사는 벽이 된다.
+  goldEraK() {
+    const b = C.GOLD_ERA_BONUS > 0 ? C.GOLD_ERA_BONUS : 0;
+    return 1 + this.era * b;
+  }
+  goldRate() { return C.GOLD_RATE * this.goldEraK() * (this.has('mine') ? 1.3 : 1); }
+  goldCap() { return C.GOLD_CAP * this.goldEraK(); }
   eraNeed() {
     return this.era + 1 < C.ERA_COUNT ? C.ERA_XP[this.era + 1] : -1;
   }
@@ -504,6 +511,13 @@ export class Game {
     this.goldSpentEra += need;
     this.eraScaleBase(SIDE_L, this.era - 1, this.era);
     this.gold += C.ERA_UP_GOLD;
+    // **적이 따라온다.** 내가 올린 순간 적의 다음 시대가 그만큼 가까워진다.
+    // 즉시 올려 주지는 않는다 — 적은 제 경제로 나머지를 채운 뒤에 올라온다.
+    // 그 몇 초의 격차가 시대 투자의 값어치다 (config 의 AI_ERA_CHASE 참조).
+    const chase = C.AI_ERA_CHASE > 0 ? C.AI_ERA_CHASE : 0;
+    if (chase > 0 && this.aiEra + 1 < C.ERA_COUNT) {
+      this.aiXp += C.AI_ERA_XP[this.aiEra + 1] * chase;
+    }
     // 진화는 판을 되돌리는 순간이다. 물이 크게 밀린다.
     this.water += C.WATER_ERA_PUSH;
     this.emit(EV.ERA_UP, this.era, SIDE_L);
@@ -669,7 +683,8 @@ export class Game {
   stepEconomy() {
     const dt = C.SIM_DT / 1000;
     this.gold += this.goldRate() * dt;
-    if (this.gold > C.GOLD_CAP) this.gold = C.GOLD_CAP;
+    const cap = this.goldCap();
+    if (this.gold > cap) this.gold = cap;
     if (this.gold > this.goldPeak) this.goldPeak = this.gold;
     this.goldSum += this.gold;
     this.goldSamples++;

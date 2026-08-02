@@ -4,15 +4,18 @@
 //   node tools/verify-chunks.js
 //
 // 보는 것:
-//   1. 생성자 — LLM 산출물인가, 자리표시자인가  ← 제일 먼저 본다
+//   1. **출처** — 몇 개가 저술이고 몇 개가 LLM 이고 몇 개가 자리표시자인가
+//      ← 제일 먼저 본다. 그리고 **generator 문자열이 실제 내용과 맞는지**까지 본다.
+//        (예전엔 25칸이 전부 실패해도 generator 가 openai 로 적혔다)
 //   2. 스키마 유효성 (mix 는 **길이 6**이다)
 //   3. **적이 나오기는 하는가** — mix 가 여섯 다 0이면 적이 한 명도 안 나온다
 //   4. **화면이 막히지 않는가** — tempo 가 너무 짧으면 유닛이 화면을 덮는다
 //   5. 난이도 단조성
 //   6. **프로파일별 구성이 실제로 갈리는가** ← 이게 "디렉터가 장식이 아니다"의 증거다
 //   7. **상성 대응이 실제로 작동하는가** — 플레이어 구성에 따라 적 구성이 움직이는가
-//   8. **때움 유닛** — 못 살 때 대신 나오는 유닛이 성향과 맞는가
-//   9. 중복률
+//   8. **때움 유닛** — 못 살 때 대신 나오는 유닛이 성향과 맞는가 (정책 + 웨이브 350개 전부)
+//   9. **태그가 웨이브를 죽이고 있지 않은가** — preferTags 와 안 겹치면 그 칸은 안 뽑힌다
+//  10. 중복률 · 칸 안 변형이 실제로 다른가
 //
 // 러너에서 배운 것을 그대로 가져온다: **치명 항목은 게임을 못 하게 만드는 것만**이다.
 // "밸런스가 이상하다"는 치명이 아니다. "적이 안 나온다"는 치명이다.
@@ -60,15 +63,62 @@ console.log('  유닛 순서   ' + (doc.unitOrder ? doc.unitOrder.join(' ') : '(
 console.log('  웨이브 수   ' + list.length + (list.length === 350 ? '  (5×5×14 = 350 충족)' : '  ← 350이 아니다'));
 console.log('');
 
-if (String(doc.generator || '').indexOf('placeholder') >= 0) {
-  console.log('  ████ 경고 ████');
-  console.log('  이 파일은 LLM 산출물이 아니라 오프라인 자리표시자다.');
-  console.log('  파이프라인·스키마·폴백 점검용이며, 이대로 제출하면');
-  console.log('  "LLM이 만든 350웨이브"는 사실이 아니게 된다.');
-  console.log('  제출 전에 OPENAI_API_KEY 로 다시 굽고 사람이 검수해라.');
+// ── 출처 — 이 도구에서 가장 중요한 항목 ──────────────────────
+// "LLM이 만들었다"고 말할 수 있는 범위가 정확히 어디까지인지를 숫자로 낸다.
+// 웨이브마다 src 가 붙어 있고, 그 합이 헤더의 provenance 와 맞아야 한다.
+// 맞지 않으면 **헤더가 거짓말을 하고 있다**는 뜻이라 치명으로 잡는다.
+const SRC_KR = { authored: '저술(LLM이 직접 씀)', llm: 'LLM API 응답', offline: '자리표시자(규칙 생성기)' };
+const srcCount = {};
+let noSrc = 0, noteCount = 0;
+for (const c of list) {
+  const s = c && typeof c.src === 'string' ? c.src : null;
+  if (!s) { noSrc++; continue; }
+  srcCount[s] = (srcCount[s] || 0) + 1;
+  if (typeof c.note === 'string' && c.note.trim()) noteCount++;
+}
+console.log('  출처 — "LLM이 만들었다"고 말할 수 있는 범위');
+if (noSrc === list.length) {
+  console.log('    웨이브에 src 가 없다. 옛 형식이다 — generator 문자열만 믿어야 한다.');
+  warn++;
+} else {
+  for (const k of Object.keys(srcCount).sort()) {
+    const n = srcCount[k];
+    console.log('    ' + (SRC_KR[k] || k).padEnd(24) + String(n).padStart(4) + '개  '
+      + (n / list.length * 100).toFixed(1) + '%');
+  }
+  if (noSrc) { console.log('    src 없음' + String(noSrc).padStart(20) + '개'); warn++; }
+  console.log('    설계 의도(note)가 붙은 웨이브   ' + noteCount + ' / ' + list.length);
+}
+
+// 헤더가 실제 내용과 맞는가
+const prov = doc.provenance || null;
+if (prov) {
+  let mismatch = 0;
+  for (const k of ['authored', 'llm', 'offline']) {
+    if ((prov[k] || 0) !== (srcCount[k] || 0)) mismatch++;
+  }
+  line('헤더 provenance 가 실제와 일치', mismatch === 0 ? 'ok' : '어긋남', mismatch === 0);
+  if (mismatch) fatal++;
+}
+const gen = String(doc.generator || '');
+const claimsLLM = gen.indexOf('openai') === 0;
+const gotLLM = srcCount.llm || 0;
+if (claimsLLM && gotLLM === 0 && noSrc !== list.length) {
   console.log('');
+  console.log('  ████ 치명 ████');
+  console.log('  generator 는 LLM 이라고 적혀 있는데 실제 모델 응답이 0개다.');
+  console.log('  이 상태로 제출하면 "LLM이 만든 350웨이브"는 사실이 아니게 된다.');
+  fatal++;
+}
+if ((srcCount.offline || 0) > 0) {
+  console.log('');
+  console.log('  ████ 경고 ████');
+  console.log('  자리표시자(규칙 생성기 산출)가 ' + srcCount.offline + '개 섞여 있다.');
+  console.log('  이건 의도를 갖고 설계된 웨이브가 아니라 기준 구성을 난수로 흔든 것이다.');
+  console.log('  제출본은 node tools/bake.js --authored 또는 실제 키로 다시 구워라.');
   warn++;
 }
+console.log('');
 
 // ── 스키마 · 적이 나오는가 · 화면이 막히지 않는가 ──────────────
 let badSchema = 0, badLen = 0, emptyMix = 0, tooFast = 0, tooSlow = 0;
@@ -268,6 +318,86 @@ if (!pol || !pol.policies || !Array.isArray(pol.counterMap)) {
   }
   line('성향과 어긋난 때움 유닛', offBrand, offBrand === 0);
   if (offBrand) warn++;
+}
+console.log('');
+
+// ── 웨이브 350개의 때움 유닛 ─────────────────────────────────
+// 위의 검사는 policy.json 의 정책 5개만 본다. 그런데 런타임에서 game.js 에
+// 실제로 넘어가는 구성은 **청크의 mix** 가 섞인 결과다. 청크 하나에 검사가
+// 1이라도 있으면 벽 프로파일의 때움이 검사로 뒤집힌다. 350개를 다 본다.
+{
+  const WANT = { RUSHER: 1, TURTLE: 2, ECONOMIST: 0, SWARMER: 2, BALANCED: 0 };
+  const bad = new Map();
+  for (const c of list) {
+    if (!c || !Array.isArray(c.mix) || c.mix.length !== UNIT_KINDS) continue;
+    const want = WANT[c.profile];
+    if (want === undefined) continue;
+    let cheap = -1;
+    for (let k = 0; k < UNIT_KINDS; k++) {
+      if (!(c.mix[k] > 0)) continue;
+      if (cheap < 0 || U_COST[k] < U_COST[cheap]) cheap = k;
+    }
+    if (cheap !== want) bad.set(c.profile, (bad.get(c.profile) || 0) + 1);
+  }
+  let tot = 0;
+  for (const v of bad.values()) tot += v;
+  line('때움이 성향과 어긋난 웨이브', tot + ' / ' + list.length + '개'
+    + (tot ? '  (' + [...bad.entries()].map(([p, n]) => p + ' ' + n).join(', ') + ')' : ''), tot === 0);
+  if (tot) warn++;
+}
+
+// ── 태그가 웨이브를 죽이고 있지 않은가 ────────────────────────
+// director.selectChunk() 는 policy.preferTags 로 먼저 거른다. 한 칸(프로파일×난이도)의
+// 14개가 전부 preferTags 와 안 겹치면 그 칸은 태그 필터에서 0개가 되고,
+// 디렉터는 태그 없는 후보로 물러선다 — 죽지는 않지만 **태그가 무의미해진다.**
+if (pol && pol.policies) {
+  let deadCells = 0, cells = 0, reachable = 0;
+  for (const p of profiles) {
+    const want = (pol.policies[p] && pol.policies[p].preferTags) || [];
+    for (let d = 0; d <= 4; d++) {
+      const sel = list.filter((c) => c.profile === p && c.difficulty === d);
+      if (!sel.length) continue;
+      cells++;
+      const hit = sel.filter((c) => Array.isArray(c.tags) && c.tags.some((t) => want.indexOf(t) >= 0));
+      reachable += hit.length;
+      if (hit.length === 0) deadCells++;
+    }
+  }
+  line('태그 필터에서 0개가 되는 칸', deadCells + ' / ' + cells + '칸', deadCells === 0);
+  console.log('    preferTags 로 뽑히는 웨이브   ' + reachable + ' / ' + list.length
+    + '  (나머지는 태그 없는 후보로 물러설 때만 나온다)');
+  if (deadCells) warn++;
+}
+
+// ── 칸 안의 14개가 실제로 다른가 ─────────────────────────────
+// "같은 구성을 세기만 다르게" 적은 칸을 잡는다. 한 칸이 사실상 한 웨이브면
+// 디렉터가 아무리 골라도 화면에는 같은 것이 나온다.
+{
+  let worst = ['', 9], thin = 0;
+  for (const p of profiles) {
+    for (let d = 0; d <= 4; d++) {
+      const sel = list.filter((c) => c.profile === p && c.difficulty === d
+        && Array.isArray(c.mix) && c.mix.length === UNIT_KINDS);
+      if (sel.length < 2) continue;
+      const uniq = new Set(sel.map((c) => c.mix.join(','))).size;
+      // 칸 안 평균 쌍별 L1 (구성비 기준)
+      const sh = sel.map((c) => norm(c.mix));
+      let s = 0, n2 = 0;
+      for (let i = 0; i < sh.length; i++) {
+        for (let j = i + 1; j < sh.length; j++) {
+          let dd = 0;
+          for (let k = 0; k < UNIT_KINDS; k++) dd += Math.abs(sh[i][k] - sh[j][k]);
+          s += dd; n2++;
+        }
+      }
+      const avg = n2 ? s / n2 : 0;
+      if (uniq < sel.length) thin++;
+      if (avg < worst[1]) worst = [p + ' 난이도 ' + d, avg];
+    }
+  }
+  line('칸 안에 같은 mix 가 있는 칸', thin + '칸', thin === 0);
+  console.log('    칸 안 평균 구성 거리가 가장 좁은 곳  ' + worst[0] + '  L1 ' + worst[1].toFixed(2));
+  if (thin) warn++;
 }
 console.log('');
 

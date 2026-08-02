@@ -174,6 +174,10 @@ window.addEventListener('touchmove', (e) => { if (e.cancelable) e.preventDefault
 // 이 아래로는 손가락이 안 맞는다. 태블릿 세로(768×1024, 0.80)는 그냥 둔다.
 const ROT_MIN_FIT = 0.55;
 const ROT_MIN_GAIN = 1.25;      // 눕혀서 이만큼 이상 커지지 않으면 눕힐 값어치가 없다
+// **돌릴 수 있는 기기에서만 눕힌다.** 데스크톱에서 창을 좁게 끌어 놓은 사람은
+// 모니터를 돌릴 수 없다 — 거기서 화면을 눕히면 고칠 방법이 없는 고장이 된다.
+const CAN_TURN = (window.matchMedia && window.matchMedia('(pointer: coarse)').matches)
+              || (navigator.maxTouchPoints | 0) > 0;
 let rotated = false;
 let viewFit = 1;
 let resizeQueued = false;
@@ -203,7 +207,7 @@ function resize() {
 
   const fitUp = Math.min(availW / C.VIEW_W, availH / C.VIEW_H);
   const fitRot = Math.min(availH / C.VIEW_W, availW / C.VIEW_H);
-  rotated = availH > availW && fitUp < ROT_MIN_FIT && fitRot >= fitUp * ROT_MIN_GAIN;
+  rotated = CAN_TURN && availH > availW && fitUp < ROT_MIN_FIT && fitRot >= fitUp * ROT_MIN_GAIN;
   const fit = rotated ? fitRot : fitUp;
   viewFit = fit;
 
@@ -214,6 +218,9 @@ function resize() {
   // 변환은 레이아웃 상자를 바꾸지 않는다. 눕히면 상자가 가로로 넘치지만
   // 시각 중심은 그대로고 body 가 overflow:hidden 이라 스크롤이 생기지 않는다.
   canvas.style.transform = rotated ? 'rotate(90deg)' : '';
+  // 눕힌 캔버스는 합성 레이어로 승격시킨다. 승격이 없으면 회전된 픽셀을 매 프레임
+  // 다시 래스터하고, 헤드리스 실측에서 프레임 간격 p95 가 16.8 → 33~50ms 로 벌어졌다.
+  canvas.style.willChange = rotated ? 'transform' : '';
   syncRotateHint();
 
   // 버퍼 크기를 대입하면 캔버스가 **지워진다.** 값이 바뀔 때만 건드린다 —
@@ -358,6 +365,8 @@ window.__rising = {
   get rotated() { return rotated; },         // 세로에서 캔버스를 눕혔는가
   get viewFit() { return viewFit; },         // 논리 1px 이 CSS 몇 px 인가
   get lastSteps() { return lastSteps; },     // 마지막 프레임의 시뮬 스텝 수
+  get directorView() { return directorView; },
+  get muted() { return muted; },
   get frameCount() { return frameCount; },
   get pointer() { return [ptrLX, ptrLY]; },  // 마지막으로 해석된 논리 좌표
   // 화면 좌표 → 논리 좌표. 실제 탭 좌표가 어디에 떨어지는지 밖에서 검산할 수 있게.
