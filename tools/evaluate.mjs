@@ -342,10 +342,15 @@ const BOT = () => {
   function pickDraft(R, g, pref, t) {
     const C = R.C;
     let slot = 0;
-    if (g.draftIdx && C.TRAITS) {
+    // 카드는 특성일 수도 숙련(인덱스 100+)일 수도 있다. C.draftCard 가 그 둘을
+    // 같은 모양으로 준다 — 없는 빌드에서는 예전처럼 C.TRAITS 로 떨어진다.
+    const card = C.draftCard || ((i) => C.TRAITS && C.TRAITS[i]);
+    if (g.draftIdx) {
       for (let s = 0; s < g.draftIdx.length; s++) {
         const idx = g.draftIdx[s];
-        if (idx >= 0 && C.TRAITS[idx] && C.TRAITS[idx].kind === pref) { slot = s; break; }
+        if (idx < 0) continue;
+        const c = card(idx);
+        if (c && c.kind === pref) { slot = s; break; }
       }
     }
     const p0 = act('PICK0');

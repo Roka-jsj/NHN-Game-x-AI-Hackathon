@@ -112,7 +112,12 @@ const BR_2 = '금이 차면 병력을 산다';
 const BR_3 = '물이 차오른다';
 const BR_RING = '상성이 돈다 — 하나로 전부를 이길 수 없다';
 const BR_ARROW = '화살표 쪽이 이긴다';
-const BR_START = '아무 곳이나 눌러 시작';
+// 설명 화면의 확인 버튼. **이 화면은 저절로 닫히지 않는다** — 이 버튼을 눌러야
+// 시작한다. 예전에는 이 자리에 작은 글씨가 깜빡였고 9초 뒤 화면이 혼자 사라졌다.
+const BR_START = '전투 시작';
+const BR_HINT = '화면 아무 곳을 누르거나 아무 키나 눌러도 시작합니다';
+const BR_BTN_W = 260;
+const BR_BTN_H = 52;
 const CMD_NAME = C.COMMANDER_NAME || null;
 const CMD_TITLE = C.COMMANDER_TITLE || null;
 const CMD_LINE = C.COMMANDER_LINE || null;
@@ -2368,8 +2373,11 @@ export class Renderer {
       }
     }
 
-    // 획득 특성 — 금 아래에 알약으로. 내 것은 내 쪽에 모아 둔다
+    // 획득 특성 — 금 아래에 알약으로. 내 것은 내 쪽에 모아 둔다.
+    // 숙련(반복 획득)은 종류별 알약 하나에 **횟수를 붙여** 보여 준다.
+    // 특성 18종을 다 모으면 알약이 줄을 넘치므로 폭 상한(300)에서 자른다.
     ctx.font = FONT_MICRO;
+    const mCount = game.mastery ? game.mastery.length : 0;
     let px = 60;
     ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.20)];
     ctx.beginPath();
@@ -2381,6 +2389,12 @@ export class Renderer {
       px += tw + 5; anyT = 1;
       if (px > 300) break;
     }
+    for (let m = 0; m < mCount && px <= 300; m++) {
+      if (!game.mastery[m]) continue;
+      const tw = (C.MASTERY[m].name.length + 2) * 11 + 10;
+      ctx.roundRect(px, 68, tw, 15, 7);
+      px += tw + 5; anyT = 1;
+    }
     if (anyT) {
       ctx.fill();
       ctx.fillStyle = C.COL_BONUS;
@@ -2391,6 +2405,12 @@ export class Renderer {
         ctx.fillText(C.TRAITS[i].name, px + 5, 71);
         px += tw + 5;
         if (px > 300) break;
+      }
+      for (let m = 0; m < mCount && px <= 300; m++) {
+        if (!game.mastery[m]) continue;
+        const tw = (C.MASTERY[m].name.length + 2) * 11 + 10;
+        ctx.fillText(C.MASTERY[m].name + '×' + game.mastery[m], px + 5, 71);
+        px += tw + 5;
       }
     }
 
@@ -3309,7 +3329,10 @@ export class Renderer {
     for (let i = 0; i < C.TRAIT_OFFER; i++) {
       const idx = game.draftIdx[i];
       if (idx < 0) continue;
-      const tr = C.TRAITS[idx];
+      // 특성이든 숙련이든 카드 한 장은 같은 함수로만 읽는다.
+      // C.TRAITS[idx] 로 직접 읽으면 숙련 인덱스(100+)에서 undefined 가 되고
+      // 그 프레임에 렌더가 통째로 죽는다 — 드래프트는 화면이 멈춘 상태다.
+      const tr = C.draftCard(idx);
       const y = CARD_TOP + i * (CARD_H + CARD_GAP);
       const w = cw * e;
       const x = HALF_W - w * 0.5;
@@ -3440,13 +3463,31 @@ export class Renderer {
     // 진짜 버튼 열을 설명 위에 다시 올린다 — 화살표가 가리키는 그 칸이다
     this.drawButtons(game);
     this.drawRally(game);
-    // 깜빡이는 안내 — 결정론이 아니어도 되는 유일한 곳이라 시뮬 시각으로 돈다
-    const pulse = 0.6 + 0.4 * Math.sin(game.simTime * 0.005);
+    // ── 확인 버튼 ────────────────────────────────────────────
+    // 화면이 혼자 사라지지 않으므로 **누를 곳이 눈에 보여야 한다.** 숨쉬듯
+    // 밝기만 오가고 크기는 안 변한다 — 커졌다 작아지는 버튼은 누르기 어렵다.
+    // BRIEF 상태에서는 stateTick 만 도므로 그것으로 맥을 만든다 (결정론 유지).
+    const pulse = 0.62 + 0.38 * Math.sin(game.stateTick * 0.09);
+    const bx = HALF_W - BR_BTN_W * 0.5, by = LAY.y - BR_BTN_H - 30;
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.10 + 0.10 * pulse)];
+    ctx.beginPath();
+    ctx.roundRect(bx, by, BR_BTN_W, BR_BTN_H, 10);
+    ctx.fill();
+    ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(pulse)];
+    ctx.lineWidth = C.STROKE;
+    ctx.beginPath();
+    ctx.roundRect(bx + 1, by + 1, BR_BTN_W - 2, BR_BTN_H - 2, 10);
+    ctx.stroke();
+
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.font = FONT_MID;
-    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(pulse)];
-    ctx.fillText(BR_START, HALF_W, LAY.y - 26);
+    ctx.fillStyle = C.COL_BONUS;
+    ctx.fillText(BR_START, HALF_W, by + BR_BTN_H * 0.5);
+    // 버튼 밖도 다 받는다는 사실을 **글로 적어 둔다.** 안 적으면 아무도 모른다.
+    ctx.font = FONT_MICRO;
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.42)];
+    ctx.fillText(BR_HINT, HALF_W, by + BR_BTN_H + 14);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
   }

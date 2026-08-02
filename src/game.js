@@ -171,6 +171,8 @@ export class Game {
     this.frameSimBase = 0;
 
     this.traits = new Uint8Array(C.TRAITS.length);
+    // 숙련은 **횟수**다. 특성과 달리 같은 것을 여러 번 고를 수 있다.
+    this.mastery = new Uint8Array((C.MASTERY && C.MASTERY.length) || 3);
     this.draftIdx = new Int8Array(C.TRAIT_OFFER);
     this.spawnCd = new Float32Array(C.UNIT_KINDS);
     // 증원 등급별 구성을 뿌릴 때 쓰는 버퍼. 루프 안에서 배열을 만들지 않는다.
@@ -291,6 +293,7 @@ export class Game {
     this.stagesCleared = 0;
     this.campaignMs = 0;
     this.traits.fill(0);
+    this.mastery.fill(0);
     this.towerLv = 0;
     this.resetBattle();
   }
@@ -313,8 +316,9 @@ export class Game {
     // 얼리는 것은 보고되는 값(elapsed)뿐이다.
     this.endTime = -1;
     // 설명 화면 — 원정 첫 전투 앞에 한 번. 시뮬레이션이 멈춘다.
-    // **조작을 막지 않는다**: 아무 입력이나 즉시 해제하고, 아무 입력이 없어도
-    // C.BRIEF_MS 뒤에 저절로 열린다. 붙잡아 두는 화면은 금지다 (계약 §4).
+    // **조작을 막지 않는다**: 화면 어디를 눌러도, 아무 키나 눌러도 즉시 열린다.
+    // 저절로 닫히지는 않는다 (C.BRIEF_MS = 0). 읽는 사람 앞에서 화면이 혼자
+    // 사라지는 것이 계약 §4 가 막으려던 것보다 더 나빴다 — config 주석 참조.
     this.state = (this.stage === 0 && !this.briefSeen) ? S.BRIEF : S.PLAY;
     this.stateTick = 0;
 
@@ -475,6 +479,8 @@ export class Game {
   statDmg(kind, era, side) {
     let v = C.U_DMG[kind] * C.ERA_DMG_MUL[era];
     if (side === SIDE_L && this.has('sharp')) v *= 1.2;
+    // '중장' — 무거운 둘만. 값비싼 유닛을 고른 판에만 값어치가 있는 특성이다.
+    if (side === SIDE_L && this.has('heavy') && (kind === C.U_GIANT || kind === C.U_CATA)) v *= 1.35;
     return v;
   }
   statSpeed(kind, side) {
@@ -512,12 +518,21 @@ export class Game {
     const b = C.GOLD_ERA_BONUS > 0 ? C.GOLD_ERA_BONUS : 0;
     return 1 + this.era * b;
   }
-  goldRate() { return C.GOLD_RATE * this.goldEraK() * (this.has('mine') ? 1.3 : 1); }
+  // 숙련 '보급'은 누적된다. 특성 '광맥'(+30%)보다 한 번에 훨씬 적다 — 원정
+  // 후반에 무한히 쌓이는 값이므로 일부러 작게 뒀다.
+  masteryGoldK() { return 1 + this.mastery[0] * C.MASTERY_GOLD_MUL; }
+  goldRate() {
+    return C.GOLD_RATE * this.goldEraK() * (this.has('mine') ? 1.3 : 1) * this.masteryGoldK();
+  }
   goldCap() { return C.GOLD_CAP * this.goldEraK(); }
   // 처녀자리 — 진화가 싸다. **양쪽 다** (적은 aiEraNeed 를 쓴다).
   zodEraMul() { return this.zod(C.ZOD_VIRGO) ? C.ZOD_VIRGO_XP : 1; }
   eraNeed() {
-    return this.era + 1 < C.ERA_COUNT ? Math.round(C.ERA_XP[this.era + 1] * this.zodEraMul()) : -1;
+    if (this.era + 1 >= C.ERA_COUNT) return -1;
+    // '숙련' 특성 — 진화가 싸진다. 이 값은 진화 버튼의 표시값이자 결제값이므로
+    // 여기 한 곳에서만 깎는다 (buyEra 가 이 함수를 다시 부른다).
+    const vm = this.has('veteran') ? 0.75 : 1;
+    return Math.round(C.ERA_XP[this.era + 1] * this.zodEraMul() * vm);
   }
   eraReady() {
     const need = this.eraNeed();
@@ -882,7 +897,9 @@ export class Game {
     // 손이 없는 관전자(그리고 대조군 봇)를 영원히 붙잡아 두지 않는다.
     if (this.state === S.BRIEF) {
       this.stateTick++;
-      if (this.stateTick * C.SIM_DT >= (C.BRIEF_MS > 0 ? C.BRIEF_MS : 9000)) this.dismissBrief();
+      // C.BRIEF_MS 가 0 이면 **저절로 닫히지 않는다.** 사람이 확인 버튼을 누를
+      // 때까지 기다린다. 손이 없는 관전자·평가 봇은 dismissBrief() 를 직접 부른다.
+      if (C.BRIEF_MS > 0 && this.stateTick * C.SIM_DT >= C.BRIEF_MS) this.dismissBrief();
       return;
     }
 
@@ -939,6 +956,14 @@ export class Game {
     if (this.gold > this.goldPeak) this.goldPeak = this.gold;
     this.goldSum += this.gold;
     this.goldSamples++;
+
+    // '보수' 특성 — 내 기지가 계속 아문다. 초당 최대 체력의 0.6% 다.
+    // **이미 무너진 기지는 살리지 않는다** — 0 이 된 뒤 회복이 붙으면
+    // checkEnd 가 이미 부른 판정과 화면의 체력바가 어긋난다.
+    if (this.has('mend') && this.baseHp[SIDE_L] > 0) {
+      this.baseHp[SIDE_L] += this.baseMax[SIDE_L] * 0.006 * dt;
+      if (this.baseHp[SIDE_L] > this.baseMax[SIDE_L]) this.baseHp[SIDE_L] = this.baseMax[SIDE_L];
+    }
 
     for (let k = 0; k < C.UNIT_KINDS; k++) {
       if (this.spawnCd[k] > 0) {
@@ -1420,7 +1445,9 @@ export class Game {
     }
     if (best < 0) return;
 
-    this.towerCd = C.TOWER_CD * (this.zod(C.ZOD_SCORPIO) ? C.ZOD_SCORPIO_CD : 1);
+    // '포좌' 특성 — 포탑만 빨라진다. 포탑을 산 판에서만 값어치가 있다.
+    this.towerCd = C.TOWER_CD * (this.zod(C.ZOD_SCORPIO) ? C.ZOD_SCORPIO_CD : 1)
+      * (this.has('bastion') ? 0.74 : 1);
     this.towerShots++;
     // 시대가 오르면 포탑도 같이 큰다. 안 그러면 강철 시대부터 장식이 된다.
     const dmg = C.TOWER_DMG[this.towerLv - 1] * C.ERA_DMG_MUL[this.era];
@@ -1492,6 +1519,9 @@ export class Game {
       let m = C.COUNTER[atkKind * C.UNIT_KINDS + this.uKind[idx]];
       // 천칭자리 — 상성 우위가 더 아프다. 그 판만 **상성이 전부**가 된다.
       if (m > 1 && this.zod(C.ZOD_LIBRA)) m += C.ZOD_LIBRA_ADD;
+      // '관통' 특성 — 내 상성 우위만 커진다. 상성을 보고 뽑는 사람에게만 값이
+      // 붙는 특성이다 (적의 상성은 안 건드린다 — byWhom 으로 가른다).
+      if (m > 1 && byWhom === SIDE_L && this.has('pierce')) m += 0.4;
       if (m > 1) {
         dmg *= m;
         this.counterHits++;
@@ -1521,6 +1551,9 @@ export class Game {
       this.water += C.WATER_KILL_PUSH * (this.has('revive') ? 1.8 : 1) * this.waterPushK();
     } else {
       this.lost++;
+      // '고철' 특성 — 내 유닛이 죽으면 값의 일부가 돌아온다. 비싼 유닛을 계속
+      // 갈아 넣는 판을 지탱한다. 시대 배수는 안 붙인다 (판값이 아니라 원가다).
+      if (side === SIDE_L && this.has('salvage')) this.gold += C.U_COST[kind] * 0.25;
       this.aiXp += xpGain;
       // 적의 현상금은 깎아서 준다. 안 그러면 밀리기 시작한 판이 스스로 굳는다 —
       // 적이 잡을수록 더 벌고, 더 벌어서 더 잡는다. config 주석 참조.
@@ -1555,6 +1588,12 @@ export class Game {
     let rise = C.WATER_RISE;
     if (t > C.WATER_ACCEL_AT) rise *= C.WATER_ACCEL_MUL;
     if (this.has('drain')) rise *= 0.75;
+    // 숙련 '제방'은 누적된다. 0 아래로는 못 내려간다 — 물이 **반대로 빠지면**
+    // 마감 시계가 아예 꺼져서 판이 안 끝난다.
+    if (this.mastery[2] > 0) {
+      const k = 1 - this.mastery[2] * C.MASTERY_WATER;
+      rise *= k > 0.4 ? k : 0.4;
+    }
     // 스테이지 곡선 — **후반의 시간 압박은 여기서 온다.** 익사 피해(DROWN_DPS)가
     // 아니다. 그건 병력이 전선에 닿기도 전에 죽여 교착을 굳혔던 값이다 (계약 §5.5).
     rise *= this.stageWaterMul();
@@ -1645,8 +1684,33 @@ export class Game {
     if (this.supplier && this.supplier.draftOffer) {
       this.supplier.draftOffer(this, this.draftIdx);
     } else {
-      for (let i = 0; i < C.TRAIT_OFFER; i++) this.draftIdx[i] = i;
+      // 디렉터가 없을 때의 기본 제시. **이미 가진 것은 건너뛴다** — 예전에는
+      // 그냥 0·1·2 를 냈고, 그래서 디렉터 없이 돌린 하네스에서는 같은 특성을
+      // 스무 번 다시 제시하고 있었다. 그 자리에서는 고갈이 영원히 안 온다.
+      let n = 0;
+      for (let i = 0; i < C.TRAITS.length && n < C.TRAIT_OFFER; i++) {
+        if (!this.traits[i]) this.draftIdx[n++] = i;
+      }
+      while (n < C.TRAIT_OFFER) this.draftIdx[n++] = -1;
     }
+    // **빈 칸을 숙련으로 메운다.** 디렉터는 남은 특성이 모자라면 -1 을 채워
+    // 보내는데, 그 -1 은 화면에 카드가 안 그려지고 pickTrait 도 무시했다.
+    // 즉 세 칸이 다 -1 이면 시뮬레이션이 멈춘 채 아무것도 못 하는 화면이
+    // 됐다 — 원정 두 번째 사령관의 첫 진화에서 실제로 그렇게 굳었다.
+    // 숙련은 반복해서 고를 수 있으므로 이 바닥은 절대 안 꺼진다.
+    const mn = (C.MASTERY && C.MASTERY.length) || 0;
+    if (mn > 0) {
+      // 슬롯마다 다른 숙련이 오도록 슬롯 번호를 그대로 쓴다. 전투마다 첫 칸이
+      // 달라지게 eraUps 로 돌린다 — 결정론이다 (Math.random 없음).
+      const off = (this.eraUps + this.stage) % mn;
+      for (let i = 0; i < C.TRAIT_OFFER; i++) {
+        if (this.draftIdx[i] >= 0) continue;
+        this.draftIdx[i] = C.MASTERY_BASE + ((i + off) % mn);
+      }
+    }
+    let any = false;
+    for (let i = 0; i < C.TRAIT_OFFER; i++) if (this.draftIdx[i] >= 0) any = true;
+    if (!any) return;               // 여기까지 오면 안 되지만, 굳느니 그냥 넘긴다
     this.draftOpen = true;
     this.draftFrames = 0;
     this.setState(S.DRAFT);
@@ -1656,11 +1720,30 @@ export class Game {
   pickTrait(slot) {
     if (!this.draftOpen) return;
     const idx = this.draftIdx[clamp(slot, 0, C.TRAIT_OFFER - 1)];
-    if (idx < 0) return;
-    this.applyTrait(idx);
+    // 빈 칸을 눌렀다 — 위에서 다 메우므로 정상적으로는 없다. 그래도 여기서
+    // 화면을 닫아 준다. **드래프트는 어떤 경로로도 갇히면 안 된다.**
+    if (idx < 0) { this.draftOpen = false; this.setState(S.PLAY); return; }
+    if (idx >= C.MASTERY_BASE) this.applyMastery(idx - C.MASTERY_BASE);
+    else this.applyTrait(idx);
     this.draftOpen = false;
-    this.emit(EV.DRAFT_PICK, idx, C.TRAITS[idx].kind);
+    this.emit(EV.DRAFT_PICK, idx, C.draftCard(idx).kind);
     this.setState(S.PLAY);
+  }
+
+  // 숙련 — 특성 풀이 마른 뒤의 보상. 누적되고 반복해서 고를 수 있다.
+  applyMastery(m) {
+    if (!(m >= 0 && m < this.mastery.length)) return;
+    this.mastery[m]++;
+    if (m === 0) {
+      this.gold += C.MASTERY_GOLD;            // 수입 배수는 goldRate() 가 읽는다
+    } else if (m === 1) {
+      const add = this.baseMax[SIDE_L] * C.MASTERY_MAXHP;
+      this.baseMax[SIDE_L] += add;
+      this.baseHp[SIDE_L] += add + this.baseMax[SIDE_L] * C.MASTERY_HEAL;
+      if (this.baseHp[SIDE_L] > this.baseMax[SIDE_L]) this.baseHp[SIDE_L] = this.baseMax[SIDE_L];
+    } else {
+      this.water += C.MASTERY_PUSH;           // 상승 감소는 stepWater 가 읽는다
+    }
   }
 
   // ── 조회 ────────────────────────────────────────────────────
