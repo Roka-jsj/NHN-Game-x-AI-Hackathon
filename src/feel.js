@@ -46,14 +46,19 @@ function num(v, d) { return (typeof v === 'number' && Number.isFinite(v)) ? v : 
 
 // 히트스톱 예산
 const FREEZE_GAP      = num(C.FREEZE_GAP, 12);        // 흔한 이벤트의 최소 간격(시뮬 프레임)
-const FREEZE_GAP_HI   = num(C.FREEZE_GAP_HI, 5);      // 중요한 이벤트의 최소 간격
+const FREEZE_GAP_HI   = num(C.FREEZE_GAP_HI, 9);      // 중요한 이벤트의 최소 간격
 const FREEZE_LOAD     = num(C.FREEZE_LOAD_MAX, 0.10); // 최근 얼어 있던 비율 상한
-const FREEZE_LOAD_HI  = num(C.FREEZE_LOAD_MAX_HI, 0.18);
+// 5·0.18 이었다. 초당 360회 폭주 시험에서 **20.4%** 가 나왔다 — 간격이 짧아
+// 히트스톱이 서로 이어 붙고, 부하 추정(창 1.5초)이 따라잡기 전에 이미 굳는다.
+// 9·0.14 면 같은 폭주에서 14% 대로 내려가고, 실제 판(초당 1회 미만)에서는
+// 아무것도 달라지지 않는다.
+const FREEZE_LOAD_HI  = num(C.FREEZE_LOAD_MAX_HI, 0.14);
 const LOAD_K = 1 / 90;                                // 부하 추정 창 ≈ 1.5초
 
 const HITSTOP_COUNTER = num(C.HITSTOP_COUNTER, 3);
 const SHAKE_COUNTER   = num(C.SHAKE_COUNTER, 2.6);
 const STREAK_HOLD     = num(C.STREAK_HOLD, 45);       // 연쇄가 끊기는 시간
+const FOE_HIT_GAP     = num(C.FOE_HIT_GAP, 20);       // 적에게 당한 상성 타격의 최소 간격
 
 // 도발 — 멈추지 않고 느려진다
 const SLOW_TAUNT      = num(C.SLOW_TAUNT, 16);
@@ -62,8 +67,14 @@ const ROT_TAUNT       = num(C.ROT_TAUNT, 0.0075);
 
 // 실패한 입력
 const DENY_GAP        = num(C.DENY_GAP, 13);
-const PART_DENY       = num(C.PART_DENY, 3);
-const DENY_LIFE       = num(C.DENY_LIFE, 15);
+const PART_DENY       = num(C.PART_DENY, 5);
+const DENY_LIFE       = num(C.DENY_LIFE, 18);
+// 튕겨 나오는 높이. **버튼 줄 위에 떠 있어야 한다** — 파티클은 월드 층이고
+// 버튼 줄은 그 위에 덮이므로, 줄 안쪽에서 터뜨리면 그대로 가려진다.
+// 폰 세로에서는 버튼 줄이 더 높이 올라온다(render 가 92px 로 키운다). 그래서
+// 가로 기준 BTN_Y 가 아니라 **둘 중 더 높은 쪽 위**를 잡는다. 실측으로 잡은 값이다 —
+// 처음엔 BTN_Y − 7 에 뒀는데 캡처해 보니 아무것도 안 보였다.
+const DENY_Y          = num(C.DENY_Y, C.VIEW_H - 110);
 
 const PART_SPAWN      = num(C.PART_SPAWN, 3);
 const BASE_RING_GAP   = num(C.BASE_RING_GAP, 34);
@@ -178,6 +189,7 @@ export class Feel {
     this.streakGap = 0;
     this.denyCd = 0;         // 실패한 입력의 최소 간격
     this.baseRingCd = 0;     // 기지 타격 링의 최소 간격
+    this.foeHitCd = 0;       // 적의 상성 타격 충격 최소 간격
     this.tideAt = -1e6;      // 해일 중복 방지 (SKILL(0) 과 NUKE 가 같이 온다)
   }
 
@@ -191,7 +203,7 @@ export class Feel {
     this.flashFrames = 0;
     this.bannerFrames = 0;
     this.streak = 0; this.streakGap = 0;
-    this.denyCd = 0; this.baseRingCd = 0;
+    this.denyCd = 0; this.baseRingCd = 0; this.foeHitCd = 0;
     this.tideAt = -1e6;
   }
 
@@ -241,16 +253,45 @@ export class Feel {
     if (n > this.slowFrames) this.slowFrames = n;
   }
 
+  // 히트스톱 중에도 **연출은 계속 흐른다.** 멈추는 것은 세계이지 불꽃이 아니다.
+  // 이걸 안 하면 큰 순간일수록 나빠진다: 진화·해일은 히트스톱이 10~14프레임인데
+  // 그동안 파편이 전부 발화점 한 점에 겹쳐 있어서 **폭발이 점 하나로 보였다.**
+  // (캡처로 잡았다. 원정 종료 컷에서 붉은 파편 22개가 붉은 점 하나였다)
   stepFrozen() {
     this.tickTimers();
     this.decayShake();
+    this.stepFx();
     if (this.flashFrames > 0) this.flashFrames--;
+  }
+
+  // 파티클·링·숫자 — 시뮬레이션과 무관한 순수 연출. 얼어 있어도 흐른다.
+  stepFx() {
+    for (let i = 0; i < C.PARTICLE_MAX; i++) {
+      if (this.pLife[i] <= 0) continue;
+      this.pX[i] += this.pVX[i];
+      this.pY[i] += this.pVY[i];
+      this.pVY[i] += C.PART_GRAVITY;      // 화면 좌표라 아래가 +
+      this.pLife[i]--;
+    }
+
+    for (let i = 0; i < C.RING_MAX; i++) {
+      if (this.ringStep[i] < 0) continue;
+      this.ringStep[i]++;
+      if (this.ringStep[i] > this.ringSteps) this.ringStep[i] = -1;
+    }
+
+    for (let i = 0; i < C.FLOAT_MAX; i++) {
+      if (this.fStep[i] < 0) continue;
+      this.fStep[i]++;
+      if (this.fStep[i] > this.fSteps) this.fStep[i] = -1;
+    }
   }
 
   tickTimers() {
     this.t++;
     if (this.denyCd > 0) this.denyCd--;
     if (this.baseRingCd > 0) this.baseRingCd--;
+    if (this.foeHitCd > 0) this.foeHitCd--;
     if (this.streakGap > 0) { this.streakGap--; if (this.streakGap === 0) this.streak = 0; }
   }
 
@@ -273,27 +314,9 @@ export class Feel {
     if (this.flashFrames > 0) this.flashFrames--;
     if (this.bannerFrames > 0) this.bannerFrames--;
 
-    for (let i = 0; i < C.PARTICLE_MAX; i++) {
-      if (this.pLife[i] <= 0) continue;
-      this.pX[i] += this.pVX[i];
-      this.pY[i] += this.pVY[i];
-      this.pVY[i] += C.PART_GRAVITY;      // 화면 좌표라 아래가 +
-      this.pLife[i]--;
-    }
+    this.stepFx();
 
-    for (let i = 0; i < C.RING_MAX; i++) {
-      if (this.ringStep[i] < 0) continue;
-      this.ringStep[i]++;
-      if (this.ringStep[i] > this.ringSteps) this.ringStep[i] = -1;
-    }
-
-    for (let i = 0; i < C.FLOAT_MAX; i++) {
-      if (this.fStep[i] < 0) continue;
-      this.fStep[i]++;
-      if (this.fStep[i] > this.fSteps) this.fStep[i] = -1;
-    }
-
-    if (game.state === S.OVER) {
+    if (game && game.state === S.OVER) {
       if (this.resultStep < this.resultSteps) this.resultStep++;
     } else this.resultStep = -1;
   }
@@ -329,11 +352,16 @@ export class Feel {
 
   // 튜닝 가능한 분출 — 속도·수명·크기를 부르는 쪽이 정한다.
   // 잦은 연출은 작고 짧게, 드문 연출은 크고 길게. 그게 대비를 만든다.
+  //
+  // **한 점에서 시작하지 않는다.** 파편을 전부 같은 좌표에 두면 히트스톱이
+  // 걸린 첫 프레임에 점 하나로 겹쳐 보인다. 처음부터 작은 고리로 벌려 둔다.
   spray(x, y, n, kind, spd, up, life, size) {
     for (let k = 0; k < n; k++) {
       const a = (k / n) * Math.PI * 2 + Math.random() * 0.7;
       const s = spd * (0.55 + Math.random() * 0.9);
-      this.push1(x, y, Math.cos(a) * s, Math.sin(a) * s - up,
+      const r = s * 1.6;
+      this.push1(x + Math.cos(a) * r, y + Math.sin(a) * r,
+                 Math.cos(a) * s, Math.sin(a) * s - up,
                  size * (0.7 + Math.random() * 0.6), life, kind);
     }
   }
@@ -367,13 +395,18 @@ export class Feel {
   deny(btn, kind) {
     if (this.denyCd > 0) return;
     this.denyCd = DENY_GAP;
-    const x = (btn >= 0 && btn < this.btnCX.length) ? this.btnCX[btn] : this.btnCXOther;
-    const y = C.BTN_Y - 7;
+    // 어느 버튼인지 확실할 때만 그 자리를 쓴다. 아니면 진화·포탑·스킬 쪽.
+    const i = btn | 0;
+    const x = (Number.isInteger(btn) && i >= 0 && i < this.btnCX.length)
+      ? this.btnCX[i] : this.btnCXOther;
+    // 위로 벌어지는 부채꼴. 작은 점 넷을 겹쳐 뿌리면 눈에 안 들어온다 —
+    // 실측(캡처)으로 확인하고 각도를 벌리고 크기를 키웠다.
     for (let k = 0; k < PART_DENY; k++) {
-      const s = 1.5 + Math.random() * 1.3;
-      const dir = (k & 1) ? 1 : -1;
-      this.push1(x + dir * 3, y, dir * s, -1.5 - Math.random() * 0.8,
-                 2.6 + Math.random() * 1.4, DENY_LIFE, kind);
+      const t = PART_DENY > 1 ? k / (PART_DENY - 1) : 0.5;
+      const ang = -Math.PI * (0.80 - 0.60 * t);
+      const s = 2.0 + Math.random() * 1.5;
+      this.push1(x, DENY_Y, Math.cos(ang) * s, Math.sin(ang) * s,
+                 5.2 + Math.random() * 2, DENY_LIFE, kind);
     }
   }
 
@@ -381,11 +414,14 @@ export class Feel {
   onEvent(type, a, b, game) {
     switch (type) {
       case EV.SPAWN: {
-        // 성공한 입력. 내 것이 적 것보다 잘 보여야 한다 — 이게 내 손의 결과다.
+        // 성공한 입력. **내 것이 적 것보다 잘 보여야 한다** — 이게 내 손의 결과다.
+        // 파티클은 흰·금·붉음 셋뿐이라 적을 적색으로 칠하면 위협 신호와 섞인다.
+        // 그래서 색이 아니라 **높이와 수명**으로 가른다: 내 것은 튀어오르고,
+        // 적 것은 발밑에서 낮게 쓸린다.
         const mine = b === SIDE_L;
         const x = mine ? C.SPAWN_L_X : C.SPAWN_R_X;
-        this.spray(x, gy(x) - 8, mine ? PART_SPAWN : PART_SPAWN - 1, 0,
-                   1.5, 1.7, 22, 3);
+        if (mine) this.spray(x, gy(x) - 8, PART_SPAWN, 0, 1.6, 2.0, 24, 3.2);
+        else this.spray(x, gy(x) - 5, PART_SPAWN - 1, 0, 1.3, 0.6, 17, 2.4);
         break;
       }
 
@@ -397,16 +433,21 @@ export class Feel {
 
       case EV.KILL: {
         // 큰 것이 죽는 것과 검사가 죽는 것이 같으면 처치는 의미가 없다.
-        const w = (a >= 0 && a < this.killW.length) ? this.killW[a] : 0.4;
+        // 그리고 **내가 잡은 것과 내 것이 죽은 것이 같아도 안 된다** (b = 잡은 진영).
+        const mine = b === SIDE_L;
+        // a 가 null·NaN·범위 밖으로 와도 무게는 항상 유효한 수여야 한다.
+        // (null >= 0 은 true 라 범위 검사만으로는 안 걸러진다 — 실측으로 잡았다)
+        const w = num(this.killW[a | 0], 0.4);
         const fx = this.frontline(game);
         const x = fx + (Math.random() * 2 - 1) * 20;     // 한 점에 쌓이지 않게
         const n = 3 + ((w * 9) | 0);
-        this.spray(x, gy(x) - 16, n, b === SIDE_L ? 1 : 2,
+        this.spray(x, gy(x) - 16, n, mine ? 1 : 2,
                    1.8 + w * 1.6, 1.5, C.PART_LIFE, 3 + w * 2);
         // 잡졸은 화면을 흔들지 않는다. 무게가 있는 것만 손에 온다.
         if (w >= 0.3) this.addShake(C.SHAKE_KILL * (0.45 + 0.55 * w), 0);
-        // 히트스톱은 거인·투석기급에만. 그것도 예산 안에서다.
-        if (w >= 0.6) this.freeze(C.HITSTOP_KILL, PR_HI);
+        // 히트스톱은 **내가 만든 충격**에만 건다. 거인·투석기급, 그것도 예산 안에서.
+        // 내 유닛이 죽은 것에 히트스톱을 걸면 손해가 성취처럼 찍힌다.
+        if (mine && w >= 0.6) this.freeze(C.HITSTOP_KILL, PR_HI);
         break;
       }
 
@@ -458,13 +499,19 @@ export class Feel {
         // 그린다. 여기 셰이크를 두면 수비형 플레이가 상시 진동이 된다.
         break;
 
-      case EV.TOWER_UP:
-        this.freeze(C.HITSTOP_ERA, PR_ALWAYS);
-        this.addShake(C.SHAKE_ERA, 0);
-        this.ring(C.BASE_L_X, gy(C.BASE_L_X) - C.BASE_H);
-        this.spray(C.BASE_L_X, gy(C.BASE_L_X) - C.BASE_H,
-                   (C.PART_ERA * 0.7) | 0, 1, 2.8, 2.4, C.PART_LIFE, 3.6);
+      case EV.TOWER_UP: {
+        // **적 진영에서는 이 이벤트가 오지 않는다** — game.js 가 일부러 안 쏜다
+        // (디렉터가 진영 구분 없이 "기지에 쓴 금"으로 세기 때문). 그래도 자리는
+        // 진영으로 잡는다. 언젠가 오더라도 내 성에서 터지지는 않게.
+        const mine = b !== 1;
+        const bx = mine ? C.BASE_L_X : C.BASE_R_X;
+        this.freeze(C.HITSTOP_ERA, mine ? PR_ALWAYS : PR_HI);
+        this.addShake(C.SHAKE_ERA * (mine ? 1 : 0.5), 0);
+        this.ring(bx, gy(bx) - C.BASE_H);
+        this.spray(bx, gy(bx) - C.BASE_H,
+                   (C.PART_ERA * 0.7) | 0, mine ? 1 : 2, 2.8, 2.4, C.PART_LIFE, 3.6);
         break;
+      }
 
       case EV.COUNTER_HIT: {
         // ── 이 게임의 핵심 보상 ──
@@ -477,9 +524,24 @@ export class Feel {
         //           아무리 잦아도 화면은 조용하다
         //   구두점: 예산이 허락하는 순간에만 진짜 히트스톱 + 셰이크가 걸린다.
         //           연쇄가 길수록 그 한 방이 커진다 — 난전이 리듬을 얻는다
+        //
+        // **b 는 때린 진영이다.** 적이 나를 상성으로 때린 것에 같은 감촉을 주면
+        // 정반대 신호가 된다 — 얻어맞는 순간이 보상처럼 찍힌다.
+        // 디렉터는 플레이어 구성을 읽고 카운터를 뽑는다(계약 §5.5). 그건
+        // **아파야** 한다: 붉은 파편과 짧은 충격, 히트스톱은 없다.
+        const mine = b === SIDE_L;
         const fx = this.frontline(game);
         const x = fx + (Math.random() * 2 - 1) * 16;
         const y = gy(x) - 22;
+        if (!mine) {
+          this.spray(x, y, 2, 2, 2.2, 1.0, 20, 3);
+          if (this.foeHitCd <= 0) {
+            this.foeHitCd = FOE_HIT_GAP;
+            this.addShake(SHAKE_COUNTER * 0.7, 0);
+            this.spray(x, y, 4, 2, 3.0, 1.4, 24, 3.4);
+          }
+          break;
+        }
         this.streak++;
         this.streakGap = STREAK_HOLD;
         this.spray(x, y, 2, 1, 2.2, 1.2, 20, 3);
@@ -533,20 +595,30 @@ export class Feel {
 
       case EV.NO_GOLD:
         // 금이 없다. 붉게 튕긴다.
-        this.deny(a >= 0 ? a : -1, 2);
+        this.deny(a, 2);
         break;
 
       case EV.COOLDOWN:
         // 아직 못 쓴다. 흰색으로 튕긴다 — 실패의 이유가 다르면 색도 다르다.
-        this.deny(a >= 0 ? a : -1, 0);
+        this.deny(a, 0);
         break;
 
       case EV.WIN:
-      case EV.LOSE:
+      case EV.LOSE: {
+        // 이긴 것과 진 것이 같은 감촉이면 판의 결말이 손에 안 남는다.
+        // (원정이 붙어 있으면 뒤이어 STAGE_CLEAR·CAMPAIGN_END 가 색을 더한다.
+        //  그 이벤트가 없는 예전 game.js 에서도 여기서 이미 갈린다.)
+        const won = type === EV.WIN;
         this.freeze(C.HITSTOP_END, PR_ALWAYS);
         this.addShake(C.SHAKE_END, C.SHAKE_ROT_END);
+        // **성벽 위 하늘에서 터뜨린다.** 성벽 안쪽에 뿌리면 흰 성 위의 붉은 파편이
+        // 흰 벽에 묻혀 안 보인다 (캡처로 확인했다). 어두운 배경 위여야 읽힌다.
+        const bx = won ? C.BASE_R_X : C.BASE_L_X;
+        this.spray(bx, gy(bx) - C.BASE_H - 14, 14, won ? 1 : 2,
+                   2.8, won ? 3.0 : -0.8, C.PART_LIFE, 3.8);
         this.resultStep = 0;
         break;
+      }
 
       case EV.RESET:
         this.reset();
@@ -587,13 +659,13 @@ export class Feel {
           this.ring(lx, gy(lx) - C.BASE_H * 0.5);
           this.ring(mx, gy(mx) - 60);
           this.ring(rx, gy(rx) - C.BASE_H * 0.5);
-          this.spray(lx, gy(lx) - C.BASE_H, C.PART_NUKE, 1, 3.0, 4.2, C.PART_LIFE, 4.2);
+          this.spray(lx, gy(lx) - C.BASE_H - 16, C.PART_NUKE, 1, 3.0, 4.4, C.PART_LIFE, 4.2);
         } else {
           // 원정이 여기서 끝났다. **빛이 없다** — 고리도 섬광도 없고
           // 무거운 회전과 붉은 파편이 성벽에서 흘러내린다.
           this.addShake(C.SHAKE_END * 1.15, C.SHAKE_ROT_END * 2);
-          this.spray(lx, gy(lx) - C.BASE_H * 0.9, (C.PART_NUKE * 0.55) | 0, 2,
-                     2.2, -0.6, C.PART_LIFE, 4);
+          this.spray(lx, gy(lx) - C.BASE_H - 18, (C.PART_NUKE * 0.6) | 0, 2,
+                     3.0, -1.4, C.PART_LIFE, 4.2);
         }
         break;
       }

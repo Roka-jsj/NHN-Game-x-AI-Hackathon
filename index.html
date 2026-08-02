@@ -234,11 +234,22 @@
   .bootpane .fail button:active { background: rgba(244,247,245,.12); }
 
 
+  /* 움직임 없이 사라지기만 하는 힌트. `animation: none` 으로 두면 알약이
+     **영구히** 전장 위에 남는다 — 세로에서 게임이 화면을 꽉 채우게 되면서
+     그게 실제로 방해가 됐다. reduced-motion 이 줄이라는 것은 **움직임**이지
+     상태 변화가 아니므로, 이동 없이 불투명도만 끄는 키프레임을 따로 쓴다. */
+  @keyframes rotHintStill {
+    0%, 88% { opacity: 1; }
+    100%    { opacity: 0; }
+  }
   @media (prefers-reduced-motion: reduce) {
     .bootpane { transition: none; }
     .bootpane .tide { animation: none; transform: translateY(58%); }
     .bootpane .bar i { animation: none; width: 100%; opacity: .55; }
-    #rotate { animation: none; opacity: 1; }
+    #rotate {
+      transform: translateX(-50%);
+      animation: rotHintStill 7s linear 1.6s 1 forwards;
+    }
   }
 </style>
 <noscript><style>#boot { display: none !important; }</style></noscript>

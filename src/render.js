@@ -86,6 +86,7 @@ const LBL_BEATEN = '격파한 사령관';
 const LBL_FOE_ERA = '적 시대';
 const LBL_FOE_UP = '적이 진화했다';
 const LBL_MY_ERA = '내 시대';
+const LBL_CAMP_TIME = '원정 누적';
 const LBL_SLASH = '/';
 const BR_TITLE = '차오른다';
 const BR_SUB = '금으로 병력을 사서 적 기지를 부순다. 버티면 물이 먼저 삼킨다.';
@@ -100,6 +101,7 @@ const CMD_TITLE = C.COMMANDER_TITLE || null;
 const CMD_LINE = C.COMMANDER_LINE || null;
 const CMD_TAUNT = C.COMMANDER_TAUNT || null;
 const CAMP_LEN = C.CAMPAIGN_LEN || 5;
+const BRIEF_KIND = Uint8Array.from([C.U_SWORD, C.U_SPEAR, C.U_CAV, C.U_ARCHER]);
 // game.js 가 S.BRIEF 를 아직 안 줬으면 -1 — 어떤 state 와도 안 같으므로 조용히 꺼진다
 const BRIEF = (typeof S.BRIEF === 'number') ? S.BRIEF : -1;
 
@@ -175,6 +177,14 @@ const FX_LINE_F = 250;                 // 전투 시작 대사가 떠 있는 렌
 const FX_TAUNT_F = 200;                // 도발
 const BUB_W_MAX = 400;
 
+// 설명 화면의 상성 고리 — 네 칸 순환 + 위성 둘. 굽는 쪽과 매 프레임 화살표를
+// 그리는 쪽이 같은 좌표를 봐야 하므로 모듈에 둔다.
+const RING_CX = 286, RING_CY = 272, RING_R = 78;
+const RING_X = Float32Array.from([RING_CX, RING_CX + RING_R, RING_CX, RING_CX - RING_R]);
+const RING_Y = Float32Array.from([RING_CY - RING_R, RING_CY, RING_CY + RING_R, RING_CY]);
+const RING_SATX = 414, RING_SATY = 350, RING_GX = 158, RING_GY = 350;
+const BRIEF_STEP = 40;                 // 화살표 하나가 나타나는 간격 (렌더 프레임)
+
 // 상단 HUD
 const HUD_HP_W = 92, HUD_HP_H = 13;
 const HUD_FRONT_W = 236, HUD_FRONT_H = 17;
@@ -206,6 +216,18 @@ const RND_N = 256;
 // config 에 아직 없으면 전부 0 — 예전과 똑같이 동작한다.
 const SIEGE = (C.U_SIEGE && C.U_SIEGE.length >= C.UNIT_KINDS)
   ? C.U_SIEGE : new Uint8Array(C.UNIT_KINDS);
+
+// ── 시대 배율 — **그리기 전용이다. 판정에 절대 쓰지 않는다** ──
+// 사용자가 "진화해도 이미지가 안 바뀐다"고 했다. 실제로는 바뀌고 있었지만
+// 바뀌는 것이 **장식**(볏·안테나·점)이라 게임 크기에서 사라졌다.
+// 그래서 덩어리 자체를 바꾼다: 키·어깨·머리·다리·무기 길이.
+// 체력이 6.4배, 피해가 6.8배가 되는 진화라면 화면에서도 커져야 한다.
+const ERA_GROW = Float32Array.from([1, 1.11, 1.24, 1.38, 1.54]);
+const ERA_SHOULDER = Float32Array.from([0.92, 1.0, 1.16, 1.06, 1.30]);
+const ERA_HEAD = Float32Array.from([1.08, 1.0, 1.0, 0.92, 1.18]);
+const ERA_LEG = Float32Array.from([0.80, 1.0, 1.14, 1.06, 1.38]);
+const ERA_WEAP = Float32Array.from([0.84, 1.0, 1.10, 1.18, 1.34]);
+const eraIdx = (e) => (e > 0 ? (e < 4 ? e : 4) : 0);
 
 export class Renderer {
   constructor(canvas, ctx) {
@@ -265,7 +287,9 @@ export class Renderer {
   // 전투 번호로 흔들어 사령관마다 다른 전장이라는 인상을 만든다.
   syncStage(game) {
     const st = (typeof game.stage === 'number') ? (game.stage | 0) : 0;
-    const dip = groundAt(HALF_W);
+    // game.js 가 지형을 바꾸면 terrainSeq 가 오른다. 그 필드가 없던 시절에는
+    // 지면 함수를 직접 찍어 보고 판단한다 — 둘 다 관찰이지 계약 변경이 아니다.
+    const dip = (typeof game.terrainSeq === 'number') ? game.terrainSeq : groundAt(HALF_W);
     if (st === this.bakedStage && Math.abs(dip - this.bakedDip) < 0.5) return;
     this.bakedStage = st;
     this.bakedDip = dip;
@@ -1326,7 +1350,7 @@ export class Renderer {
       const kind = game.uKind[i];
       if (game.uSide[i] === SIDE_R) this.foeMix[kind]++;
       const x = game.uPrevX[i] + (game.uX[i] - game.uPrevX[i]) * alpha;
-      const grow = 1 + game.uEra[i] * 0.08;
+      const grow = ERA_GROW[eraIdx(game.uEra[i])];
       sx[i] = x;
       sgy[i] = groundAt(x);
       sw[i] = C.U_W[kind] * grow;
@@ -1498,14 +1522,27 @@ export class Renderer {
         ctx.lineTo(gx - dir * 3.5, gy + 4);
         ctx.closePath();
       }
+      // 내 땅은 이어진 선, 적 땅은 **끊긴 선**이다. 얇은 선에서는 명도 차만으로
+      // 부족해서 (실측: 슬레이트 선과 흰 선이 한눈에 안 갈렸다) 모양을 바꾼다.
       const x0 = s ? fx : 0, x1 = s ? C.VIEW_W : fx;
-      ctx.moveTo(x0, groundAt(x0) - 1);
-      for (let x = x0 + 48; x < x1; x += 48) ctx.lineTo(x, groundAt(x) - 1);
-      ctx.lineTo(x1, groundAt(x1) - 1);
-      ctx.lineTo(x1, groundAt(x1) + 3);
-      for (let x = x1 - 48; x > x0; x -= 48) ctx.lineTo(x, groundAt(x) + 3);
-      ctx.lineTo(x0, groundAt(x0) + 3);
-      ctx.closePath();
+      if (s) {
+        for (let x = x0; x < x1; x += 34) {
+          const xe = x + 20 < x1 ? x + 20 : x1;
+          ctx.moveTo(x, groundAt(x) - 1);
+          ctx.lineTo(xe, groundAt(xe) - 1);
+          ctx.lineTo(xe, groundAt(xe) + 3);
+          ctx.lineTo(x, groundAt(x) + 3);
+          ctx.closePath();
+        }
+      } else {
+        ctx.moveTo(x0, groundAt(x0) - 1);
+        for (let x = x0 + 48; x < x1; x += 48) ctx.lineTo(x, groundAt(x) - 1);
+        ctx.lineTo(x1, groundAt(x1) - 1);
+        ctx.lineTo(x1, groundAt(x1) + 3);
+        for (let x = x1 - 48; x > x0; x -= 48) ctx.lineTo(x, groundAt(x) + 3);
+        ctx.lineTo(x0, groundAt(x0) + 3);
+        ctx.closePath();
+      }
       ctx.fill();
     }
 
@@ -1704,20 +1741,24 @@ export class Renderer {
     // 자세(기울기)가 성격이다. 색이 아니라 이 각도가 넷을 가른다.
     const giant = kind === C.U_GIANT;
     const archer = kind === C.U_ARCHER;
+    const eI = eraIdx(era);
     const legH = h * (archer ? 0.30 : (giant ? 0.33 : 0.33));
     const torsoH = h * (giant ? 0.44 : 0.40);
-    const headR = w * (giant ? 0.22 : (archer ? 0.27 : 0.28));
+    const headR = w * (giant ? 0.22 : (archer ? 0.27 : 0.28)) * ERA_HEAD[eI];
     const hipY = gy - legH;
     const lean = giant ? 0.22 : (kind === C.U_SWORD ? 0.15 : (archer ? -0.28 : 0.03));
     const lnv = Math.sqrt(lean * lean + 1);
     const ux = (dir * lean) / lnv, uy = -1 / lnv;
     const bx0 = x + lunge;
     const shX = bx0 + ux * torsoH, shY = hipY + uy * torsoH;
-    const bwT = w * (giant ? 0.94 : (archer ? 0.44 : 0.52));   // 어깨 폭
-    const bwH = w * (giant ? 0.60 : (archer ? 0.36 : 0.42));   // 허리 폭
+    // 어깨·허리·다리·무기가 **시대마다 다른 덩어리**가 된다.
+    // 돌 시대는 좁고 마르고, 기계 시대는 넓고 굵다. 장식이 아니라 이게 실루엣이다.
+    const bwT = w * (giant ? 0.94 : (archer ? 0.44 : 0.52)) * ERA_SHOULDER[eI];
+    const bwH = w * (giant ? 0.60 : (archer ? 0.36 : 0.42)) * (0.55 + 0.45 * ERA_SHOULDER[eI]);
+    const ew = ERA_WEAP[eI];
 
     // 다리 — 걷는 위상은 x 에서 나온다. 멈추면 저절로 멎는다
-    const lw = giant ? w * 0.23 : Math.max(3, w * 0.16);
+    const lw = (giant ? w * 0.23 : Math.max(3, w * 0.16)) * ERA_LEG[eI];
     const base = archer ? 0.32 : 0;
     const amp = kind === C.U_SPEAR ? 0.34 : (giant ? 0.20 : 0.30);
     const a1 = base + walk * amp, a2 = -base - walk * amp;
@@ -1737,7 +1778,7 @@ export class Renderer {
     const hgap = giant ? headR * 0.72 : headR * 0.92;
     const hx = shX + ux * hgap + dir * w * 0.03;
     const hy = shY + uy * hgap;
-    this.addCircle(hx, hy, headR);
+    this.addHead(hx, hy, headR, eI);
 
     const handY = shY + torsoH * 0.28;
     const hx0 = shX + dir * bwT * 0.46;
@@ -1748,15 +1789,15 @@ export class Renderer {
       // 칼 — 높이 들었다가 내려친다. 짧고 두껍다
       const a = atk > 0 ? -0.62 : 1.18;
       const c = Math.cos(a), s = Math.sin(a);
-      this.addBar(hx0, handY - 3, dir * c, -s, h * 0.50, 8, 2.9, 1.4);
+      this.addBar(hx0, handY - 3, dir * c, -s, h * 0.50 * ew, 8, 2.9 * ew, 1.4);
       this.addBar(hx0, handY - 3, s, dir * c, 7, 7, 2, 2);        // 손잡이 가드
       this.addCircle(hx0 - dir * c * 8, handY - 3 + s * 8, 2.4);  // 손잡이 끝
-      this.wtX[i] = hx0 + dir * c * h * 0.50; this.wtY[i] = handY - 3 - s * h * 0.50;
+      this.wtX[i] = hx0 + dir * c * h * 0.50 * ew; this.wtY[i] = handY - 3 - s * h * 0.50 * ew;
     } else if (kind === C.U_SPEAR) {
       // 창 — **몸 길이보다 앞으로 훨씬 더 나간다.** 이게 사거리다
       const a = atk > 0 ? 0.02 : 0.15;
       const c = Math.cos(a), s = Math.sin(a);
-      const len = h * 1.12 + (atk > 0 ? 12 : 0);
+      const len = h * 1.12 * ew + (atk > 0 ? 12 : 0);
       const px = bx0 + dir * w * 0.10;
       this.addBar(px, handY, dir * c, -s, len, w * 0.72, 2.3, 2.1);
       this.addSpike(px + dir * c * len, handY - s * len, dir * c, -s, 15, 4.6);
@@ -1784,9 +1825,9 @@ export class Renderer {
       this.addCircle(sx2 - dir * w * 0.42, sy2 + h * 0.01, w * 0.27);   // 등 혹
       const a = atk > 0 ? -0.62 : 0.66;
       const c = Math.cos(a), s = Math.sin(a);
-      const cl = h * 0.52;
+      const cl = h * 0.52 * ew;
       this.addBar(hx0, handY, dir * c, -s, cl, 7, 3.4, 8.5);
-      this.addCircle(hx0 + dir * c * cl, handY - s * cl, w * 0.21);     // 몽둥이 대가리
+      this.addCircle(hx0 + dir * c * cl, handY - s * cl, w * 0.21 * ew);     // 몽둥이 대가리
       this.wtX[i] = hx0 + dir * c * (cl + w * 0.19); this.wtY[i] = handY - s * (cl + w * 0.19);
     }
 
@@ -1873,9 +1914,10 @@ export class Renderer {
 
     const giant = kind === C.U_GIANT;
     const archer = kind === C.U_ARCHER;
+    const eI = eraIdx(era);
     const legH = h * (archer ? 0.30 : 0.33);
     const torsoH = h * (giant ? 0.44 : 0.40);
-    const headR = w * (giant ? 0.22 : (archer ? 0.27 : 0.28));
+    const headR = w * (giant ? 0.22 : (archer ? 0.27 : 0.28)) * ERA_HEAD[eI];
     const hipY = gy - legH;
     const lean = giant ? 0.22 : (kind === C.U_SWORD ? 0.15 : (archer ? -0.28 : 0.03));
     const lnv = Math.sqrt(lean * lean + 1);
@@ -1921,6 +1963,7 @@ export class Renderer {
     }
     const giant = kind === C.U_GIANT;
     const archer = kind === C.U_ARCHER;
+    const eI = eraIdx(game.uEra[i]);
     const legH = h * (archer ? 0.30 : 0.33);
     const torsoH = h * (giant ? 0.44 : 0.40);
     const hipY = gy - legH;
@@ -1929,8 +1972,8 @@ export class Renderer {
     const ux = (dir * lean) / lnv, uy = -1 / lnv;
     const bx0 = x + lunge;
     const shX = bx0 + ux * torsoH, shY = hipY + uy * torsoH;
-    const bwT = w * (giant ? 0.94 : (archer ? 0.44 : 0.52));
-    const bwH = w * (giant ? 0.60 : (archer ? 0.36 : 0.42));
+    const bwT = w * (giant ? 0.94 : (archer ? 0.44 : 0.52)) * ERA_SHOULDER[eI];
+    const bwH = w * (giant ? 0.60 : (archer ? 0.36 : 0.42)) * (0.55 + 0.45 * ERA_SHOULDER[eI]);
     const nx = -uy, ny = ux;
     ctx.moveTo(bx0 - nx * bwH * 0.5, hipY - ny * bwH * 0.5);
     ctx.lineTo(shX - nx * bwT * 0.5, shY - ny * bwT * 0.5);
@@ -1939,6 +1982,24 @@ export class Renderer {
     ctx.closePath();
     if (kind === C.U_SWORD) {
       this.addCircle(bx0 + dir * w * 0.44, hipY - torsoH * 0.44, w * 0.36);
+    }
+    // 머리 — 시대마다 모양이 다르므로 윤곽에도 넣는다. 밀집했을 때
+    // 머리 줄만 봐도 몇 기가 어느 시대인지가 읽힌다
+    const headR = w * (giant ? 0.22 : (archer ? 0.27 : 0.28)) * ERA_HEAD[eI];
+    const hgap = giant ? headR * 0.72 : headR * 0.92;
+    this.addHead(shX + ux * hgap + dir * w * 0.03, shY + uy * hgap, headR, eI);
+  }
+
+  // 머리 — **시대의 얼굴이다.** 원 → 원 → 뿔 자리 → 챙 넓은 사다리꼴 → 각진 면갑.
+  // 장식을 얹는 대신 머리 자체의 윤곽을 바꾼다. 작게 그려도 안 사라진다.
+  addHead(hx, hy, r, eI) {
+    const ctx = this.ctx;
+    if (eI >= 4) {                       // 기계 — 각진 통짜 면갑
+      ctx.rect(hx - r * 1.02, hy - r * 1.02, r * 2.04, r * 2.04);
+    } else if (eI === 3) {               // 화약 — 아래가 넓은 사다리꼴 (챙)
+      this.addTrap(hx, hy - r * 1.05, hy + r * 1.05, r * 1.35, r * 2.3, 0);
+    } else {
+      this.addCircle(hx, hy, r);
     }
   }
 
@@ -1958,7 +2019,7 @@ export class Renderer {
     const shX = bx0 + ux * torsoH, shY = hipY + uy * torsoH;
     const handY = shY + torsoH * 0.28;
     const bxx = shX + dir * w * 0.52, byy = handY - torsoH * 0.16;
-    const R = h * 0.36;
+    const R = h * 0.36 * ERA_WEAP[eraIdx(game.uEra[i])];
     // 활대
     ctx.moveTo(bxx + dir * R * Math.cos(1.16), byy - R * Math.sin(1.16));
     ctx.arc(bxx, byy, R, dir > 0 ? -1.16 : Math.PI + 1.16, dir > 0 ? 1.16 : Math.PI - 1.16, dir < 0);
@@ -2626,14 +2687,14 @@ export class Renderer {
     // ── 적 시대 사다리 — **한 줄에 두 진영의 시대가 같이 있다** ──
     // 채워진 칸이 적의 시대, 그 아래 흰 표식이 내 시대다. 누가 앞서는지가
     // 숫자를 읽지 않고 위치로 읽힌다.
-    const ey = CMD_Y + 46;
+    const ey = CMD_Y + 44;
     ctx.font = FONT_MICRO;
     ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.62)];
-    ctx.fillText(LBL_FOE_ERA, CMD_X + 10, ey + 3);
+    ctx.fillText(LBL_FOE_ERA, CMD_X + 10, ey);
     ctx.font = FONT_SMALL;
     ctx.fillStyle = C.COL_STRUCT;
-    ctx.fillText(C.ERA_NAME[aiEra < C.ERA_COUNT ? aiEra : C.ERA_COUNT - 1], CMD_X + 44, ey);
-    const lx = CMD_X + 84, lw = (CMD_W - 94) / C.ERA_COUNT;
+    ctx.fillText(C.ERA_NAME[aiEra < C.ERA_COUNT ? aiEra : C.ERA_COUNT - 1], CMD_X + 10, ey + 12);
+    const lx = CMD_X + 56, lw = (CMD_W - 66) / C.ERA_COUNT;
     ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.20)];
     ctx.beginPath();
     for (let i = 0; i < C.ERA_COUNT; i++) ctx.rect(lx + i * lw, ey + 1, lw - 3, 9);
@@ -2651,9 +2712,6 @@ export class Renderer {
     ctx.lineTo(mxp - 4.5, ey + 17);
     ctx.closePath();
     ctx.fill();
-    ctx.font = FONT_MICRO;
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.55)];
-    ctx.fillText(LBL_MY_ERA, CMD_X + 10, ey + 15);
 
     // 적 편성 — 아이콘 줄과 막대 홈은 안 바뀐다. 여기 굽고 막대만 매 프레임 얹는다
     const mx = CMD_X + 10, mw = CMD_W - 20, cw = mw / C.UNIT_KINDS;
@@ -3343,6 +3401,24 @@ export class Renderer {
     } else {
       this.paintBrief();
     }
+    // 상성 화살표 — **하나씩 순서대로** 그린다. 여섯을 한 번에 보여 주면
+    // 그림이 아니라 무늬가 된다. game.stateTick 이 BRIEF 진입 후 프레임 수다.
+    // 9초 안에 여섯이 다 나온다 (40프레임 × 6 = 4초).
+    const tick = (typeof game.stateTick === 'number') ? game.stateTick : 600;
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.9)];
+    ctx.beginPath();
+    for (let k = 0; k < 6; k++) {
+      const f = (tick - k * BRIEF_STEP) / BRIEF_STEP;
+      if (f <= 0) continue;
+      const g = f > 1 ? 1 : easeOutCubic(f);
+      const x0 = k < 4 ? RING_X[k] : (k === 4 ? RING_X[2] : RING_X[3]);
+      const y0 = k < 4 ? RING_Y[k] : (k === 4 ? RING_Y[2] : RING_Y[3]);
+      const x1 = k < 4 ? RING_X[(k + 1) & 3] : (k === 4 ? RING_SATX : RING_GX);
+      const y1 = k < 4 ? RING_Y[(k + 1) & 3] : (k === 4 ? RING_SATY : RING_GY);
+      this.addArrow(x0, y0, x0 + (x1 - x0) * g, y0 + (y1 - y0) * g, 30);
+    }
+    ctx.fill();
+
     // 진짜 버튼 열을 설명 위에 다시 올린다 — 화살표가 가리키는 그 칸이다
     this.drawButtons(game);
     this.drawRally(game);
@@ -3392,21 +3468,11 @@ export class Renderer {
     ctx.fillStyle = C.COL_BONUS;
     ctx.fillText(BR_RING, 286, 118);
 
-    const cx = 286, cy = 272, R = 78;
-    const NX = [cx, cx + R, cx, cx - R];
-    const NY = [cy - R, cy, cy + R, cy];
-    const NK = [C.U_SWORD, C.U_SPEAR, C.U_CAV, C.U_ARCHER];
-    const SX = 414, SY = 350, GX = 158, GY = 350;
-    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.85)];
-    ctx.beginPath();
-    for (let k = 0; k < 4; k++) {
-      const j = (k + 1) & 3;
-      this.addArrow(NX[k], NY[k], NX[j], NY[j], 30);
-    }
-    this.addArrow(NX[2], NY[2], SX, SY, 30);        // 기병 → 투석기
-    this.addArrow(NX[3], NY[3], GX, GY, 30);        // 궁수 → 거인
-    ctx.fill();
-
+    const cx = RING_CX, cy = RING_CY;
+    const NX = RING_X, NY = RING_Y;
+    const NK = BRIEF_KIND;
+    const SX = RING_SATX, SY = RING_SATY, GX = RING_GX, GY = RING_GY;
+    // 화살표는 여기서 굽지 않는다 — **하나씩 순서대로 나타나야** 고리가 읽힌다
     for (let k = 0; k < 4; k++) this.drawUnitBadge(NK[k], NX[k], NY[k], 1, C.COL_PLAYER);
     this.drawUnitBadge(C.U_CATA, SX, SY, 1, C.COL_PLAYER);
     this.drawUnitBadge(C.U_GIANT, GX, GY, 1, C.COL_PLAYER);
@@ -3659,11 +3725,20 @@ export class Renderer {
     };
     // **판이 끝난 순간에 멈춘 시간**을 찍는다. elapsed() 를 매 프레임 읽으면
     // 결과 화면에서 시간이 계속 늘어난다 (실제로 그렇게 보였다)
-    const secs = this.overTime >= 0 ? this.overTime : game.elapsed();
+    // game.js 가 endTime 에서 시계를 세운다. 그 전 빌드에서는 렌더가 잡아 둔
+    // 값을 쓴다 — 어느 쪽이든 결과 화면의 시간은 **늘어나지 않는다**
+    const secs = (typeof game.stageTime === 'function') ? game.stageTime()
+      : (this.overTime >= 0 ? this.overTime : game.elapsed());
     row(LABEL_TIME, (x, yy) => {
       const w = this.drawFixed1(secs * e, x, yy);
       ctx.fillText(LABEL_S, x + w + 2, yy);
     });
+    if (camp && typeof game.campaignTime === 'function') {
+      row(LBL_CAMP_TIME, (x, yy) => {
+        const w = this.drawFixed1(game.campaignTime() * e, x, yy);
+        ctx.fillText(LABEL_S, x + w + 2, yy);
+      });
+    }
     if (!camp) {
       row(LABEL_KILL, (x, yy) => this.drawLeft(game.kills * e, x, yy, 9));
       row(LABEL_LOST, (x, yy) => this.drawLeft(game.lost * e, x, yy, 9));
