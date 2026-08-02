@@ -497,6 +497,7 @@ async function run() {
           lenWater: (C.STAGE_WATER_MUL || []).length, lenDip: (C.STAGE_DIP || []).length,
           lenName: (C.COMMANDER_NAME || []).length, lenTaunt: (C.COMMANDER_TAUNT || []).length,
           lenLine: (C.COMMANDER_LINE || []).length,
+          hp0: (C.STAGE_HP_MUL || [])[0],
         },
         // 페이지가 내놓는 EV 를 그대로 받아 계약 번호와 대조한다
         ev: R.EV || null,
@@ -584,7 +585,9 @@ async function run() {
   }
   // 관측이 없으면 보수적인 기본값(단일 페이지 실측 ≈ 0.27 tick/ms 를 3병렬로)
   const TICK_PER_MS = report.tickBudget.tickPerMs > 0.02 ? report.tickBudget.tickPerMs : 0.8;
-  const estMs = (ticks) => Math.round(ticks / TICK_PER_MS);
+  // 상한 틱을 그대로 쓰면 "모든 판이 상한까지 간다"는 최악 가정이라 표본을 과하게 줄인다.
+  // 실측에서 대부분의 판은 상한의 절반 아래에서 끝난다. 그 계수를 곱해 기대비용으로 본다.
+  const estMs = (worstTicks, frac) => Math.round(worstTicks * frac / TICK_PER_MS);
 
   // ── 4. 상성이 실제로 작동하는가 — 결투 하네스 ────────────────
   // EV.COUNTER_HIT 이 나온다고 상성이 "작동"하는 것은 아니다.
@@ -624,6 +627,9 @@ async function run() {
       function duel(atk, def, na, nd) {
         g.supplier = null;
         g.reset();
+        // 설명 화면(S.BRIEF)에서는 step() 이 통째로 no-op 이다. 안 닫으면
+        // 결투가 9초 동안 아무 일도 안 하고, 그건 상성이 아니라 시험이 고장난 것이다.
+        if (g.state === 3 && g.dismissBrief) g.dismissBrief();
         isolate();
         g.emit = function () {};
         place(0, atk, na);
@@ -675,6 +681,11 @@ async function run() {
         orig(t, a, b);
       };
       const step = (n) => { for (let i = 0; i < n; i++) window.__clock.tick(1000 / 60); };
+      // **설명 화면(S.BRIEF=3)을 먼저 닫는다.** v3 가 원정 첫 전투 앞에 붙였고,
+      // 그 화면에서는 **아무 입력이나 소비돼 화면을 닫는 데만 쓰인다.**
+      // 안 닫고 시험하면 첫 소환이 삼켜져 "검사가 안 나온다"는 거짓 미구현이 나온다.
+      const unbrief = () => { for (let i = 0; i < 4 && g.state === 3; i++) { if (g.dismissBrief) g.dismissBrief(); else { R.inject(0, performance.now()); step(1); } } };
+      unbrief();
 
       // 유닛 6종 — 각각 실제로 소환되는가
       const spawnOk = [];
@@ -697,7 +708,7 @@ async function run() {
       const SK = ['TIDE', 'VOLLEY', 'RALLY'];
       for (let i = 0; i < 3; i++) {
         if (typeof A[SK[i]] !== 'number') continue;
-        if (g.state !== 0) g.reset();          // 판이 끝나 있으면 입력이 재시작으로 먹힌다
+        if (g.state !== 0) { g.reset(); unbrief(); }   // 판이 끝나 있으면 입력이 재시작으로 먹힌다
         g.gold = C.GOLD_CAP;
         if (g.skillCd && g.skillCd.length > i) g.skillCd[i] = 0;
         const before = skillSeen[i];
@@ -711,7 +722,7 @@ async function run() {
       // 포탑 — 최대 단계까지 올라가는가, 그리고 실제로 쏘는가
       let towerLv = -1, towerFire = -1;
       if (typeof A.TOWER === 'number' && g.towerLv !== undefined) {
-        if (g.state !== 0) g.reset();
+        if (g.state !== 0) { g.reset(); unbrief(); }
         for (let n = 0; n < 4; n++) {
           g.gold = C.GOLD_CAP;
           R.inject(A.TOWER, performance.now());
@@ -750,9 +761,13 @@ async function run() {
     : await guard(report, 'onboard', async () => {
     const p = await page0();
     const r = await p.evaluate(async () => {
-      const g = window.__rising.game;
+      const g = window.__rising.game, C = window.__rising.C;
       const seen = {}, firstAt = {};
       let seen10 = null;
+      // 설명 화면은 시뮬 시계를 멈춘다. 여기 카운트는 **전투 시작 이후**의 시계다.
+      // 심사자가 보는 30초에는 설명 화면도 들어가므로 그 사실을 따로 낸다.
+      const briefAtStart = g.state === 3;
+      const briefMs = C.BRIEF_MS | 0;
       const orig = g.emit.bind(g);
       g.emit = (t, a, b) => {
         seen[t] = (seen[t] || 0) + 1;
@@ -765,7 +780,7 @@ async function run() {
         if (i === 600) seen10 = Object.assign({}, seen);     // 10초 스냅샷
         if (i % 600 === 0) await new Promise((x) => setTimeout(x, 0));
       }
-      return { seen, seen10: seen10 || {}, firstAt,
+      return { seen, seen10: seen10 || {}, firstAt, briefAtStart, briefMs,
                gold: g.gold | 0, era: g.era, spawned: g.spawned, kills: g.kills,
                // 판이 30초 안에 끝나 버렸는지도 봐야 한다 (state 2 = 결과 화면)
                ended: g.state === 2, stage: g.stage === undefined ? -1 : g.stage | 0 };
@@ -795,6 +810,7 @@ async function run() {
           this.applyLevers();
         };
         g.reset();
+        if (g.state === 3 && g.dismissBrief) g.dismissBrief();
         const spawnKind = new Array(KK).fill(0);
         const orig = g.emit.bind(g);
         g.emit = (t, a, b) => { if (t === 0 && b === 1 && a < KK) spawnKind[a]++; orig(t, a, b); };
@@ -888,8 +904,11 @@ async function run() {
     { name: 'econ', arche: 'econ', pref: 2 },
   ];
   const CAMP_DROP = ['skill', 'tower', 'econ', 'siege', 'cav'];   // 예산 부족 시 이 순서로 버린다
-  const CAP_STAGE = 60 * 150;      // 한 전투 2.5분 상한
-  const CAP_TOTAL = 60 * 480;      // 원정 전체 8분 상한
+  // 상한을 2.5분으로 뒀더니 stage 1 이 138초에서 잘려 "미결"로 찍혔다 —
+  // **끝날 판을 안 끝났다고 보고하는 것은 계측기의 거짓말이다.** 3.5분으로 올린다.
+  // (틱과 시뮬초는 1:1 이 아니다. 히트스톱이 step 을 건너뛰므로 9000틱 ≈ 138초였다)
+  const CAP_STAGE = 60 * 210;      // 한 전투 3.5분(틱) 상한
+  const CAP_TOTAL = 60 * 600;      // 원정 전체 10분(틱) 상한
 
   report.campaign = { supported: false, reason: '', runs: [] };
   if (!on('campaign')) {
@@ -901,7 +920,7 @@ async function run() {
     // 예산 안에 안 들어가면 표본을 줄인다. **줄인 사실을 출력에 남긴다.**
     for (const d of CAMP_DROP) {
       const worst = bots.length * CAP_TOTAL;
-      if (estMs(worst) < remainMs() * 0.55) break;
+      if (estMs(worst, 0.40) < remainMs() * 0.50) break;
       bots = bots.filter((b) => b.name !== d);
       note('원정 표본 축소: ' + d + ' 봇을 뺐다 (남은 예산 ' + Math.round(remainMs() / 1000) + '초)');
     }
@@ -919,6 +938,7 @@ async function run() {
           return { traits: tr, tower: gm.towerLv | 0, gold: gm.gold | 0, era: gm.era | 0,
                    alive: (gm.aliveL | 0) + (gm.aliveR | 0), hp: gm.baseHp ? gm.baseHp[0] | 0 : -1 };
         };
+        const goldStart = R.C.GOLD_START | 0;
         const ev = Object.create(null);
         const taunts = [];
         let endEv = null, curStage = 0, profSwitches = 0, lastProf = R.director ? R.director.profile : '?';
@@ -940,6 +960,10 @@ async function run() {
         };
         let totalTicks = 0;
         hook(g);
+        // 설명 화면(S.BRIEF)은 봇마다 닫는 시점이 달라진다 (idle 은 아예 안 닫는다).
+        // 여기서 일괄로 닫아 모든 봇을 같은 줄에서 출발시킨다.
+        // 전투 시간은 elapsed() 로 재므로 설명 시간은 어차피 안 들어간다.
+        if (g.state === 3 && g.dismissBrief) g.dismissBrief();
 
         const stages = [];
         let aborted = '';
@@ -956,15 +980,19 @@ async function run() {
             window.__clock.tick(1000 / 60);
             ticks++; totalTicks++;
             if (g.state === 2) break;
-            if (totalTicks % 600 === 0) {
+            // 판정 변화는 9초(=540틱) 구간마다 일어난다. 600틱마다 보면 놓친다.
+            if (totalTicks % 60 === 0) {
               const np = R.director ? R.director.profile : '?';
               if (np !== lastProf) { profSwitches++; lastProf = np; }
-              await new Promise((x) => setTimeout(x, 0));
             }
+            if (totalTicks % 600 === 0) await new Promise((x) => setTimeout(x, 0));
           }
           const rec = {
             stage: curStage, commander: cmd,
-            seconds: +(ticks / 60).toFixed(1), ticks,
+            // **elapsed() 를 쓴다.** 틱을 세면 설명 화면(BRIEF)처럼 시뮬이 멈추는
+            // 구간까지 전투 시간에 넣게 된다 — 첫 전투 40~60초 판정이 그만큼 틀어진다.
+            seconds: +(typeof g.elapsed === 'function' ? g.elapsed() : ticks / 60).toFixed(1),
+            ticks,
             outcome: g.state === 2 ? g.outcome : -1,
             myHp: g.baseHp ? g.baseHp[0] | 0 : -1, foeHp: g.baseHp ? g.baseHp[1] | 0 : -1,
             taunts: taunts.filter((x) => x.stage === curStage).length,
@@ -979,7 +1007,7 @@ async function run() {
           try { g.nextStage(); } catch (e) { aborted = 'nextStage() 예외: ' + e.message; break; }
           for (let i = 0; i < 30 && g.state === 2; i++) { window.__clock.tick(1000 / 60); totalTicks++; }
           const post = snap(g);
-          rec.carry = { pre, post, stagePost: g.stage | 0, statePost: g.state | 0 };
+          rec.carry = { pre, post, goldStart, stagePost: g.stage | 0, statePost: g.state | 0 };
           if (g.state !== 0) { aborted = 'nextStage() 후에도 PLAY 로 안 돌아온다 (state ' + g.state + ')'; break; }
           if ((g.stage | 0) !== curStage + 1) { aborted = 'nextStage() 가 stage 를 안 올렸다 (' + curStage + '→' + g.stage + ')'; break; }
           if (totalTicks >= caps.total) { aborted = '원정 전체 시간 상한 ' + (caps.total / 60) + '초 초과'; break; }
@@ -987,8 +1015,12 @@ async function run() {
         const cleared = stages.filter((x) => x.outcome === 1).length;
         return {
           supported: true, name: bot.name, startStage, stageMax, stages, cleared,
+          clearedSelf: g.stagesCleared === undefined ? -1 : g.stagesCleared | 0,
           completed: cleared >= stageMax ? 1 : 0,
-          totalSeconds: +(totalTicks / 60).toFixed(1), totalTicks,
+          // 원정 총 길이는 게임이 세는 값을 우선한다 (전투 시간의 합. 결과 화면 대기는 뺀다)
+          totalSeconds: +(typeof g.campaignTime === 'function'
+            ? g.campaignTime() : totalTicks / 60).toFixed(1),
+          wallTicks: totalTicks, totalTicks,
           campaignOver: !!g.campaignOver, aborted,
           taunts, tauntTotal: taunts.length, profSwitches,
           evTaunt: ev[EVC.TAUNT] || 0, evStageStart: ev[EVC.STAGE_START] || 0,
@@ -1017,15 +1049,18 @@ async function run() {
   // 그건 "상성을 알아서"가 아니라 "한 종류만 쓰면 진다"일 뿐이다.
   // 상성이 실력이려면 **상성 > 무작위 > 도배** 순서가 나와야 한다.
   //
-  // 상대 축: 디렉터 프로파일을 고정해 다섯 상대를 만든다. 원정이 구현되기 전까지
-  // 이것이 사령관 다섯의 대역이다. AUTO 는 아무것도 고정하지 않은 실제 조건이다.
+  // 상대 축: 원정이 있으면 **다섯 사령관 전투를 직접 차려서** 붙인다
+  // (stage 를 세우고 resetBattle()). 없으면 디렉터 프로파일을 고정해 대역을 만든다.
+  // 어느 쪽이든 **모든 봇이 정확히 같은 상대**를 만난다 — 그래야 차이가 봇의 것이다.
   const GAP_BOTS = [
     { name: '상성', spec: { pick: 'counter' } },
     { name: '도배검', spec: { pick: 'spam', k: 0 } },
     { name: '도배궁', spec: { pick: 'spam', k: 2 } },
     { name: '무작위', spec: { pick: 'rand', seed: 20260802 } },
   ];
-  const GAP_FOES = ['AUTO', 'SWARMER', 'RUSHER', 'TURTLE', 'ECONOMIST', 'BALANCED'];
+  const GAP_FOES = CAMP_OK
+    ? ['S0', 'S1', 'S2', 'S3', 'S4']                      // 사령관 다섯 (실제 전투 조건)
+    : ['AUTO', 'SWARMER', 'RUSHER', 'TURTLE', 'ECONOMIST', 'BALANCED'];
   const CAP_GAP = 60 * 180;        // 한 판 3분 상한. 안 끝나면 승리가 아니다
 
   report.gap = { rows: [], foes: [], bots: [], cap: CAP_GAP / 60 };
@@ -1034,7 +1069,9 @@ async function run() {
     let gbots = GAP_BOTS.slice();
     for (;;) {
       const worst = foes.length * gbots.length * CAP_GAP;
-      if (estMs(worst) < remainMs() * 0.75 || foes.length <= 2) break;
+      // (estMs 에 계수를 안 넘겨 NaN 이 나오는 바람에 상대를 5→2 로 깎은 적이 있다.
+      //  표본이 조용히 줄면 격차가 0 으로 뭉개진다 — 계측기가 자기 발등을 찍은 경우다)
+      if (estMs(worst, 0.45) < remainMs() * 0.85 || foes.length <= 3) break;
       const dropped = foes.pop();
       note('격차 하네스 표본 축소: 상대 ' + dropped + ' 를 뺐다 (남은 예산 ' +
            Math.round(remainMs() / 1000) + '초)');
@@ -1047,8 +1084,27 @@ async function run() {
         const [foe, spec, EVC, cap] = arg;
         const R = window.__rising, g = R.game, d = R.director;
         const PROFILES = ['RUSHER', 'TURTLE', 'ECONOMIST', 'SWARMER', 'BALANCED'];
+        const KK = R.C.UNIT_KINDS | 0;
+        const ev = Object.create(null);
+        const orig = g.emit.bind(g);
+        g.emit = (t, a, b) => { ev[t] = (ev[t] || 0) + 1; orig(t, a, b); };
+
+        // ── 상대를 세운다. **reset 은 여기서 끝난다** ──
+        // (예전에 여기서 세운 뒤 아래에서 또 reset() 을 불러 stage 가 0으로 돌아간 적이 있다.
+        //  그러면 다섯 상대가 전부 같은 상대가 되고, 격차 0 이 나온다 — 계측기가 거짓말한 것이다)
+        // S<n> = n 번째 전투를 직접 차린다. 게임 코드를 고치지 않고 인스턴스 위에서만
+        // stage 를 세우고 resetBattle() 을 부른다 (결투 하네스의 isolate 와 같은 급).
+        // **특성·포탑 승계는 없다.** 봇 간 비교용 조건이지 실제 원정 승률이 아니다.
         let forced = 0;
-        if (foe !== 'AUTO' && d && typeof d.applyLevers === 'function') {
+        g.reset();
+        if (foe.charAt(0) === 'S' && foe.length === 2) {
+          const sIdx = +foe.charAt(1);
+          if (typeof g.resetBattle === 'function' && g.stage !== undefined) {
+            g.stage = sIdx;
+            g.resetBattle();
+            forced = (g.stage | 0) === sIdx ? 2 : 0;
+          }
+        } else if (foe !== 'AUTO' && d && typeof d.applyLevers === 'function') {
           d.onChunkBoundary = function (game, ci) {
             this.difficulty = Math.max(0, Math.min(4, (game.simTime / 22000) | 0));
             this.observing = false; this.profile = foe;
@@ -1057,11 +1113,9 @@ async function run() {
           };
           forced = 1;
         }
-        const KK = R.C.UNIT_KINDS | 0;
-        const ev = Object.create(null);
-        const orig = g.emit.bind(g);
-        g.emit = (t, a, b) => { ev[t] = (ev[t] || 0) + 1; orig(t, a, b); };
-        g.reset();
+        // 설명 화면을 먼저 닫는다 — 봇마다 첫 입력이 삼켜지는 시점이 달라지면
+        // 그 차이가 격차로 잡힌다. 모든 봇을 같은 줄에서 출발시킨다.
+        if (g.state === 3 && g.dismissBrief) g.dismissBrief();
         let i = 0;
         for (; i < cap; i++) {
           if (i % 12 === 0) window.__playGap(spec);
@@ -1073,7 +1127,9 @@ async function run() {
         let tot = 0;
         for (let k = 0; k < KK; k++) { const v2 = g.spawnedKind ? g.spawnedKind[k] | 0 : 0; mix[k] = v2; tot += v2; }
         return {
-          forced, seconds: +(i / 60).toFixed(0),
+          forced, stage: g.stage === undefined ? -1 : g.stage | 0,
+          commander: g.commander === undefined ? -1 : g.commander | 0,
+          seconds: +(typeof g.elapsed === 'function' ? g.elapsed() : i / 60).toFixed(0),
           outcome: g.state === 2 ? g.outcome : -1,
           myHp: g.baseHp[0] | 0, foeHp: g.baseHp[1] | 0,
           // **baseK() 를 쓴다.** ERA_BASE_HP_MUL 때문에 baseMax 가 판 도중 늘어나
@@ -1211,8 +1267,13 @@ async function run() {
     for (let i = 1; i < pts.length; i++) if (pts[i] > pts[0]) return 0;
     return 1;
   })();
-  const firstStageSec = med(arche.map((r) => (r.stages[0] ? r.stages[0].seconds : null))
-                                 .filter((v) => v !== null));
+  // 첫 전투 길이 — **이긴 전투만** 센다. 계약 §4 의 40~60초는 "가르치는 전투를
+  // 이기는 데 걸리는 시간"이다. 상한에 걸려 안 끝난 판(미결)을 섞으면 그냥 상한값을
+  // 재게 되고, 29초에 무너진 대조군(idle)을 섞으면 목표가 아래로 끌려간다.
+  const st0 = arche.map((r) => r.stages[0]).filter(Boolean);
+  const firstStageSec = med(st0.filter((s) => s.outcome === 1).map((s) => s.seconds));
+  const firstStageAll = med(st0.filter((s) => s.outcome !== -1).map((s) => s.seconds));
+  const firstStageUnres = st0.filter((s) => s.outcome === -1).length;
   const campMinutes = arche.length
     ? med(arche.filter((r) => r.completed === 1).map((r) => +(r.totalSeconds / 60).toFixed(2))) : -1;
   const tauntRuns = CR.filter((r) => r.tauntTotal > 0).length;
@@ -1232,6 +1293,9 @@ async function run() {
     if (c.post.tower < c.pre.tower) carryBad.push(r.name + ' s' + st.stage + ': 포탑 단계가 내려갔다 ' + c.pre.tower + '→' + c.post.tower);
     if (c.post.era !== 0) carryBad.push(r.name + ' s' + st.stage + ': 시대가 초기화되지 않았다 (' + c.post.era + ')');
     if (c.post.alive !== 0) carryBad.push(r.name + ' s' + st.stage + ': 병력이 남았다 (' + c.post.alive + ')');
+    if (c.goldStart !== undefined && c.post.gold !== c.goldStart) {
+      carryBad.push(r.name + ' s' + st.stage + ': 금이 초기화되지 않았다 (' + c.post.gold + ' ≠ GOLD_START ' + c.goldStart + ')');
+    }
   }
   const campAborted = CR.filter((r) => r.aborted).length;
   const spamRun = CR.find((r) => r.name === '도배검');
@@ -1350,6 +1414,10 @@ async function run() {
       console.log('  ⚠ 표본을 줄였다 (전부 잰 것이 아니다):');
       for (const s of report.reduced) console.log('    · ' + s);
     }
+    if (WANT.size < ALL_SECTIONS.length) {
+      console.log('  ⚠ 부분 실행이다. 빠진 구간: ' + ALL_SECTIONS.filter((s) => !on(s)).join(' ') +
+        ' — 그 구간의 숫자는 "안 잰 것"이지 "0"이 아니다');
+    }
   }
 
   console.log('\n[0] 구현 현황 — 없는 기능은 0점이 아니라 미구현이다');
@@ -1385,6 +1453,12 @@ async function run() {
   }
 
   console.log('\n[1] 여덟 원형 전략 — 결말·판길이·6유닛 구성이 갈려야 한다');
+  if (CAMP_OK) {
+    console.log('  ⚠ 원정이 구현된 뒤로 이 표는 **첫 전투(stage 0)만** 잰 것이다. ' +
+      'STAGE_HP_MUL[0]=' + ((IMPL.cfg && IMPL.cfg.hp0 !== undefined) ? IMPL.cfg.hp0 : '?') +
+      ' 라 판 길이가 v2 대비 짧게 나오는 것이 정상이다.');
+    console.log('  → "8개 원형 중 몇이 이기는가"의 v3 판 답은 이 줄이 아니라 [9] 원정 완주율이다.');
+  }
   console.log('  ' + pad('봇', 9) + pad('결말', 9) + '  초  ' + ' 내기지 적기지 시대  처치  ' +
     pad('구성(검창궁기거투)', 22) + '탑 스킬 상성');
   for (const m of M) {
@@ -1400,7 +1474,8 @@ async function run() {
   if (anyMissing.size) console.log('  ⚠ 봇이 쓰려 했으나 없던 API: ' + [...anyMissing].join(' '));
 
   console.log('\n[2] 새 요소가 죽어 있지 않은가 — 능력 / 실사용을 나눠 잰다');
-  if (!U) console.log('  ✖ 확인 실패');
+  if (!on('usage')) console.log('  — 구간 제외 (안 잰 것이다)');
+  else if (!U) console.log('  ✖ 확인 실패');
   else {
     console.log('  유닛 소환   ' + U.spawnOk.map((v, i) =>
       (UN[i] || i) + (v === 1 ? '○' : v === 0 ? '✖' : '—')).join(' ') +
@@ -1458,6 +1533,11 @@ async function run() {
       (first === undefined ? '   ✖ 30초 안에 한 번도 없다'
         : '   첫 파괴 ' + first + '초' + (first <= 10 ? ' ○' : ' ✖ 계약은 10초다')));
     if (report.first30.ended) console.log('  ⚠ 이 판은 30초 안에 끝났다 — 위 카운트는 판 전체다');
+    if (report.first30.briefAtStart) {
+      console.log('  ⚠ 판 앞에 설명 화면(S.BRIEF, 최대 ' + (report.first30.briefMs / 1000) +
+        '초)이 있다. 시뮬 시계가 멈추므로 위 표에는 안 들어간다 — ' +
+        '**심사자가 보는 30초에는 들어간다.** 입력 한 번이면 닫힌다.');
+    }
   }
 
   console.log('\n[5] 디렉터 — 프로파일을 고정하고 적 구성을 쟀다 (6칸)');
@@ -1481,6 +1561,11 @@ async function run() {
     console.log('    (config.js 에 원정 상수는 있다. game.js 가 아직 안 쓴다 — 상수만으로는 원정이 아니다)');
   } else {
     if (report.campaign.sampled) console.log('  ⚠ 표본 ' + report.campaign.sampled + ' 봇만 돌렸다');
+    const campBroken = report.campaign.runs.filter((r) => r && r.broken);
+    if (campBroken.length) {
+      console.log('  ✖ 계측 실패 ' + campBroken.length + '봇: ' + campBroken.map((r) => r.name).join(' ') +
+        '   (아래 수치는 나머지 ' + CR.length + '봇만 잰 것이다)');
+    }
     console.log('  ' + pad('봇', 9) + pad('클리어', 8) + pad('총초', 7) + '스테이지별 (초/결말/사령관)');
     for (const r of CR) {
       const line = r.stages.map((s) => 's' + s.stage + ':' + s.seconds + '초' +
@@ -1496,9 +1581,12 @@ async function run() {
       's' + x.stage + ' ' + (x.reach ? x.win + '/' + x.reach + '(' + x.rate + '%) ' + x.sec + '초' : '도달0')).join('   '));
     console.log('  곡선  ' + (curveOk === 1 ? '○ 뒤 전투가 더 어렵다'
       : curveOk === 0 ? '✖ 뒤 전투가 더 쉽다 — 난이도 곡선이 거꾸로다' : '— 표본 부족'));
-    console.log('  첫 전투 길이(중앙값) ' + firstStageSec + '초  ' +
-      (firstStageSec < 0 ? '' : (firstStageSec >= 40 && firstStageSec <= 60) ? '○ 목표 40~60'
-        : '✖ 목표 40~60 을 벗어났다'));
+    console.log('  첫 전투 길이  이긴 판 중앙값 ' + firstStageSec + '초  ' +
+      (firstStageSec < 0 ? '(이긴 봇 없음)' : (firstStageSec >= 40 && firstStageSec <= 60) ? '○ 목표 40~60'
+        : '✖ 목표 40~60 을 벗어났다') +
+      '   / 결말난 판 전체 ' + firstStageAll + '초, 상한 내 안 끝난 판 ' + firstStageUnres + '개');
+    console.log('  한 전투 상한 ' + (CAP_STAGE / 60) + '초(틱) · 원정 상한 ' + (CAP_TOTAL / 60) +
+      '초(틱). "미결" 은 이 상한 안에 결말이 안 난 것이다 — 진 것이 아니다');
     console.log('  도발  ' + tauntRuns + '/' + CR.length + ' 원정에서 발생, 총 ' + tauntTotal +
       '회, 분당 ' + tauntPerMin + '회, 첫 도발 ' + tauntFirst + '초  ' +
       (tauntTotal === 0 ? '✖ 한 번도 안 나온다 — 있는 기능이 아니다'
@@ -1519,6 +1607,17 @@ async function run() {
   else {
     console.log('  껍데기(진화·해일·드래프트)는 전부 같고 **유닛 선택만 다르다.** ' +
       '상대 ' + report.gap.foes.length + '종 · 한 판 상한 ' + report.gap.cap + '초');
+    const gapBroken = report.gap.rows.filter((r) => r && r.broken).length;
+    if (gapBroken) console.log('  ✖ 계측 실패 ' + gapBroken + '판 — 그만큼 표본이 작다');
+    const sFoe = GR.filter((r) => String(r.foe).charAt(0) === 'S' && String(r.foe).length === 2);
+    if (sFoe.length) {
+      const bad = sFoe.filter((r) => r.forced !== 2).length;
+      console.log('  상대 = 사령관 다섯 (stage 0~4 전투를 직접 차렸다). ' +
+        '**특성·포탑 승계 없음** — 실제 원정보다 불리한 조건이다. 봇 간 비교용 숫자다.');
+      if (bad) console.log('  ✖ ' + bad + '판에서 stage 강제가 실패했다 — 상대 축이 무너졌다. 아래 격차를 믿지 마라');
+    } else {
+      console.log('  상대 = 디렉터 프로파일 고정 (원정 미구현 시의 대역)');
+    }
     console.log('  ' + pad('봇', 8) + pad('승률', 12) + pad('기지비율차', 12) + pad('평균초', 8) +
       pad('상성타격%', 10) + '상대별 결말');
     for (const s of botStat) {
@@ -1548,7 +1647,36 @@ async function run() {
 
   console.log('\n─── 판정 ' + '─'.repeat(52) + '   (-1 = 미구현·측정불가)');
   for (const [k, v] of Object.entries(report.verdict)) {
-    console.log('  ' + k.replace(/_/g, ' ').padEnd(24) + v);
+    console.log('  ' + k.replace(/_/g, ' ').padEnd(26) + v);
+  }
+
+  // ── 계약 §5.5 목표 수치표 대조 ────────────────────────────────
+  // 사양서의 표를 그대로 계측 항목으로 만든 것이다. 주관이 안 들어간다.
+  console.log('\n─── 계약 §5.5 목표 대조 ' + '─'.repeat(37));
+  const d10n = (report.first30.seen10 ? ((report.first30.seen10[2] | 0) + (report.first30.seen10[3] | 0)) : -1);
+  const rows55 = [
+    ['8개 원형 중 첫 전투 승리', wins + '/' + M.length, CAMP_OK ? '참고치 (첫 전투는 가르치는 전투다)' : '2~3',
+      CAMP_OK ? null : (wins >= 2 && wins <= 3)],
+    ['8개 원형 중 원정 완주', campSupported ? campDone + '/' + arche.length : '미구현', '≤1',
+      campSupported ? campDone <= 1 : null],
+    ['무뇌 도배 생존 전투수', campSupported ? spamSurvive : '미구현', '≤2 (3전투 안에 패배)',
+      campSupported ? (spamSurvive >= 0 && spamSurvive <= 2) : null],
+    ['대조군 idle 승리', idleWin, '0', idleWin === 0],
+    ['상성 − 도배 승률 격차', GR.length ? gapWin + '%p' : '미측정', '≥40%p',
+      GR.length ? gapWin >= 40 : null],
+    ['상성 − 도배 기지비율 격차', GR.length ? gapMargin : '미측정', '≥0.30',
+      GR.length ? gapMargin >= 0.30 : null],
+    ['상성 − 무작위 승률 격차', GR.length ? gapRandWin + '%p' : '미측정', '>0 (상성이 앞선다)',
+      GR.length ? gapRandWin > 0 : null],
+    ['첫 전투 길이', campSupported ? firstStageSec + '초' : '미구현', '40~60초',
+      campSupported ? (firstStageSec >= 40 && firstStageSec <= 60) : null],
+    ['첫 10초 파괴(처치+기지피해)', d10n + '회', '≥1회', d10n >= 1],
+    ['난이도 곡선 뒤가 더 어렵다', campSupported ? (curveOk === 1 ? '그렇다' : curveOk === 0 ? '아니다' : '표본부족') : '미구현',
+      '그렇다', campSupported ? (curveOk === 1) : null],
+  ];
+  for (const [name, now, want, okv] of rows55) {
+    console.log('  ' + pad(name, 26) + pad(now, 14) + pad(want, 26) +
+      (okv === null ? '—' : okv ? '○' : '✖'));
   }
   console.log('');
 }

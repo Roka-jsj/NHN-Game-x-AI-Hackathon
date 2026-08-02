@@ -201,23 +201,25 @@ const BUILTIN_POLICY = {
 // readW = 판독층의 지분. 0이면 플레이어를 무시하고 제 성격대로만 간다.
 //   **거울이 0.85 로 가장 높다.** 마지막 사령관은 플레이어를 따라오므로
 //   도배가 안 통해야 한다는 것이 계약(§3)이다.
+//
+// ★ 여기에 수입·템포 배수를 **두지 않는다.** config 의 CMD_GOLD_MUL /
+//   CMD_TEMPO_MUL 을 game.js 가 이미 곱하고 있다. 같은 성격을 두 곳에서
+//   곱하면 조용히 제곱이 된다 — 성벽 사령관의 템포가 1.20×1.55 = 1.86 이 되어
+//   "느린 사령관"이 아니라 "아무것도 안 나오는 사령관"이 된다.
+//   **소유가 갈린다: 스칼라는 config·game.js, 구성비는 디렉터.**
+//   여기 남은 eraThresh 는 game.js 가 levers 로만 받는 값이라 중복이 아니다.
 const PERSONA = [
   // 0 무리 (SWARMER) — 싼 것을 빨리, 많이. 가장 읽기 쉬운 상대다 (가르치는 전투)
-  { mix: [8, 5, 2, 1, 0, 0], tempo: 980, readW: 0.25, cg: 3,
-    goldMul: 1.00, eraThresh: 1.05, waterMul: 0.95, tags: ['rush', 'mix'] },
-  // 1 쇄도 (RUSHER) — 빠른 것으로 계속 찌른다. 기병 중심, 템포가 가장 빠르다
-  { mix: [4, 2, 0, 8, 1, 0], tempo: 880, readW: 0.32, cg: 4,
-    goldMul: 1.05, eraThresh: 1.00, waterMul: 1.00, tags: ['rush', 'mix'] },
-  // 2 금고 (ECONOMIST) — 모아서 비싼 것을 낸다. 진화가 빠르다(문턱 0.75)
-  { mix: [1, 1, 3, 2, 5, 4], tempo: 1450, readW: 0.42, cg: 4,
-    goldMul: 1.10, eraThresh: 0.75, waterMul: 1.00, tags: ['heavy', 'mix'] },
+  { mix: [8, 5, 2, 1, 0, 0], readW: 0.25, cg: 3, eraThresh: 1.05, tags: ['rush', 'mix'] },
+  // 1 쇄도 (RUSHER) — 빠른 것으로 계속 찌른다. 기병 중심
+  { mix: [4, 2, 0, 8, 1, 0], readW: 0.32, cg: 4, eraThresh: 1.00, tags: ['rush', 'mix'] },
+  // 2 금고 (ECONOMIST) — 모아서 비싼 것을 낸다. 진화가 가장 빠르다
+  { mix: [1, 1, 3, 2, 5, 4], readW: 0.42, cg: 4, eraThresh: 0.75, tags: ['heavy', 'mix'] },
   // 3 성벽 (TURTLE) — 벽을 세우고 원거리로 갉는다. 물을 밀어 **시계**로 이긴다
-  { mix: [0, 5, 6, 0, 5, 3], tempo: 1550, readW: 0.42, cg: 4,
-    goldMul: 1.05, eraThresh: 0.95, waterMul: 1.30, tags: ['wall', 'ranged'] },
+  { mix: [0, 5, 6, 0, 5, 3], readW: 0.42, cg: 4, eraThresh: 0.95, tags: ['wall', 'ranged'] },
   // 4 거울 (BALANCED) — **플레이어를 읽고 따라온다.** 판독 지분이 가장 크고
   //   상성 대응이 가장 세다. 한 종류 도배는 여기서 반드시 벌을 받아야 한다
-  { mix: [3, 3, 3, 3, 2, 2], tempo: 1180, readW: 0.85, cg: 7,
-    goldMul: 1.05, eraThresh: 0.90, waterMul: 1.05, tags: ['mix'] },
+  { mix: [3, 3, 3, 3, 2, 2], readW: 0.85, cg: 7, eraThresh: 0.90, tags: ['mix'] },
 ];
 
 // ── 도배 처벌 계수 — "읽히면 손해" ───────────────────────────
@@ -232,14 +234,32 @@ const PERSONA = [
 //   focus = 플레이어 구성의 집중도(0=고르게, 1=한 종류). 정규화 허핀달이다.
 //   focus 가 0 이면 아래 계수는 **전부 1배** — 다양하게 쓰는 플레이어는
 //   난이도가 하나도 안 오른다. 이게 "곡선이지 상수가 아니다"의 실제 구현이다.
-const FOCUS_CG = 1.6;      // 상성 대응 가중치 ×(1+1.6·focus)
+//
+// ★ 네 계수는 추론이 아니라 스윕으로 골랐다. 봇 9종(도배 6 · 적응 3)을
+//   스테이지 5개에서 45판 돌려 **판별력**(적응 봇 우세 − 도배 봇 우세)을 재고
+//   그 값이 가장 큰 조합을 골랐다. 배운 것 두 가지가 직관과 반대였다:
+//
+//   1) **구성 대응만으로는 판이 안 바뀐다.** FOCUS_GOLD·FOCUS_ERA 를 둘 다 0 으로
+//      두면 판별력이 0.31 → 0.04 로 무너진다. 상성 유닛을 아무리 많이 뽑아도,
+//      뽑을 돈이 없으면 화면에 안 나온다. **구성은 방향이고 수입은 크기다.**
+//   2) **그렇다고 둘 다 켜면 오히려 나빠진다** (0.31 vs 한쪽만 켰을 때 0.36).
+//      진화 가속은 ERA_BASE_HP_MUL 때문에 **적 기지 체력을 4~6배로 불린다** —
+//      계약 §5.5 가 금지한 "기지를 그냥 크게 만들기"가 뒷문으로 들어온다.
+//      그래서 진화 쪽을 거의 껐다 (0.20 → 0.10). 수입 쪽만 남긴다.
+const FOCUS_CG = 3.2;      // 상성 대응 가중치 ×(1+3.2·focus)
 const FOCUS_TEMPO = 0.30;  // 소환 간격 ×(1−0.30·focus)  — 도배 상대에겐 더 빨리 나온다
-const FOCUS_GOLD = 0.34;   // 적 수입 ×(1+0.34·focus)
-const FOCUS_ERA = 0.20;    // 적 진화 문턱 ×(1−0.20·focus)
+const FOCUS_GOLD = 0.34;   // 적 수입 ×(1+0.34·focus)   ← 실제로 아픈 채널
+// **0 이다. 지웠다는 뜻이 아니라 재 보고 껐다는 뜻이다.**
+// 0.20 일 때 판별력 0.26, 0 일 때 0.35 였다 (90판). 적 진화를 당기면
+// ERA_BASE_HP_MUL(최대 6.4배)이 적 기지에 붙어 판이 "체력 벽"이 된다.
+// 되살리고 싶으면 ERA_BASE_HP_MUL 을 적 쪽에서 떼는 것이 먼저다.
+const FOCUS_ERA = 0;
 // 새 전투가 시작돼도 사령관은 **앞 전투에서 본 것을 기억한다.**
 // 원정이 여정이라면 정보도 이어져야 한다 — 2전투부터는 첫 9초부터 맞받는다.
 // 기억은 현재 창이 차면서 사라진다 (MEM_FADE 구간 뒤엔 지분 0).
 const MEM_FADE = 3;
+// 구간 사이에 구성비를 되읽는 주기. 판정 주기가 아니다 (그건 CHUNK_MS 그대로다).
+const SUB_MS = C.CHUNK_MS / 3;
 
 const FALLBACK_LINES = {
   death: ['기지가 무너졌다', '한 파도 늦었다', '아끼다 잠겼다'],
@@ -483,6 +503,23 @@ export class Director {
       this.lastChunk = ci;
       this.beginChunk(game);
       this.onChunkBoundary(game, ci);
+      this.lastSub = (game.simTime / SUB_MS) | 0;
+      return;
+    }
+
+    // ── 구간 사이의 되읽기 ──────────────────────────────────────
+    // **판정(프로파일)은 구간 경계에서만 한다.** 그건 안 바뀐다 — 자주 바꾸면
+    // 진동한다는 것을 러너에서 배웠다. 바뀌는 것은 **구성비 대응**뿐이다.
+    //
+    // 왜 필요한가: 원정이 붙으면서 전투가 35~60초로 짧아졌다. 구간이 9초이므로
+    // 한 전투에 판단 기회가 4~6번뿐이고, 그중 첫 구간은 관찰이다.
+    // 실측에서 도배 봇이 다섯 전투를 전부 이겼는데 원인은 대응이 아니라
+    // **대응이 늦은 것**이었다 — 적이 카운터 유닛을 뽑기 시작할 때 이미 판이 끝난다.
+    // 3초마다 되읽으면 "내가 유닛을 바꾸면 적도 바꾼다"가 사람 눈에 보인다.
+    const si = (game.simTime / SUB_MS) | 0;
+    if (si !== this.lastSub) {
+      this.lastSub = si;
+      this.applyLevers();
     }
   }
 
@@ -646,11 +683,9 @@ export class Director {
     // **또** 난이도를 곱하지 않는다 (예전에 두 번 깎여 다섯 프로파일이 전부
     // 하한 420ms 에 붙었다). 인격 템포와 섞고, 처벌만 곱한다.
     const readTempo = ch ? num(ch.tempo, p.tempo) : p.tempo * (1 - d * 0.11);
-    const baseTempo = per ? num(per.tempo, readTempo) * (1 - w) + readTempo * w : readTempo;
-    const tempo = baseTempo * (1 - FOCUS_TEMPO * bite);
+    const tempo = readTempo * (1 - FOCUS_TEMPO * bite);
 
-    const goldMul = (per ? num(per.goldMul, 1) : 1) * p.goldMul * (1 + d * 0.1)
-      * (1 + FOCUS_GOLD * bite);
+    const goldMul = p.goldMul * (1 + d * 0.1) * (1 + FOCUS_GOLD * bite);
     const eraThresh = (per ? num(per.eraThresh, 1) : 1) * p.eraThresh
       * (1 - FOCUS_ERA * bite);
 
@@ -658,8 +693,8 @@ export class Director {
       mix: m,
       tempo: Math.max(420, tempo),
       goldMul,
-      eraThresh: Math.max(0.4, eraThresh),
-      waterMul: (per ? num(per.waterMul, 1) : 1) * p.waterMul,
+      eraThresh: Math.max(0.35, eraThresh),
+      waterMul: p.waterMul,
       draftSlant: p.draftSlant,
       preferTags: tags,
       // ↓ game.js 가 아직 안 읽는다. 읽으면 사령관이 스킬·포탑까지 성격대로 쓴다.
@@ -691,17 +726,23 @@ export class Director {
   // 이번 전투의 관측 + 앞 전투의 기억. 기억은 관측이 쌓이면서 사라진다.
   // 돌려주는 값: 쓸 만한 표본이 있는가.
   loadShare() {
-    const tot = this.wSpawnN.mean();
+    // 닫힌 구간들의 합 + **아직 안 닫힌 이번 구간**.
+    // 진행 중인 구간을 빼면 대응이 최대 한 구간(9초) 늦는다. 40초짜리 전투에서
+    // 9초는 판의 4분의 1이다 — 늦은 대응은 대응이 아니다.
+    const n = this.wSpawnN.c;
+    let tot = this.wSpawnN.mean() * n + this.spawnCount;
     const have = tot > 0.5;
     // 기억 지분 — 이번 전투에서 본 구간이 MEM_FADE 개를 넘으면 0 이다.
     // 이게 없으면 사령관은 매 전투 백지에서 시작하고, 도배는 매번 처음
     // 두세 구간을 공짜로 얻는다. 원정이 여정이라면 정보도 이어져야 한다.
-    const seen = this.wSpawnN.c;
-    const mw = this.memWeight > 0 ? clamp((MEM_FADE - seen) / MEM_FADE, 0, 1) : 0;
+    const seen = n + (this.spawnCount > 0 ? 1 : 0);
+    const mw = this.memWeight > 0 && MEM_FADE > 0
+      ? clamp((MEM_FADE - seen) / MEM_FADE, 0, 1) : 0;
     if (!have && mw <= 0) return false;
-    // 관측이 아직 없으면(전투 첫 구간) 기억만으로 대응한다.
+    if (!have) tot = 1;
     for (let u = 0; u < KINDS; u++) {
-      const now = have ? clamp(this.wKind[u].mean() / tot, 0, 1) : 0;
+      const now = have
+        ? clamp((this.wKind[u].mean() * n + this.spawnKind[u]) / tot, 0, 1) : 0;
       this.effShare[u] = have ? now * (1 - mw) + this.memShare[u] * mw : this.memShare[u];
     }
     return true;

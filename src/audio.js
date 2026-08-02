@@ -136,14 +136,17 @@ const S_PERC = [0.40, 0.68, 0.88, 1.00, 1.00];
 //                  해결되지 않아 계속 앞으로 밀린다. 게이트는 톱니(타격 후 감쇠)
 //   2 금고(축재형) 참았다가 터진다 — 9초 주기로 필터가 완전히 닫혔다가 열린다.
 //                  터질 때만 들린다. 그 사이는 거의 무음이다
-//   3 성벽(농성형) 움직이지 않는다 — 완전5도 오르간 포인트. 맥동이 거의 없고(박×0.03)
-//                  음역이 가장 낮다. 리듬이 아니라 **벽**이다
+//   3 성벽(농성형) 움직이지 않는다 — 근음+12도 오르간 포인트(1:3 이라 완전히 융합한다).
+//                  맥동이 거의 없고(박×0.03) 음역이 가장 낮다. 리듬이 아니라 **벽**이다
 //   4 거울(균형형) 마지막 사령관. **플레이어를 읽고 따라온다** — 음정을 스스로 고르지
 //                  않고 플레이어 선율(lead)을 반 박자 늦게 되받는다. 음색도 플레이어의
 //                  시대 파형을 그대로 쓴다. 도발이 쌓일수록 더 바짝 따라붙는다
 const CMD_N     = 5;
-const CMD_INT   = Int8Array.of(10,  6,  3,  7,  0);       // 근음 위 반음 (거울은 미사용)
-const CMD_INT2  = Int8Array.of( 3, 11, 15, 12,  0);       // 그림자 성부
+// 저역에서는 **음정 선택이 곧 거칠기**다. 성벽을 5도(62·82Hz)로 뒀더니 두 음의
+// 합성 주기가 20.7Hz 로 잡혀 "움직이지 않는" 사령관에서 20Hz 떨림이 측정됐다.
+// 근음+12도(41·123Hz = 1:3)로 바꾸면 완전히 융합해 맥동이 0 이 된다.
+const CMD_INT   = Int8Array.of(10,  6,  3,  0,  0);       // 근음 위 반음 (거울은 미사용)
+const CMD_INT2  = Int8Array.of( 3, 11, 15, 19,  0);       // 그림자 성부
 const CMD_OCT   = Float32Array.of(2, 6, 1, 0.5, 4);       // 음역 배수 — 다섯이 겹치지 않는다
 const CMD_RATE  = Float32Array.of(4, 3, 0.5, 0.03, 2);    // 박 대비 맥동 배수 = 리듬 밀도
 const CMD_WAVE  = ['sawtooth', 'square',   'triangle', 'sine',     'triangle'];
@@ -153,10 +156,12 @@ const CMD_LAMP  = Float32Array.of(0.50, -0.50, -0.50, 0.30, 0.42); // 음수 = �
 const CMD_DET   = Float32Array.of(19, 5, 0, 3, 0);        // 그림자 디튠(cent) — 무리만 크게
 const CMD_CUT   = Float32Array.of(900, 3000, 560, 210, 1800);
 const CMD_SWW   = ['sine', 'sawtooth', 'sawtooth', 'sine', 'triangle'];
-const CMD_SWR   = Float32Array.of(0.50, 0.85, 0.108, 0.055, 0.35); // 스웰 Hz
-const CMD_SWD   = Float32Array.of(0.30, -0.55, -1.00, 0.16, -0.50); // 음수 = 터지고 잦아든다
+const CMD_SWR   = Float32Array.of(0.50, 1.10, 0.108, 0.055, 0.35); // 스웰 Hz
+// 무리는 **쉬지 않는다** = 스웰이 거의 평평해야 한다. 쇄도는 매번 앞으로 쏠린다.
+// 처음엔 0.30/-0.55 로 뒀는데 변조깊이가 0.642/0.634 로 붙어 둘이 안 갈렸다.
+const CMD_SWD   = Float32Array.of(0.12, -0.75, -1.00, 0.16, -0.50); // 음수 = 터지고 잦아든다
 const CMD_SWC   = Float32Array.of(120, -700, -1500, 40, -500);      // 스웰 → 컷오프(Hz)
-const CMD_PFRQ  = Float32Array.of(260, 1800, 92, 120, 700);        // 타악 밴드
+const CMD_PFRQ  = Float32Array.of(260, 1800, 92, 120, 900);        // 타악 밴드
 const CMD_PQ    = Float32Array.of(1.4, 3.2, 0.8, 6.0, 2.0);
 const CMD_PRATE = Float32Array.of(4, 3, 0.25, 0.125, 2);
 const CMD_PLFO  = ['square', 'sawtooth', 'sawtooth', 'sine', 'square'];
@@ -630,10 +635,12 @@ export class Audio {
     if (i === 4) {
       // ── 거울. **스스로 음정을 고르지 않는다.** 플레이어 선율을 되받는다 ──
       // setTargetAtTime 의 시정수가 곧 "따라오는 지연"이다. 읽힐수록 짧아진다.
-      const lag = 0.30 - 0.18 * read;
+      // 8분음표 길이(0.5/beat ≈ 0.12초)보다 짧아야 음 하나하나를 따라잡는다.
+      // 0.30 으로 뒀더니 선율을 못 쫓고 평균 근처를 헤매 금고와 음역이 겹쳤다(코사인 0.93).
+      const lag = 0.10 - 0.05 * read;
       const lf = this.bgm.lead.osc.frequency.value;
-      c.osc.frequency.setTargetAtTime(lf * 0.5, t, lag);
-      c.shade.frequency.setTargetAtTime(lf * 0.25, t, lag * 1.5);
+      c.osc.frequency.setTargetAtTime(lf, t, lag);              // 같은 음. 반 박자 늦게
+      c.shade.frequency.setTargetAtTime(lf * 0.5, t, lag * 2.2); // 흐릿한 그림자
       // 음색도 플레이어의 시대를 그대로 쓴다 — 시대가 바뀔 때만 대입한다
       if (c.mirrorWave !== era) {
         c.osc.type = ERA_WAVE[era][4];
@@ -644,7 +651,7 @@ export class Audio {
       c.plfo.frequency.setTargetAtTime(beat * 2, t, 0.2);
       c.swell.frequency.setTargetAtTime(0.22 + 0.85 * spd, t, 0.6);
       c.swAmp.gain.setTargetAtTime(-0.5 * (0.25 + 0.7 * read), t, 0.8);
-      c.lp.frequency.setTargetAtTime(ERA_CUT[era][3] * 0.6 * (1 + 0.35 * read), t, 0.5);
+      c.lp.frequency.setTargetAtTime(ERA_CUT[era][3] * 0.85 * (1 + 0.35 * read), t, 0.5);
     } else {
       c.osc.frequency.setTargetAtTime(
         root * SEMI[SEMI_ZERO + CMD_INT[i]] * CMD_OCT[i], t, 0.07);
@@ -918,10 +925,11 @@ export class Audio {
       this.blip('triangle', f0 * 2, f0 * 2, 500, 0.050, 0.66, 1200);
 
     } else if (i === 3) {
-      // 성벽 — 타격이 없다. 5도가 하나 서고 그대로 있는다
-      this.blip('sine', f0, f0, 1500, 0.100, 0);
-      this.blip('sine', f0 * 1.5, f0 * 1.5, 1400, 0.050, 0.05);
-      this.blip('triangle', f0 * 0.5, f0 * 0.5, 1500, 0.065, 0, 400);
+      // 성벽 — 타격이 없다. 근음과 12도가 서고 그대로 있는다.
+      // f0 가 41Hz(E1)라 그대로 쓰면 폰 스피커에서 사라진다. 2·3배음이 실체를 만든다
+      this.blip('sine', f0 * 2, f0 * 2, 1500, 0.095, 0);
+      this.blip('sine', f0 * 3, f0 * 3, 1400, 0.055, 0.05);
+      this.blip('triangle', f0, f0, 1500, 0.065, 0, 300);
       this.nz(1200, 0.042, 160, 90, 'lowpass', 0, 0);
 
     } else {
@@ -1150,6 +1158,9 @@ export class Audio {
         this.duckUntil = 0;
         this.cmdMuteUntil = 0;
         this.readLevel = 0;
+        // 원정 종료 뒤 다시 시작하는 경로. 여기서 안 풀면 사령관 층이 영영 죽는다.
+        // 진짜로 끝난 상태라면 update() 가 game.campaignOver 로 매 프레임 다시 세운다.
+        this.campEnd = false;
         if (this.bgm) {
           const m = this.bgm;
           m.bar = 0; m.barCount = 0; m.note = 0; m.sec = 0;

@@ -9,8 +9,10 @@
 
 import * as C from './config.js';
 
-export const S = { PLAY: 0, DRAFT: 1, OVER: 2 };
-export const STATE_NAME = ['PLAY', 'DRAFT', 'OVER'];
+// 상태. **0·1·2 는 계약이다** — render·audio·feel·평가기가 전부 이 번호를 쓴다.
+// BRIEF(3)는 뒤에 붙인다. 원정 첫 전투 직전의 설명 화면이고 시뮬레이션이 멈춘다.
+export const S = { PLAY: 0, DRAFT: 1, OVER: 2, BRIEF: 3 };
+export const STATE_NAME = ['PLAY', 'DRAFT', 'OVER', 'BRIEF'];
 
 // 진영. 0 = 나, 1 = 적.
 export const SIDE_L = 0, SIDE_R = 1;
@@ -164,6 +166,8 @@ export class Game {
     this.spawnedKind = new Uint16Array(C.UNIT_KINDS);
     // 적 AI 가 매 판단마다 쓰는 가중치 버퍼. 여기서 한 번만 만든다.
     this.aiMix = new Float32Array(C.UNIT_KINDS);
+    // 사령관의 기본 구성. 루프 안에서 배열을 만들지 않기 위해 여기서 한 번만.
+    this.cmdMix = new Float32Array(C.UNIT_KINDS);
     // 적 사령관도 스킬을 쓴다. 쿨다운은 플레이어와 같은 표(C.SKILL_CD)를 쓴다.
     this.aiSkillCd = new Float32Array(C.SKILL_COUNT);
     this.aiSkillUsed = new Uint16Array(C.SKILL_COUNT);
@@ -175,8 +179,12 @@ export class Game {
     this.commander = 0;
     this.campaignOver = false;
     this.stagesCleared = 0;
+    this.campaignMs = 0;          // 앞선 전투들의 합. 이번 전투 시간은 포함하지 않는다
     this.terrainSeq = 0;          // 지형이 바뀐 횟수. 렌더가 캐시를 다시 구울 신호
     this.floorDip = floorDip;
+    // 설명 화면은 **세션에 한 번만** 나온다. 져서 원정을 다시 시작할 때마다
+    // 같은 설명을 다시 읽히는 것은 벌이다.
+    this.briefSeen = false;
 
     this.reset();
   }
@@ -220,6 +228,8 @@ export class Game {
   nextStage() {
     if (this.campaignOver) return false;
     if (this.stage + 1 >= this.stageMax) { this.campaignOver = true; return false; }
+    // 원정 누적 시간은 여기서만 자란다. 이번 전투 시간을 넘기고 시계를 0으로 되돌린다.
+    this.campaignMs += this.endTime >= 0 ? this.endTime : this.simTime;
     this.stage++;
     this.resetBattle();
     return true;
@@ -231,6 +241,7 @@ export class Game {
     this.stageMax = CAMPAIGN_LEN;
     this.campaignOver = false;
     this.stagesCleared = 0;
+    this.campaignMs = 0;
     this.traits.fill(0);
     this.towerLv = 0;
     this.resetBattle();
@@ -245,7 +256,14 @@ export class Game {
 
     this.tick = 0;
     this.simTime = 0;
-    this.state = S.PLAY;
+    // 판이 끝난 순간의 시계. -1 = 아직 안 끝났다.
+    // **simTime 은 계속 흐른다** — 히트스톱·도발 간격·feel 이 그 시계를 쓴다.
+    // 얼리는 것은 보고되는 값(elapsed)뿐이다.
+    this.endTime = -1;
+    // 설명 화면 — 원정 첫 전투 앞에 한 번. 시뮬레이션이 멈춘다.
+    // **조작을 막지 않는다**: 아무 입력이나 즉시 해제하고, 아무 입력이 없어도
+    // C.BRIEF_MS 뒤에 저절로 열린다. 붙잡아 두는 화면은 금지다 (계약 §4).
+    this.state = (this.stage === 0 && !this.briefSeen) ? S.BRIEF : S.PLAY;
     this.stateTick = 0;
 
     this.uAlive.fill(0);
@@ -281,7 +299,7 @@ export class Game {
     if (!(this.towerLv > 0)) this.towerLv = 0;
     this.towerCd = 0;
 
-    this.aiGold = C.AI_GOLD_START * this.stageDiff();
+    this.aiGold = C.AI_GOLD_START * stageOf(C.STAGE_AI_GOLD, this.stage, 1);
     this.aiXp = 0;
     this.aiEra = 0;
     this.aiThink = 0;
@@ -418,8 +436,19 @@ export class Game {
     return i >= 0 && i < C.SKILL_COUNT && this.skillCd[i] <= 0;
   }
 
+  // 설명 화면을 닫는다. 입력이든 시간이든 여기로 들어온다.
+  dismissBrief() {
+    if (this.state !== S.BRIEF) return;
+    this.briefSeen = true;
+    this.setState(S.PLAY);
+  }
+
   // ── 입력 진입점 — main 의 입력 큐만 이걸 부른다 ──────────────
   input(act, simTs, wallTs) {
+    // 설명 화면에서는 **아무 입력이나** 즉시 해제다. 그 입력은 소비된다 —
+    // 설명을 닫으려고 누른 것이 유닛 소환이 되면 그것도 조작을 뺏은 것이다.
+    if (this.state === S.BRIEF) { this.dismissBrief(); return; }
+
     if (this.state === S.OVER) {
       // 결과 화면에서는 아무 입력이나 "계속"이다. 무엇으로 이어지는지만 다르다.
       //   이겼고 원정이 남았다 → 다음 사령관
@@ -583,6 +612,15 @@ export class Game {
 
   // ── 한 스텝 ─────────────────────────────────────────────────
   step() {
+    // 설명 화면 — **시뮬레이션도 시계도 멈춘다.** 설명을 읽은 시간이 기록에
+    // 들어가면 안 된다. 다만 아무 입력이 없어도 저절로 열린다 —
+    // 손이 없는 관전자(그리고 대조군 봇)를 영원히 붙잡아 두지 않는다.
+    if (this.state === S.BRIEF) {
+      this.stateTick++;
+      if (this.stateTick * C.SIM_DT >= (C.BRIEF_MS > 0 ? C.BRIEF_MS : 9000)) this.dismissBrief();
+      return;
+    }
+
     this.prevWater = this.water;
     for (let i = 0; i < C.UNIT_MAX; i++) if (this.uAlive[i]) this.uPrevX[i] = this.uX[i];
 
@@ -664,7 +702,8 @@ export class Game {
     }
     // 스테이지 곡선과 사령관 성격. 둘 다 1 근처의 작은 배수다 —
     // **적 수입을 크게 올리면 초반에 손 쓸 새 없이 밀려 학습이 안 된다** (계약 §5.5).
-    this.aiGold += rate * this.stageDiff() * this.cmdGoldMul() * dt;
+    // 수입 곡선은 STAGE_DIFF 가 아니라 STAGE_AI_GOLD 다. 이유는 config 주석에 있다.
+    this.aiGold += rate * stageOf(C.STAGE_AI_GOLD, this.stage, 1) * this.cmdGoldMul() * dt;
 
     // 적의 시대 경험치는 지금까지 **플레이어를 죽여야만** 들어왔다.
     // 그래서 이기고 있는 판에서는 적이 영원히 돌 시대에 머물고, 플레이어만
@@ -672,7 +711,7 @@ export class Game {
     // 시간으로 조금씩 흘려 넣으면 **후반이 어려워지되 초반은 그대로다.**
     // 이것이 "곡선이지 상수가 아니다"의 실제 구현이다.
     const xpRate = (C.AI_XP_RATE > 0) ? C.AI_XP_RATE : 0;
-    this.aiXp += xpRate * this.stageDiff() * dt;
+    this.aiXp += xpRate * stageOf(C.STAGE_AI_XP, this.stage, 1) * dt;
   }
 
   // 적 스킬의 쿨다운. 사령관 성격과 스테이지 난이도가 같이 줄인다.
@@ -691,6 +730,11 @@ export class Game {
     const lv = this.supplier && this.supplier.levers ? this.supplier.levers : null;
 
     // 시대 진화 — 경험치가 차면 올린다. 레버가 문턱을 조절한다.
+    // ── 시도했다가 실측으로 버린 것: 적 시대 상한(플레이어+1) ──
+    // "적이 3시대 앞서서 진다"를 보고 상한을 걸었더니 **판이 더 길어졌다.**
+    // 적이 앞서서 끝내던 판이 대등한 소모전이 되어 s1 204→217초, s2 111→270초,
+    // 수비 봇은 300초 상한에 걸려 아예 안 끝났다. 승률은 그대로 0/4 였다.
+    // 격차의 원인은 시대가 아니라 **적 포탑과 스킬**이었다 (아래 참조).
     if (this.aiEra + 1 < C.ERA_COUNT) {
       let th = lv ? +lv.eraThresh : 1;
       if (!(th > 0)) th = 1;
@@ -891,7 +935,43 @@ export class Game {
       w[k] = v;
       total += v;
     }
-    return total;
+    return this.blendCommanderMix(total);
+  }
+
+  // ── 사령관의 기본 구성을 디렉터의 구성 위에 섞는다 ────────────
+  // 계약 §3: **사령관은 디렉터를 대체하지 않는다.** 사령관이 그 전투의 성격을
+  // 정하고 디렉터는 그 위에서 플레이어를 읽는다. 그래서 덮어쓰지 않고 섞는다.
+  //
+  // 둘 다 합을 1로 맞춘 뒤 섞는다. 스케일이 다르면 한쪽이 통째로 묻힌다 —
+  // 디렉터의 mix 합은 정책·상성 보정에 따라 9~30 사이를 오간다.
+  //
+  // 밸런스 감독이 setCommander() 훅을 만들어 **디렉터가 직접** 사령관을 반영하면
+  // 여기서는 손을 뗀다. 안 그러면 같은 성격이 두 번 곱해진다.
+  blendCommanderMix(total) {
+    if (this.supplier && typeof this.supplier.setCommander === 'function') return total;
+    const rows = C.CMD_MIX;
+    const row = rows && rows[this.commander];
+    if (!row || row.length < C.UNIT_KINDS) return total;
+    const w = +C.CMD_MIX_W;
+    if (!(w > 0)) return total;
+
+    let ctot = 0;
+    for (let k = 0; k < C.UNIT_KINDS; k++) {
+      const v = +row[k];
+      this.cmdMix[k] = (v > 0) ? v : 0;
+      ctot += this.cmdMix[k];
+    }
+    if (!(ctot > 0)) return total;
+
+    let out = 0;
+    for (let k = 0; k < C.UNIT_KINDS; k++) {
+      const a = total > 0 ? this.aiMix[k] / total : 0;
+      const b = this.cmdMix[k] / ctot;
+      const v = a * (1 - w) + b * w;
+      this.aiMix[k] = v;
+      out += v;
+    }
+    return out;
   }
 
   // 결정론적 선택. Math.random 없음 — 재현 불가능해지면 증거가 못 된다.
@@ -1121,7 +1201,9 @@ export class Game {
     } else {
       this.lost++;
       this.aiXp += xpGain;
-      this.aiGold += C.U_BOUNTY[kind];
+      // 적의 현상금은 깎아서 준다. 안 그러면 밀리기 시작한 판이 스스로 굳는다 —
+      // 적이 잡을수록 더 벌고, 더 벌어서 더 잡는다. config 주석 참조.
+      this.aiGold += C.U_BOUNTY[kind] * (C.AI_BOUNTY_MUL > 0 ? C.AI_BOUNTY_MUL : 1);
     }
     this.emit(EV.KILL, kind, byWhom);
   }
@@ -1202,6 +1284,7 @@ export class Game {
   finish(outcome) {
     this.outcome = outcome;
     this.endTick = this.tick;
+    this.endTime = this.simTime;      // 여기서 시계가 선다
     if (outcome === C.WIN_PLAYER) {
       this.wins++;
       const t = this.simTime / 1000;
@@ -1250,7 +1333,14 @@ export class Game {
   }
 
   // ── 조회 ────────────────────────────────────────────────────
-  elapsed() { return this.simTime / 1000; }
+  // **판이 끝나면 시계가 선다.** simTime 은 계속 흐르지만(히트스톱·도발 간격·
+  // feel 이 그걸 쓴다) 화면에 나가는 값은 끝난 순간에 고정된다.
+  // 사용자 보고: "게임이 끝났는데 걸린 시간이 계속 늘어나".
+  stageTime() { return (this.endTime >= 0 ? this.endTime : this.simTime) / 1000; }
+  // 원정 누적 — 앞선 전투들의 합 + 이번 전투.
+  campaignTime() { return (this.campaignMs + (this.endTime >= 0 ? this.endTime : this.simTime)) / 1000; }
+  // 예전 이름. render·평가기가 이걸 부른다 — 이번 전투 시간이다.
+  elapsed() { return this.stageTime(); }
   waterK() {
     // 0 = 안 보임, 1 = 지면까지 찼다
     const span = C.WATER_Y0 - C.GROUND_Y;
