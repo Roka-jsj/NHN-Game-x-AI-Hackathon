@@ -326,11 +326,21 @@ export class Game {
     this.spawn(SIDE_L, kind, this.era, 0);
   }
 
+  // 시대가 오르면 기지도 같이 튼튼해진다. **비율을 유지하며** 곱하므로
+  // 체력바가 튀지 않는다. 이게 없으면 후반 시대 유닛이 기지를 즉사시킨다.
+  eraScaleBase(side, from, to) {
+    const r = C.ERA_BASE_HP_MUL[to] / C.ERA_BASE_HP_MUL[from];
+    this.baseMax[side] *= r;
+    this.baseHp[side] *= r;
+  }
+
   buyEra() {
     if (!this.eraReady()) { this.emit(EV.NO_GOLD, -1, 0); return; }
-    this.xp -= this.eraNeed();
+    const need = this.eraNeed();      // era++ 전에 잡아 둔다. 뒤에 읽으면 다음 시대 값이다
+    this.xp -= need;
     this.era++;
-    this.goldSpentEra += this.eraNeed();
+    this.goldSpentEra += need;
+    this.eraScaleBase(SIDE_L, this.era - 1, this.era);
     this.gold += C.ERA_UP_GOLD;
     // 진화는 판을 되돌리는 순간이다. 물이 크게 밀린다.
     this.water += C.WATER_ERA_PUSH;
@@ -508,6 +518,7 @@ export class Game {
       if (this.aiXp >= need) {
         this.aiXp -= need;
         this.aiEra++;
+        this.eraScaleBase(SIDE_R, this.aiEra - 1, this.aiEra);
         this.emit(EV.ERA_UP, this.aiEra, SIDE_R);
       }
     }
@@ -624,26 +635,36 @@ export class Game {
       const dir = side === SIDE_L ? 1 : -1;
       const range = C.U_RANGE[kind];
 
-      // 사거리 안의 가장 가까운 적을 찾는다
-      const target = this.findTarget(i, side, dir, range);
-      if (target >= 0) {
-        // 너무 가까우면 공격도 전진도 못 한다. 서서 얻어맞는다 —
-        // 이게 "궁수는 근접에 약하다"의 실체다. 더 먼 적으로 표적을 바꾸지도
-        // 않는다. 코앞에 붙은 적을 두고 뒤를 쏘는 것이 오히려 이상하다.
-        const minR = U_MIN_RANGE[kind];
-        if (minR > 0 && (this.uX[target] - this.uX[i]) * dir < minR) continue;
-        if (this.uCd[i] <= 0) {
-          this.uCd[i] = this.statCooldown(kind, side);
-          this.uAttack[i] = 8;
-          // 상성은 여기서 곱해진다. damage() 안 한 곳에서만.
-          this.damage(target, this.statDmg(kind, this.uEra[i], side), side, kind);
-          if (kind === C.U_ARCHER || kind === C.U_CATA) this.shoot(i, target, side);
-          this.emit(EV.ATTACK, kind, side);
+      // ── 1) 유닛 표적이 먼저다 ──────────────────────────────────────
+      // 기지를 먼저 보게 하는 안을 재봤다. 기병이 궁수 대열의 꼬리에 닿는 순간
+      // 남은 궁수를 버리고 기지를 때리기 시작해 등 뒤에서 사살당했고,
+      // 계약의 "기병>궁수" 변이 8:8 에서 1:0 → 0:3 으로 뒤집혔다. 그래서 되돌렸다.
+      // 기지에 닿는 문제는 표적 순서가 아니라 물과 시대 경제의 문제였다.
+      if (C.U_SIEGE[kind] !== 1) {
+        const target = this.findTarget(i, side, dir, range);
+        if (target >= 0) {
+          // 너무 가까우면 공격도 전진도 못 한다. 서서 얻어맞는다 —
+          // 이게 "궁수는 근접에 약하다"의 실체다. 더 먼 적으로 표적을 바꾸지도
+          // 않는다. 코앞에 붙은 적을 두고 뒤를 쏘는 것이 오히려 이상하다.
+          const minR = U_MIN_RANGE[kind];
+          if (minR > 0 && (this.uX[target] - this.uX[i]) * dir < minR) continue;
+          if (this.uCd[i] <= 0) {
+            this.uCd[i] = this.statCooldown(kind, side);
+            this.uAttack[i] = 8;
+            // 상성은 여기서 곱해진다. damage() 안 한 곳에서만.
+            this.damage(target, this.statDmg(kind, this.uEra[i], side), side, kind);
+            if (kind === C.U_ARCHER || kind === C.U_CATA) this.shoot(i, target, side);
+            this.emit(EV.ATTACK, kind, side);
+          }
+          continue;   // 싸우는 동안에는 전진하지 않는다
         }
-        continue;   // 싸우는 동안에는 전진하지 않는다
       }
+      // 공성 병기(투석기)는 위 블록을 통째로 건너뛴다. 유닛을 표적으로 삼지 않고
+      // 공성선까지 걸어가 기지만 친다 — 그 이유는 config 의 U_SIEGE 주석에 있다.
 
-      // 적 기지에 닿았는가
+      // ── 2) 적 기지 ────────────────────────────────────────────────
+      // 사거리에 하한("앞마당")을 주는 안을 재봤지만 상성 삼각형이 깨졌다.
+      // 자세한 실측은 config 의 BASE_DMG_MUL 아래 주석에 있다.
       const baseX = side === SIDE_L ? C.BASE_R_X : C.BASE_L_X;
       if (Math.abs(this.uX[i] - baseX) <= C.BASE_W * 0.5 + range) {
         if (this.uCd[i] <= 0) {
@@ -733,6 +754,8 @@ export class Game {
     let best = -1, bestD = 1e9;
     for (let j = 0; j < C.UNIT_MAX; j++) {
       if (!this.uAlive[j] || this.uSide[j] === side) continue;
+      // 앞쪽만 본다. 뒤까지 대칭으로 열어 봤지만 결투 6변의 결과가 한 판도
+      // 바뀌지 않았다(추월이 실제로는 일어나지 않는다). 그래서 되돌렸다.
       const d = (this.uX[j] - x) * dir;      // 앞쪽이 양수
       if (d < -6 || d > range) continue;
       if (d < bestD) { bestD = d; best = j; }
@@ -740,10 +763,18 @@ export class Game {
     return best;
   }
 
+  // 앞에 아군이 있으면 밀지 않는다 — 다만 **공성 병기는 줄에 서지 않는다.**
+  // 실측: 투석기가 자기 진영 대열의 맨 뒤에 갇혀 공성선(x=514)에 평생 못 갔다
+  // (최대 도달 344·366). 대열은 전선에서부터 21px 간격으로 10~15기가 늘어서고
+  // 투석기는 가장 느려서 언제나 꼬리다. 표적 규칙을 고쳐도 이게 남아 있으면
+  // 투석기는 여전히 없는 유닛이다. 그래서 공성 병기는 대열을 통과한다 —
+  // 대신 아무도 자기를 막아주지 않으므로 전선보다 앞서면 그대로 죽는다.
   blockedAhead(i, side, dir) {
+    if (C.U_SIEGE[this.uKind[i]] === 1) return false;
     const x = this.uX[i];
     for (let j = 0; j < C.UNIT_MAX; j++) {
       if (j === i || !this.uAlive[j] || this.uSide[j] !== side) continue;
+      if (C.U_SIEGE[this.uKind[j]] === 1) continue;   // 공성 병기는 남을 막지도 않는다
       const d = (this.uX[j] - x) * dir;
       if (d > 0 && d < C.UNIT_GAP) return true;
     }
@@ -771,15 +802,18 @@ export class Game {
     this.uAlive[idx] = 0;
     if (side === SIDE_L) { this.aliveL--; } else { this.aliveR--; }
 
+    // 늦은 시대의 유닛을 잡을수록 경험치가 크다. 시대가 오를수록 다음 시대가
+    // 가까워진다 — 그래야 5시대가 판 안에 들어온다.
+    const xpGain = C.U_XP[kind] * C.ERA_XP_MUL[this.uEra[idx]];
     if (byWhom === SIDE_L) {
       this.kills++;
       this.gold += C.U_BOUNTY[kind] * (this.has('loot') ? 2 : 1);
-      this.xp += C.U_XP[kind] * (this.has('study') ? 1.4 : 1);
+      this.xp += xpGain * (this.has('study') ? 1.4 : 1);
       // 적을 잡으면 물이 밀린다. **공격이 곧 생존이다** — 이게 교착을 푼다.
       this.water += C.WATER_KILL_PUSH * (this.has('revive') ? 1.8 : 1);
     } else {
       this.lost++;
-      this.aiXp += C.U_XP[kind];
+      this.aiXp += xpGain;
       this.aiGold += C.U_BOUNTY[kind];
     }
     this.emit(EV.KILL, kind, byWhom);
@@ -825,10 +859,12 @@ export class Game {
       // 기본 결말이 됐다(네 전략 중 둘). 전선이 어디 있느냐로 갈라야
       // 밀어붙인 쪽이 보상을 받고, 그래야 전략 선택에 의미가 생긴다.
       //   전선 0.5 → 양쪽 같음.  0.8(내가 밀고 있음) → 적이 1.6배, 내가 0.4배
+      // 시대가 오르면 기지 체력이 커진다. 물 피해가 상수면 후반에 물이 시계가
+      // 아니게 되어 판이 다시 안 끝난다. **비율로 깎는다.**
       const front = this.frontline();
       const d = C.WATER_DPS * dt * 2;
-      this.baseHp[SIDE_L] -= d * (1 - front);
-      this.baseHp[SIDE_R] -= d * front;
+      this.baseHp[SIDE_L] -= d * (1 - front) * (this.baseMax[SIDE_L] / C.BASE_HP);
+      this.baseHp[SIDE_R] -= d * front * (this.baseMax[SIDE_R] / C.BASE_HP);
       for (let sd = 0; sd < 2; sd++) {
         if (this.baseHp[sd] <= 0) {
           this.baseHp[sd] = 0;
