@@ -47,6 +47,22 @@ const DOT = '.';
 
 // 0 검사 1 창병 2 궁수 3 기병 4 거인 5 투석기 6 진화 7 포탑 8 해일 9 화살비
 const BTN_NAME = ['검사', '창병', '궁수', '기병', '거인', '투석기', '진화', '포탑', '해일', '화살비'];
+
+// 버튼에 실제로 찍히는 글자. **스킬은 시대마다 이름이 바뀐다** —
+// 해일→격류→범람, 화살비→쇠뇌비→융단폭격. 여기서 BTN_NAME 을 그대로 쓰면
+// 시대를 올려도 버튼에는 계속 "해일"이라고 적혀 있어서,
+// **이 게임에서 가장 큰 변화가 화면에 안 보인다.**
+// 그리고 마지막 시대에서는 다 쓴 진화 칸이 총진군(4번째 스킬)이 된다.
+// game 이 아직 skillName 을 안 주면 조용히 예전 이름으로 떨어진다.
+function btnLabel(game, i) {
+  if (!game || typeof game.skillName !== 'function') return BTN_NAME[i];
+  if (i === C.B_TIDE) return game.skillName(C.SK_TIDE) || BTN_NAME[i];
+  if (i === C.B_VOLLEY) return game.skillName(C.SK_VOLLEY) || BTN_NAME[i];
+  if (i === C.B_ERA && !game.eraReady() && game.era >= C.ERA_COUNT - 1) {
+    return game.skillName(C.SK_SURGE) || BTN_NAME[i];
+  }
+  return BTN_NAME[i];
+}
 const LABEL_GOLD = '금';
 const LABEL_AI = 'AI';
 const LABEL_RETRY = '아무 키나 눌러 다시';
@@ -3003,7 +3019,7 @@ export class Renderer {
     for (let i = 0; i < C.BTN_COUNT; i++) {
       const base = i >= C.B_ERA ? C.RAMP_BONUS : C.RAMP_PLAYER;
       ctx.fillStyle = base[C.rampIndex(ok[i] ? 1 : 0.4)];
-      ctx.fillText(BTN_NAME[i], btnX(i) + 7, by + LAY.nameDY);
+      ctx.fillText(btnLabel(game, i), btnX(i) + 7, by + LAY.nameDY);
     }
 
     ctx.font = P ? FONT_SMALL_P : FONT_SMALL;

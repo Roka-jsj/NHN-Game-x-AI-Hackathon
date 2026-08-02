@@ -96,6 +96,10 @@ const E_STAGE_START  = num(EV.STAGE_START, 20);
 const E_STAGE_CLEAR  = num(EV.STAGE_CLEAR, 21);
 const E_TAUNT        = num(EV.TAUNT, 22);
 const E_CAMPAIGN_END = num(EV.CAMPAIGN_END, 23);
+const E_SKILL_UP     = num(EV.SKILL_UP, 24);
+// EV.ZODIAC(25) 는 **일부러 비워 둔다.** 그 전투의 하늘이 정해진 것은 충격이
+// 아니다 — 배경이 바뀌는 것이고 render 의 몫이다. 여기서 화면을 흔들면
+// 전투 시작마다 이유 없는 진동이 하나 늘 뿐이다.
 
 // 지면 높이 — 협곡은 V자라 가운데가 78px 낮다.
 // 고치기 전에는 타격 파편이 전부 C.GROUND_Y 기준이라 **전선 위 100px 허공**에서
@@ -568,8 +572,10 @@ export class Feel {
           // 예전에는 그래서 링 2개·파티클 80개가 겹쳐 풀을 통째로 갈아엎었다.
           this.tide(mine);
         } else if (a === 1) {
-          this.freeze(C.HITSTOP_BASE, PR_ALWAYS);
-          this.addShake(C.SHAKE_BASE * 1.4, 0);
+          // 화살비. 내 것은 무조건 걸리고, 적 것은 예산을 따른다 —
+          // 히트스톱은 기본적으로 **내가 만든 충격**의 언어다.
+          this.freeze(C.HITSTOP_BASE, mine ? PR_ALWAYS : PR_HI);
+          this.addShake(C.SHAKE_BASE * (mine ? 1.4 : 1.1), 0);
           const fx = this.frontline(game);
           this.spray(fx, gy(fx) - 50, C.PART_KILL * 2, mine ? 1 : 2,
                      2.6, 3.4, C.PART_LIFE, 3.4);
@@ -607,6 +613,19 @@ export class Feel {
         // 아직 못 쓴다. 흰색으로 튕긴다 — 실패의 이유가 다르면 색도 다르다.
         this.deny(a, 0);
         break;
+
+      case E_SKILL_UP: {
+        // 진화로 스킬이 한 단계 올라갔다 (a = 스킬, b = 새 등급).
+        // ERA_UP 이 같은 프레임에 큰 것을 이미 쳤으므로 여기서 또 멈추지 않는다.
+        // 대신 **그 버튼 자리에서** 금빛이 솟는다 — 실패한 입력이 붉게 튕기는
+        // 바로 그 자리다. 버튼 줄이 두 가지 말을 하게 된다: 안 된다 / 세졌다.
+        const i = a | 0;
+        const bi = i === 2 ? -1 : (i === 1 ? num(C.B_VOLLEY, 9) : num(C.B_TIDE, 8));
+        const bx = bi < 0 ? num(C.RALLY_CX, this.btnCXOther)
+                          : num(this.btnCX[bi], this.btnCXOther);
+        this.spray(bx, DENY_Y, 6, 1, 1.9, 2.8, 26, 3.6);
+        break;
+      }
 
       case EV.WIN:
       case EV.LOSE: {
