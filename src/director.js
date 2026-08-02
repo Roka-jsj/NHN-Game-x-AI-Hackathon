@@ -252,7 +252,13 @@ const PERSONA_ORDER = ['SWARMER', 'RUSHER', 'ECONOMIST', 'TURTLE', 'BALANCED'];
 //      진화 가속은 ERA_BASE_HP_MUL 때문에 **적 기지 체력을 4~6배로 불린다** —
 //      계약 §5.5 가 금지한 "기지를 그냥 크게 만들기"가 뒷문으로 들어온다.
 //      그래서 진화 쪽을 거의 껐다 (0.20 → 0.10). 수입 쪽만 남긴다.
-const FOCUS_CG = 3.2;      // 상성 대응 가중치 ×(1+3.2·focus)
+const FOCUS_CG = 10;       // 상성 대응 가중치 ×(1+10·focus). 상한은 COUNTER_CAP 이다
+// 두 층을 섞을 때 쓰는 공통 합. 인격표와 청크표의 합이 달라도 여기로 맞춘다.
+const MIX_NORM = 10;
+// 상성 대응이 구성표에서 차지할 수 있는 최대 배수. 2.0 = 최대 67%.
+// 스윕(90판): 2.0→0.317  3.0→0.264  4.0→0.285  상한없음(9.0)→0.329.
+// 상한을 풀어도 판별력은 거의 안 오르는데 적 구성만 단일해진다. 낮은 쪽을 쓴다.
+const COUNTER_CAP = 2.0;
 const FOCUS_TEMPO = 0.30;  // 소환 간격 ×(1−0.30·focus)  — 도배 상대에겐 더 빨리 나온다
 const FOCUS_GOLD = 0.34;   // 적 수입 ×(1+0.34·focus)   ← 실제로 아픈 채널
 // **0 이다. 지웠다는 뜻이 아니라 재 보고 껐다는 뜻이다.**
@@ -668,15 +674,15 @@ export class Director {
     // 합이 다른 두 표를 그냥 더하면 **합이 큰 쪽이 조용히 이긴다.**
     // (인격 합 16 · 청크 합 17 처럼 우연히 비슷할 때는 안 보이다가,
     //  청크 하나가 합 24 로 구워지는 순간 인격이 사라진다)
-    // 그래서 둘 다 합 10 으로 정규화한 뒤 지분으로 섞는다.
+    // 그래서 둘 다 합 MIX_NORM 으로 정규화한 뒤 지분으로 섞는다.
     const w = per ? clamp(num(per.readW, 0.5), 0, 1) : 1;
     let sr = 0, sp = 0;
     for (let k = 0; k < KINDS; k++) {
       sr += num(read[k], 0) > 0 ? num(read[k], 0) : 0;
       if (per) sp += num(per.mix[k], 0) > 0 ? num(per.mix[k], 0) : 0;
     }
-    const kr = sr > 0 ? 10 / sr : 0;
-    const kp = sp > 0 ? 10 / sp : 0;
+    const kr = sr > 0 ? MIX_NORM / sr : 0;
+    const kp = sp > 0 ? MIX_NORM / sp : 0;
     for (let k = 0; k < KINDS; k++) {
       const rv = Math.max(0, num(read[k], 0)) * kr;
       const pv = per ? Math.max(0, num(per.mix[k], 0)) * kp : 0;
@@ -691,8 +697,13 @@ export class Director {
     const sk = num(this.stageK, 1);          // 뒤 전투일수록 처벌이 날카롭다
     const bite = clamp(focus * sk, 0, 1.6);
 
+    // 상성 대응의 크기. **상한이 있다.**
+    // 상한이 없으면 도배 상대에게 가중치가 87 까지 올라가고(합 10짜리 표 위에),
+    // 적이 한 종류만 뽑는 단일 군대가 된다 — 화면에서 "읽었다"가 아니라
+    // "고장났다"로 보인다.
     const cgBase = per ? num(per.cg, num(p.counterGain, 0)) : num(p.counterGain, 0);
-    this.applyCounter(m, cgBase * (1 + FOCUS_CG * bite));
+    const gain = Math.min(cgBase * (1 + FOCUS_CG * bite), MIX_NORM * COUNTER_CAP);
+    this.applyCounter(m, gain);
 
     // 템포 — 구운 웨이브의 tempo 에는 난이도가 이미 들어 있으므로 거기에
     // **또** 난이도를 곱하지 않는다 (예전에 두 번 깎여 다섯 프로파일이 전부

@@ -83,6 +83,9 @@ const LBL_CAMP_END = '원정 종료';
 const LBL_NEXT_KEY = '아무 키나 눌러 다음 전투';
 const LBL_NEW_KEY = '아무 키나 눌러 새 원정';
 const LBL_BEATEN = '격파한 사령관';
+const LBL_FOE_ERA = '적 시대';
+const LBL_FOE_UP = '적이 진화했다';
+const LBL_MY_ERA = '내 시대';
 const LBL_SLASH = '/';
 const BR_TITLE = '차오른다';
 const BR_SUB = '금으로 병력을 사서 적 기지를 부순다. 버티면 물이 먼저 삼킨다.';
@@ -165,8 +168,9 @@ const STRIP_W = C.BTN_COUNT * (BTN_W + BTN_GAP) - BTN_GAP + 6;
 const STRIP_MAXH = 92 + 6;
 
 // ── 사령관 카드 — 오른쪽 위. AI 토글(904~) 앞에서 끝난다 ──
-const CMD_X = 706, CMD_Y = 8, CMD_W = 190, CMD_H = 98;
-const CMD_PR = 21;                     // 초상 반지름
+const CMD_X = 706, CMD_Y = 8, CMD_W = 190, CMD_H = 116;
+const FX_FOE_ERA_F = 130;              // 적이 진화한 순간을 알리는 시간
+const CMD_PR = 20;                     // 초상 반지름
 const FX_LINE_F = 250;                 // 전투 시작 대사가 떠 있는 렌더 프레임
 const FX_TAUNT_F = 200;                // 도발
 const BUB_W_MAX = 400;
@@ -552,6 +556,7 @@ export class Renderer {
     this.prevStage = -2;
     this.prevProfile = -1;
     this.prevObserving = 1;
+    this.fxFoeEra = 0;               // 적이 진화한 순간
     this.fxLine = 0;                 // 전투 시작 대사
     this.fxTaunt = 0;                // 도발
     this.overTime = -1;              // 결과 화면에 **멈춘** 시간을 찍기 위해 판이 끝난 순간을 잡는다
@@ -788,6 +793,7 @@ export class Renderer {
       this.prevObserving = obs;
     }
     if (this.fxTaunt > 0) this.fxTaunt--;
+    if (this.fxFoeEra > 0) this.fxFoeEra--;
 
     // 결과 화면의 시간은 **멈춰 있어야 한다.** 판이 끝난 순간을 한 번만 잡는다
     if (game.state === S.OVER) { if (this.overTime < 0) this.overTime = game.elapsed(); }
@@ -818,7 +824,11 @@ export class Renderer {
       if (this.fxTower[s] > 0) this.fxTower[s]--;
 
       const era = (s === SIDE_L ? game.era : game.aiEra) | 0;
-      if (era > this.prevEra[s]) this.fxEra[s] = FX_ERA_F;
+      if (era > this.prevEra[s]) {
+        this.fxEra[s] = FX_ERA_F;
+        // 적 진화는 **내 진화와 다른 방식으로** 알린다. 배너를 뺏지 않되 놓치지도 않게
+        if (s === SIDE_R) this.fxFoeEra = FX_FOE_ERA_F;
+      }
       this.prevEra[s] = era;
       if (this.fxEra[s] > 0) this.fxEra[s]--;
     }
@@ -1260,17 +1270,21 @@ export class Renderer {
       const cx = s === SIDE_L ? C.BASE_L_X : C.BASE_R_X;
       const cy = groundAt(cx) - C.BASE_H * 0.5;
       const e = easeOutCubic(t);
-      ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(1 - t)];
+      // **내 진화는 금색, 적 진화는 적 색이다.** 같은 연출을 주면 내 성취가 묻히고,
+      // 아무 연출도 안 주면 적이 진화한 줄 모른다 (사용자가 실제로 못 느꼈다).
+      const ramp = s === SIDE_L ? C.RAMP_BONUS : C.RAMP_STRUCT;
+      const sz = s === SIDE_L ? 1 : 0.72;
+      ctx.strokeStyle = ramp[C.rampIndex(1 - t)];
       ctx.lineWidth = 4 * (1 - t) + 1;
       ctx.beginPath();
-      ctx.arc(cx, cy, 30 + 260 * e, 0, TAU);
+      ctx.arc(cx, cy, 30 + 260 * e * sz, 0, TAU);
       ctx.stroke();
       ctx.lineWidth = 2 * (1 - t) + 0.5;
       ctx.beginPath();
-      ctx.arc(cx, cy, 30 + 160 * e, 0, TAU);
+      ctx.arc(cx, cy, 30 + 160 * e * sz, 0, TAU);
       ctx.stroke();
-      // 솟아오르는 금빛 알갱이 — 기지가 새 시대를 뱉는다
-      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(1 - t)];
+      // 솟아오르는 알갱이 — 기지가 새 시대를 뱉는다
+      ctx.fillStyle = ramp[C.rampIndex(1 - t)];
       ctx.beginPath();
       for (let i = 0; i < 12; i++) {
         const px = cx + (this.rn(s * 23 + i * 3) - 0.5) * (C.BASE_W + 30);
@@ -2423,11 +2437,12 @@ export class Renderer {
   drawCommander(game, director) {
     const ctx = this.ctx;
     const cmd = this.commanderOf(game);
-    if (cmd < 0) return;
     const stage = (typeof game.stage === 'number') ? (game.stage | 0) : 0;
     const stageMax = (typeof game.stageMax === 'number') ? (game.stageMax | 0) : CAMP_LEN;
+    const aiEra = game.aiEra | 0, myEra = game.era | 0;
 
-    const sig = cmd * 977 + stage * 31 + stageMax;
+    // 서명에 두 시대가 다 들어간다 — 누가 앞서는지가 카드에 그려지기 때문이다
+    const sig = (cmd + 1) * 977 + stage * 31 + stageMax * 7 + aiEra * 131 + myEra * 1009;
     if (typeof document !== 'undefined') {
       const s = this.viewScale > 2 ? 2 : (this.viewScale < 0.25 ? 0.25 : this.viewScale);
       if (this.cmdSig !== sig || this.cmdScale !== s) {
@@ -2441,7 +2456,7 @@ export class Renderer {
         this.ctx = octx;
         octx.setTransform(s, 0, 0, s, -CMD_X * s, -CMD_Y * s);
         octx.clearRect(CMD_X, CMD_Y, CMD_W, CMD_H);
-        this.paintCommanderCard(cmd, stage, stageMax);
+        this.paintCommanderCard(cmd, stage, stageMax, aiEra, myEra);
         this.ctx = prev;
         this.cmdSig = sig; this.cmdScale = s;
       }
@@ -2449,13 +2464,13 @@ export class Renderer {
       ctx.drawImage(this.cmdCanvas, CMD_X, CMD_Y, CMD_W, CMD_H);
       ctx.imageSmoothingEnabled = true;
     } else {
-      this.paintCommanderCard(cmd, stage, stageMax);
+      this.paintCommanderCard(cmd, stage, stageMax, aiEra, myEra);
     }
 
     // 적 편성 막대 — **"적이 뭘 뽑고 있나"가 1초 안에 읽혀야 한다.**
     // 지금 살아 있는 적 구성이다. 아이콘 줄은 카드에 구워져 있고 여기서는 막대만 칠한다.
     const mx = CMD_X + 10, mw = CMD_W - 20, cw = mw / C.UNIT_KINDS;
-    const my = CMD_Y + 54, mh = 16;
+    const my = CMD_Y + 72, mh = 16;
     ctx.fillStyle = C.COL_STRUCT;
     ctx.beginPath();
     let anyF = 0;
@@ -2468,10 +2483,34 @@ export class Renderer {
     }
     if (anyF) ctx.fill();
 
+    // 적이 진화한 순간 — 카드가 밝게 뛴다. 내 진화의 금빛 배너와 겹치지 않는 신호다
+    if (this.fxFoeEra > 0) {
+      const t = this.fxFoeEra / FX_FOE_ERA_F;
+      ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.35 + 0.65 * t)];
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.roundRect(CMD_X - 2, CMD_Y - 2, CMD_W + 4, CMD_H + 4, 8);
+      ctx.stroke();
+      ctx.lineWidth = C.STROKE;
+      if (this.fxTaunt <= 0 && this.fxLine <= 0) {
+        const fade = t > 0.75 ? 1 : t / 0.75;
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.font = FONT_MID;
+        ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(fade)];
+        ctx.fillText(LBL_FOE_UP, CMD_X + CMD_W - 46, CMD_Y + CMD_H + 12);
+        ctx.font = FONT_SMALL;
+        ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(fade * 0.9)];
+        ctx.fillText(C.ERA_NAME[aiEra < C.ERA_COUNT ? aiEra : C.ERA_COUNT - 1],
+                     CMD_X + CMD_W, CMD_Y + CMD_H + 14);
+        ctx.textAlign = 'left';
+      }
+    }
+
     // 도발 중이면 초상에 금빛 고리가 돈다 — 놓치지 않게
     if (this.fxTaunt > 0) {
       const t = this.fxTaunt / FX_TAUNT_F;
-      const px = CMD_X + 8 + CMD_PR, py = CMD_Y + 6 + CMD_PR;
+      const px = CMD_X + 7 + CMD_PR, py = CMD_Y + 6 + CMD_PR;
       ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(0.35 + 0.65 * t)];
       ctx.lineWidth = 2.5;
       ctx.beginPath();
@@ -2481,6 +2520,7 @@ export class Renderer {
     }
 
     // 말풍선 — 도발이 대사보다 우선한다
+    if (cmd < 0) return;
     if (this.fxTaunt > 0) {
       this.drawBubble(CMD_TAUNT ? CMD_TAUNT[cmd] : null,
                       director && !director.observing ? director.profileName : null,
@@ -2536,8 +2576,10 @@ export class Renderer {
     ctx.fillText(text, x + 14, ty);
   }
 
-  // 카드 한 장 — 초상 · 이름 · 칭호 · 원정 진행 · 적 편성 아이콘 줄
-  paintCommanderCard(cmd, stage, stageMax) {
+  // 카드 한 장 — 초상 · 이름 · 칭호 · 원정 진행 · **적 시대** · 적 편성.
+  // 여기에 적 시대가 있는 이유: 내 시대는 좌상단에 크게 있는데 적 시대는
+  // 어디에도 없었다. 그래서 "같이 진화하고 있다"가 안 느껴졌다 (사용자 지적).
+  paintCommanderCard(cmd, stage, stageMax, aiEra, myEra) {
     const ctx = this.ctx;
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.92)];
     ctx.beginPath();
@@ -2550,51 +2592,77 @@ export class Renderer {
     ctx.stroke();
     ctx.lineWidth = C.STROKE;
 
-    const px = CMD_X + 8 + CMD_PR, py = CMD_Y + 6 + CMD_PR;
-    this.drawEmblem(cmd, px, py, CMD_PR);
-
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    const tx = CMD_X + CMD_PR * 2 + 18;
-    ctx.font = FONT_MID;
-    ctx.fillStyle = C.COL_STRUCT;
-    ctx.fillText(CMD_NAME[cmd], tx, CMD_Y + 8);
+    const tx = CMD_X + (cmd >= 0 ? CMD_PR * 2 + 16 : 10);
+    if (cmd >= 0) {
+      this.drawEmblem(cmd, CMD_X + 7 + CMD_PR, CMD_Y + 6 + CMD_PR, CMD_PR);
+      ctx.font = FONT_MID;
+      ctx.fillStyle = C.COL_STRUCT;
+      ctx.fillText(CMD_NAME[cmd], tx, CMD_Y + 6);
+      ctx.font = FONT_MICRO;
+      ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.62)];
+      if (CMD_TITLE) ctx.fillText(CMD_TITLE[cmd], tx + CMD_NAME[cmd].length * 20 + 6, CMD_Y + 13);
+
+      // 원정 진행 — 몇 번째 전투인가. 지나온 칸은 금색이다
+      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.9)];
+      ctx.beginPath();
+      for (let i = 0; i < stageMax; i++) if (i < stage) ctx.rect(tx + i * 12, CMD_Y + 30, 8, 6);
+      ctx.fill();
+      ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.28)];
+      ctx.beginPath();
+      for (let i = 0; i < stageMax; i++) if (i > stage) ctx.rect(tx + i * 12, CMD_Y + 30, 8, 6);
+      ctx.fill();
+      ctx.fillStyle = C.COL_PLAYER;
+      ctx.fillRect(tx + stage * 12, CMD_Y + 29, 8, 8);
+      ctx.font = FONT_MICRO;
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
+      ctx.fillText(LBL_STAGE, tx + stageMax * 12 + 6, CMD_Y + 30);
+      this.drawLeft(stage + 1, tx + stageMax * 12 + 24, CMD_Y + 30, 7);
+      ctx.fillText(LBL_SLASH, tx + stageMax * 12 + 32, CMD_Y + 30);
+      this.drawLeft(stageMax, tx + stageMax * 12 + 38, CMD_Y + 30, 7);
+    }
+
+    // ── 적 시대 사다리 — **한 줄에 두 진영의 시대가 같이 있다** ──
+    // 채워진 칸이 적의 시대, 그 아래 흰 표식이 내 시대다. 누가 앞서는지가
+    // 숫자를 읽지 않고 위치로 읽힌다.
+    const ey = CMD_Y + 46;
     ctx.font = FONT_MICRO;
     ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.62)];
-    if (CMD_TITLE) ctx.fillText(CMD_TITLE[cmd], tx + CMD_NAME[cmd].length * 20 + 6, CMD_Y + 15);
-
-    // 원정 진행 — 몇 번째 전투인가. 지나온 칸은 금색이다
-    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.9)];
+    ctx.fillText(LBL_FOE_ERA, CMD_X + 10, ey + 3);
+    ctx.font = FONT_SMALL;
+    ctx.fillStyle = C.COL_STRUCT;
+    ctx.fillText(C.ERA_NAME[aiEra < C.ERA_COUNT ? aiEra : C.ERA_COUNT - 1], CMD_X + 44, ey);
+    const lx = CMD_X + 84, lw = (CMD_W - 94) / C.ERA_COUNT;
+    ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.20)];
     ctx.beginPath();
-    for (let i = 0; i < stageMax; i++) {
-      if (i >= stage) continue;
-      ctx.rect(tx + i * 13, CMD_Y + 32, 9, 6);
-    }
+    for (let i = 0; i < C.ERA_COUNT; i++) ctx.rect(lx + i * lw, ey + 1, lw - 3, 9);
     ctx.fill();
-    ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.28)];
+    ctx.fillStyle = C.COL_STRUCT;
     ctx.beginPath();
-    for (let i = 0; i < stageMax; i++) {
-      if (i <= stage) continue;
-      ctx.rect(tx + i * 13, CMD_Y + 32, 9, 6);
-    }
+    for (let i = 0; i <= aiEra && i < C.ERA_COUNT; i++) ctx.rect(lx + i * lw, ey + 1, lw - 3, 9);
     ctx.fill();
-    ctx.fillStyle = C.COL_PLAYER;                       // 지금 전투
-    ctx.fillRect(tx + stage * 13, CMD_Y + 31, 9, 8);
+    // 내 시대 표식 — 같은 사다리 위. 앞서 있으면 오른쪽에 선다
+    ctx.fillStyle = C.COL_PLAYER;
+    ctx.beginPath();
+    const mxp = lx + (myEra < C.ERA_COUNT ? myEra : C.ERA_COUNT - 1) * lw + (lw - 3) * 0.5;
+    ctx.moveTo(mxp, ey + 11);
+    ctx.lineTo(mxp + 4.5, ey + 17);
+    ctx.lineTo(mxp - 4.5, ey + 17);
+    ctx.closePath();
+    ctx.fill();
     ctx.font = FONT_MICRO;
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
-    ctx.fillText(LBL_STAGE, tx + stageMax * 13 + 6, CMD_Y + 32);
-    this.drawLeft(stage + 1, tx + stageMax * 13 + 24, CMD_Y + 32, 7);
-    ctx.fillText(LBL_SLASH, tx + stageMax * 13 + 32, CMD_Y + 32);
-    this.drawLeft(stageMax, tx + stageMax * 13 + 38, CMD_Y + 32, 7);
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.55)];
+    ctx.fillText(LBL_MY_ERA, CMD_X + 10, ey + 15);
 
     // 적 편성 — 아이콘 줄과 막대 홈은 안 바뀐다. 여기 굽고 막대만 매 프레임 얹는다
     const mx = CMD_X + 10, mw = CMD_W - 20, cw = mw / C.UNIT_KINDS;
     ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.16)];
     ctx.beginPath();
-    for (let k = 0; k < C.UNIT_KINDS; k++) ctx.rect(mx + cw * k + 2, CMD_Y + 54, cw - 4, 16);
+    for (let k = 0; k < C.UNIT_KINDS; k++) ctx.rect(mx + cw * k + 2, CMD_Y + 72, cw - 4, 16);
     ctx.fill();
     for (let k = 0; k < C.UNIT_KINDS; k++) {
-      this.drawMixIcon(k, mx + cw * (k + 0.5), CMD_Y + 83, C.RAMP_STRUCT[C.rampIndex(0.8)]);
+      this.drawMixIcon(k, mx + cw * (k + 0.5), CMD_Y + 101, C.RAMP_STRUCT[C.rampIndex(0.8)]);
     }
   }
 

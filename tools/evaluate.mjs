@@ -246,20 +246,32 @@ const BOT = () => {
     return out;
   }
 
-  // 상성표를 읽고 금 대비 우위가 가장 큰 유닛을 고른다. counter 봇의 눈.
-  function chooseCounter(g, C, K) {
+  // 상성표를 읽고 적 구성에 유리한 유닛을 고른다. counter 봇의 눈.
+  //
+  // perGold=false — **적 구성 대비 상성 배수가 가장 높은 유닛.** 동점이면 싼 쪽.
+  //   이것이 "상성을 아는 플레이어"의 문자 그대로의 정의다.
+  // perGold=true  — 그 배수를 다시 가격으로 나눈다.
+  //   처음엔 이쪽만 썼는데, 그러면 봇이 **검사 도배가 된다** (실측: 구성 검44창3궁2).
+  //   배수 1.75 보다 가격차(검 30 vs 궁 70 같은)가 커서 상성이 늘 진다.
+  //   봇의 휴리스틱이 지표를 삼킨 것이라, 두 정의를 **둘 다** 재고 차이를 보고한다.
+  //   두 값의 차이 자체가 밸런스 정보다: 가격 대비 효율 > 상성 우위인가?
+  function chooseCounter(g, C, K, perGold) {
     const CT = C.COUNTER;
     if (!CT) { window.__missing.COUNTER = 1; return buyable(g, 0) ? 0 : -1; }
     const mix = foeMix(g, K);
     let tot = 0; for (let j = 0; j < K; j++) tot += mix[j];
-    let best = -1, bestS = -1;
+    let best = -1, bestS = -1, bestC = 0;
     for (let k = 0; k < K; k++) {
       if (!buyable(g, k)) continue;
       let s = 0;
       if (tot === 0) s = 1;
-      else for (let j = 0; j < K; j++) s += mix[j] * CT[k * K + j];
-      s /= g.cost(k);
-      if (s > bestS) { bestS = s; best = k; }
+      else { for (let j = 0; j < K; j++) s += mix[j] * CT[k * K + j]; s /= tot; }
+      const c = g.cost(k);
+      if (perGold) s /= c;
+      // 동점이면 싼 쪽. 안 그러면 "아무 유닛이나 다 1.0"인 초반에 가장 비싼 것을 산다
+      if (s > bestS + 1e-9 || (Math.abs(s - bestS) <= 1e-9 && best >= 0 && c < bestC)) {
+        bestS = s; best = k; bestC = c;
+      }
     }
     return best;
   }
