@@ -11,7 +11,8 @@
 //   5. 난이도 단조성
 //   6. **프로파일별 구성이 실제로 갈리는가** ← 이게 "디렉터가 장식이 아니다"의 증거다
 //   7. **상성 대응이 실제로 작동하는가** — 플레이어 구성에 따라 적 구성이 움직이는가
-//   8. 중복률
+//   8. **때움 유닛** — 못 살 때 대신 나오는 유닛이 성향과 맞는가
+//   9. 중복률
 //
 // 러너에서 배운 것을 그대로 가져온다: **치명 항목은 게임을 못 하게 만드는 것만**이다.
 // "밸런스가 이상하다"는 치명이 아니다. "적이 안 나온다"는 치명이다.
@@ -31,6 +32,9 @@ const TEMPO_MAX = 3000;   // 이보다 길면 아무 일도 안 일어난다
 const UNIT_KINDS = 6;
 const SHORT = ['검', '창', '궁', '기', '거', '투'];
 const LONG = ['검사', '창병', '궁수', '기병', '거인', '투석기'];
+// src/config.js 의 U_COST 와 같은 값이다. 이 도구는 게임 코드를 import 하지 않는다
+// (게임은 ESM, 도구는 CJS). 순서가 곧 계약이므로 여기 다시 적는다.
+const U_COST = [28, 40, 44, 62, 92, 120];
 
 // 프로파일 구성이 "서로 다르다"고 말하려면 얼마나 달라야 하는가.
 // 반올림한 라벨이 다른 것만으로는 부족하다 — 1%p 차이도 다른 라벨이 된다.
@@ -238,6 +242,32 @@ if (!pol || !pol.policies || !Array.isArray(pol.counterMap)) {
   console.log('');
   line('정책 스키마 위반 (mix[6]·tempo)', polBad, polBad === 0);
   if (polBad) fatal++;
+
+  // ── 때움 유닛 — 이 표가 이 게임에서 구성을 실제로 결정한다 ──
+  // game.js 는 뽑기로 정한 유닛을 못 사면 **가중치가 있는 것 중 가장 싼 것**으로 때운다.
+  // 적의 수입으로는 비싼 유닛을 자주 못 사므로, 실제 전장에 가장 많이 서 있는 것은
+  // 대개 이 "때움 유닛"이다. 여기에 검사를 1이라도 남기면 성향이 통째로 사라진다
+  // (첫 계측에서 벽을 세우라는 정책이 검사 74% 로 나왔다).
+  console.log('');
+  console.log('  때움 유닛 — 못 살 때 대신 나오는 유닛. 이게 성향과 맞아야 한다');
+  let offBrand = 0;
+  for (const p of ['RUSHER', 'TURTLE', 'ECONOMIST', 'SWARMER', 'BALANCED']) {
+    const q = pol.policies[p];
+    if (!q || !Array.isArray(q.mix)) continue;
+    let cheap = -1;
+    for (let k = 0; k < UNIT_KINDS; k++) {
+      if (!(q.mix[k] > 0)) continue;
+      if (cheap < 0 || U_COST[k] < U_COST[cheap]) cheap = k;
+    }
+    // 벽·원거리·중장 성향인데 때움이 검사면 성향이 사라진다.
+    const wantsHeavy = p === 'RUSHER' || p === 'SWARMER' || p === 'TURTLE';
+    const bad = cheap < 0 || (wantsHeavy && cheap === 0);
+    if (bad) offBrand++;
+    console.log('    ' + p.padEnd(10) + (cheap < 0 ? '(없음)' : LONG[cheap] + ' ' + U_COST[cheap] + '금')
+                + (bad ? '   ← 성향이 지워진다' : ''));
+  }
+  line('성향과 어긋난 때움 유닛', offBrand, offBrand === 0);
+  if (offBrand) warn++;
 }
 console.log('');
 

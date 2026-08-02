@@ -440,7 +440,6 @@ export class Director {
 
     const aggro = this.metricAggro;
     const hoard = this.metricHoard;
-    const econ = this.metricEcon;
     const swarm = this.metricSwarm;
     const tower = this.metricTower;
 
@@ -449,9 +448,9 @@ export class Director {
     // 직전 판정을 유지"였는데, 경계가 일곱 개라 지표 하나가 우연히 어딘가에
     // 걸치면 **판정이 통째로 얼어붙었다** — 기병만 뽑는 봇이 aggro 0.98 로
     // 명백한 돌격형인데도 swarm 이 0.63(경계 0.66 근처)이라 균형에 갇혔다.
-    const raw = classify(aggro, hoard, econ, swarm, tower, 0);
+    const raw = classify(aggro, hoard, swarm, tower, 0);
     let next = raw;
-    if (raw !== this.profile && classify(aggro, hoard, econ, swarm, tower, C.HYSTERESIS) !== raw) {
+    if (raw !== this.profile && classify(aggro, hoard, swarm, tower, C.HYSTERESIS) !== raw) {
       next = this.profile;
     }
     // 방금 바꿨으면 잠시 유지한다. 레버가 세계를 바꾼 결과를 보고 다시 판정해야
@@ -622,14 +621,15 @@ export class Director {
 
 // ── 프로파일 판정 — 결정론적 ──────────────────────────────────
 //
-// 다섯이 전부 **구조적으로 도달 가능해야** 한다. 각 조건이 실제로 닿는 이유:
-//   TURTLE     들어온 금의 30% 미만만 병력에 쓰고, 쌓을 수 있는 만큼 쌓았거나
-//              포탑을 올렸다. 안 쓰면 hoard 는 정의상 1.0 에 붙는다
-//   ECONOMIST  번 경험치의 55% 이상을 시대에 넣었고 병력 지출은 절반 미만.
-//              진화 버튼을 뜨는 족족 누르면 econ 은 1.0 에 붙는다
-//   SWARMER    금의 62% 이상을 병력에 쓰고, 그 병력의 평균 단가가 싸다(검·창·궁)
-//   RUSHER     금의 62% 이상을 병력에 쓰는데 비싼 것(기병·거인·투석기)이 섞인다
-//   BALANCED   그 사이 어디도 아니다 — 실제로 존재하는 넓은 영역이다
+// 다섯이 전부 **구조적으로 도달 가능해야** 한다.
+// 봇 여섯을 100초씩 돌려 실제로 닿는 것을 확인했다 (괄호가 측정값):
+//   TURTLE     들어온 금의 30% 미만만 병력에 쓰고, 쌓아 뒀거나 포탑을 올렸다
+//              (포탑 봇: aggro 0.05 · hoard 0.76 · tower 0.73 → TURTLE 82%)
+//   ECONOMIST  쓰기는 쓰는데 늘 큰 잔고를 안고 있다
+//              (문턱 260 저축 봇: aggro 0.82 · hoard 0.74 → ECONOMIST 86%)
+//   SWARMER    잔고 없이 싼 것을 끝없이 (spam: aggro 0.95 · hoard 0.14 · swarm 0.98)
+//   RUSHER     잔고 없이 비싼 것까지 (giant/cav: aggro 0.93 · hoard 0.29 · swarm 0.61)
+//   BALANCED   그 사이. 판 초반 두세 구간이 실제로 여기 머문다
 // eps 는 **들어가는 조건에만** 붙는다. 0이면 순수 판정, HYSTERESIS 면
 // "이 판정으로 갈아탈 만큼 확실한가"를 묻는 것이다.
 //
@@ -645,7 +645,7 @@ export class Director {
 //   대신 실제로 넓게 퍼지는 축을 썼다. 봇 여섯을 재보니 hoard 는
 //   0.14 → 1.00 으로 깨끗하게 퍼졌고 TH_HOARD_HIGH(0.45)가 정확히 그 한가운데다.
 //   이 게임에서 "경제형"은 **금을 안고 있다가 한 번에 쏟는 사람**이다.
-function classify(aggro, hoard, econ, swarm, tower, eps) {
+function classify(aggro, hoard, swarm, tower, eps) {
   const e = eps || 0;
   // 순서가 곧 우선순위다. 웅크리는 사람을 먼저 잡아야 한다 —
   // 물이 차오르는 게임에서 가장 위험한 습관이기 때문이다.
