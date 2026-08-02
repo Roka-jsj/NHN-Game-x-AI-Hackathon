@@ -82,6 +82,21 @@ export class Renderer {
       this.bgPath.lineTo(x, C.GROUND_Y);
     }
 
+    // 먼 산 두 겹 — 하늘에 깊이를 준다. 이미지 파일이 아니라 결정론적 해시로
+    // 만든 다각형이고 Path2D 로 한 번만 굽는다. 매 프레임 비용은 fill 한 번이다.
+    this.ridgeFar = this.buildRidge(11, 96, 168, 0.62);
+    this.ridgeNear = this.buildRidge(7, 140, 232, 1.0);
+
+    // 협곡 지층 — 바닥 아래 가로선 몇 줄. 깊이가 보여야 물이 무섭다.
+    this.strataPath = new Path2D();
+    for (let d = 26; d < 150; d += 30) {
+      for (let x = 0; x <= C.VIEW_W; x += 14) {
+        const y = groundAt(x) + d;
+        if (x === 0) this.strataPath.moveTo(x, y); else this.strataPath.lineTo(x, y);
+      }
+      this.strataPath.moveTo(0, groundAt(0) + d + 30);
+    }
+
     // 협곡 벽 — 양쪽 끝이 솟아 있다. 물이 차오를 그릇을 눈으로 보여 준다.
     this.cliffPath = new Path2D();
     this.cliffPath.moveTo(0, C.VIEW_H);
@@ -94,6 +109,22 @@ export class Renderer {
     this.cliffPath.lineTo(C.VIEW_W - 38, C.GROUND_Y - 120);
     this.cliffPath.lineTo(C.VIEW_W - 48, C.GROUND_Y);
     this.cliffPath.lineTo(C.VIEW_W, C.VIEW_H);
+  }
+
+  // 결정론적 능선. Math.random 을 쓰면 프레임마다 산이 바뀐다.
+  buildRidge(n, minH, maxH) {
+    const p = new Path2D();
+    p.moveTo(0, C.GROUND_Y);
+    for (let i = 0; i <= n; i++) {
+      const h1 = ((i * 2654435761) % 1000) / 1000;
+      const x = (C.VIEW_W / n) * i;
+      const h = minH + h1 * (maxH - minH);
+      p.lineTo(x, C.GROUND_Y - h);
+      p.lineTo(x + C.VIEW_W / n * 0.5, C.GROUND_Y - h * 0.72);
+    }
+    p.lineTo(C.VIEW_W, C.GROUND_Y);
+    p.closePath();
+    return p;
   }
 
   resize(viewScale) { this.viewScale = viewScale; }
@@ -179,7 +210,7 @@ export class Renderer {
       ctx.translate(-HALF_W, -HALF_H);
     }
 
-    this.drawField();
+    this.drawField(game);
     this.drawBase(game, SIDE_R);
     this.drawBase(game, SIDE_L);
     this.drawUnits(game, alpha);
@@ -197,11 +228,26 @@ export class Renderer {
   }
 
   // ── 전장 ────────────────────────────────────────────────────
-  drawField() {
+  drawField(game) {
     const ctx = this.ctx;
-    ctx.strokeStyle = C.COL_GRID;
+
+    // 하늘 — 위로 갈수록 어둡다. 띠 여섯 줄이면 그라디언트로 보인다.
+    // createLinearGradient 를 안 쓰는 이유는 리사이즈마다 다시 만들어야 하고
+    // 알파 램프로 같은 결과를 공짜로 얻을 수 있기 때문이다.
+    for (let i = 0; i < 6; i++) {
+      ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.10 + i * 0.055)];
+      ctx.fillRect(0, C.GROUND_Y * (i / 6), C.VIEW_W, C.GROUND_Y / 6 + 1);
+    }
+
+    ctx.strokeStyle = C.RAMP_GRID[C.rampIndex(0.55)];
     ctx.lineWidth = C.STROKE;
     ctx.stroke(this.bgPath);
+
+    // 먼 산 두 겹
+    ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.85)];
+    ctx.fill(this.ridgeFar);
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.75)];
+    ctx.fill(this.ridgeNear);
 
     // 협곡 바닥 — V자다. 가운데가 낮아서 전선이 먼저 잠긴다.
     ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.9)];
@@ -219,11 +265,19 @@ export class Renderer {
     }
     ctx.stroke();
 
+    // 지층 — 바닥 아래 가로선. 깊이가 보여야 물이 무섭다.
+    ctx.strokeStyle = C.RAMP_BG[C.rampIndex(0.55)];
+    ctx.lineWidth = 1;
+    ctx.stroke(this.strataPath);
+    ctx.lineWidth = C.STROKE;
+
     ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.7)];
     ctx.fill(this.cliffPath);
   }
 
   // ── 기지 ────────────────────────────────────────────────────
+  // ── 기지 — 사각형 하나가 아니라 성채로 보여야 한다 ─────────
+  // 총안(battlement) · 성문 아치 · 깃대. 셋이면 "기지"로 읽힌다.
   drawBase(game, side) {
     const ctx = this.ctx;
     const mine = side === SIDE_L;
@@ -233,35 +287,76 @@ export class Renderer {
     const x = cx - w * 0.5, y = gy - h;
     const k = game.baseK(side);
     const flash = game.baseFlash[side] > 0;
+    const main = mine ? C.RAMP_PLAYER[C.rampIndex(0.88)] : C.RAMP_STRUCT[C.rampIndex(0.84)];
+    const dark = flash ? C.COL_DANGER : C.RAMP_BG[C.rampIndex(0.85)];
 
-    ctx.fillStyle = flash ? C.COL_DANGER
-      : (mine ? C.RAMP_PLAYER[C.rampIndex(0.85)] : C.RAMP_STRUCT[C.rampIndex(0.8)]);
+    // 본체
+    ctx.fillStyle = main;
     ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = C.COL_BG;
+    ctx.strokeStyle = dark;
     ctx.lineWidth = C.STROKE;
     ctx.strokeRect(x, y, w, h);
 
-    // 성문 — 어느 쪽이 내 것인지 실루엣으로 구분된다
-    const gw = 30, gh = 46;
-    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.85)];
-    ctx.fillRect(cx - gw * 0.5 + (mine ? 12 : -12), gy - gh, gw, gh);
+    // 총안 — 위쪽 요철. 이 하나로 "성"이 된다
+    const merlonW = w / 7;
+    for (let i = 0; i < 7; i += 2) {
+      ctx.fillRect(x + i * merlonW, y - 13, merlonW, 13);
+      ctx.strokeRect(x + i * merlonW, y - 13, merlonW, 13);
+    }
+
+    // 옆 탑 — 안쪽(전장 쪽)에 하나. 실루엣이 대칭이 아니어야 방향이 읽힌다
+    const tx = mine ? x + w - 16 : x - 12;
+    ctx.fillRect(tx, y - 34, 28, 34);
+    ctx.strokeRect(tx, y - 34, 28, 34);
+
+    // 성문 아치
+    const gw = 32, gh = 48;
+    const gx = cx - gw * 0.5 + (mine ? 14 : -14);
+    ctx.fillStyle = dark;
+    ctx.beginPath();
+    ctx.moveTo(gx, gy);
+    ctx.lineTo(gx, gy - gh + gw * 0.5);
+    ctx.arc(gx + gw * 0.5, gy - gh + gw * 0.5, gw * 0.5, Math.PI, 0);
+    ctx.lineTo(gx + gw, gy);
+    ctx.closePath();
+    ctx.fill();
+
+    // 깃대와 깃발 — 시대가 오르면 깃발이 늘어난다. 진화가 기지에도 보인다
+    const era = mine ? game.era : game.aiEra;
+    const px = mine ? x + 12 : x + w - 12;
+    ctx.fillStyle = main;
+    ctx.fillRect(px - 1.5, y - 62, 3, 30);
+    for (let f = 0; f <= era; f++) {
+      ctx.fillStyle = f === 0 ? main : C.COL_BONUS;
+      const fy = y - 58 + f * 8;
+      ctx.beginPath();
+      ctx.moveTo(px, fy);
+      ctx.lineTo(px + (mine ? 16 : -16), fy + 3);
+      ctx.lineTo(px, fy + 6);
+      ctx.closePath();
+      ctx.fill();
+    }
 
     // 체력 막대 — 기지 위에
-    const bw = w + 16, bh = 9;
-    const bx = cx - bw * 0.5, by = y - 18;
-    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.9)];
+    const bw = w + 20, bh = 9;
+    const bx = cx - bw * 0.5, by = y - 78;
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.92)];
     ctx.fillRect(bx, by, bw, bh);
     ctx.fillStyle = k > 0.3 ? (mine ? C.COL_PLAYER : C.COL_STRUCT) : C.COL_DANGER;
     ctx.fillRect(bx, by, bw * k, bh);
-    ctx.strokeStyle = C.RAMP_BG[C.rampIndex(1)];
+    ctx.strokeStyle = dark;
     ctx.strokeRect(bx, by, bw, bh);
   }
 
-  // ── 유닛 ────────────────────────────────────────────────────
-  // 종류는 **실루엣만으로** 구분돼야 한다. 색으로 때우지 않는다.
-  //   검사  좁고 보통 키. 위에 짧은 날
-  //   궁수  더 좁고 낮다. 앞으로 활대가 나와 있다
-  //   거인  넓고 크다
+  // ── 유닛 — 실루엣만으로 종류와 시대가 읽혀야 한다 ──────────
+  // 사각형 하나로는 검사·궁수·거인이 구분되지 않았다. 사람 형태로 그린다.
+  //   검사  한 손에 칼. 보통 체구
+  //   궁수  작고 낮다. 앞으로 활을 당기고 있다
+  //   거인  어깨가 넓고 몽둥이가 두껍다
+  // 시대는 **머리 위에 붙는 것**으로 구분한다 — 돌(없음) 청동(볏) 강철(견갑) 기계(안테나).
+  //
+  // 걷는 위상을 x 좌표에서 뽑는다. 상태를 따로 안 들고도 걸을 때만 다리가 움직이고
+  // 멈춰 싸울 때는 저절로 멎는다. 결정론적이고 할당이 0이다.
   drawUnits(game, alpha) {
     const ctx = this.ctx;
     for (let i = 0; i < C.UNIT_MAX; i++) {
@@ -271,44 +366,136 @@ export class Renderer {
       const mine = side === SIDE_L;
       const x = game.uPrevX[i] + (game.uX[i] - game.uPrevX[i]) * alpha;
       const era = game.uEra[i];
-      // 시대가 오르면 조금씩 커진다 — 진화가 눈에 보여야 한다
-      const grow = 1 + era * 0.09;
+      const grow = 1 + era * 0.08;
       const w = C.U_W[kind] * grow;
       const h = C.U_H[kind] * grow;
       const gy = groundAt(x);
-      const y = gy - h;
-      const hit = game.uHitFlash[i] > 0;
-
-      ctx.fillStyle = hit ? C.COL_DANGER
-        : (mine ? C.RAMP_PLAYER[C.rampIndex(0.9)] : C.RAMP_STRUCT[C.rampIndex(0.85)]);
-
-      // 공격 모션 — 앞으로 살짝 튀어나온다
-      const lunge = game.uAttack[i] > 0 ? (mine ? 4 : -4) : 0;
-      ctx.fillRect(x - w * 0.5 + lunge, y, w, h);
-      ctx.strokeStyle = C.COL_BG;
-      ctx.lineWidth = C.STROKE;
-      ctx.strokeRect(x - w * 0.5 + lunge, y, w, h);
-
       const dir = mine ? 1 : -1;
+      const hit = game.uHitFlash[i] > 0;
+      const atk = game.uAttack[i];
+      const walk = Math.sin(x * 0.09 + i);
+
+      // **피격을 몸 색으로 표시하면 안 된다.** 밀집 전투에서는 매 프레임 맞으므로
+      // 전원이 계속 붉어져 아군과 적군이 구분되지 않는다. 실제로 그렇게 됐다 —
+      // 물 때문인 줄 알고 물 알파를 세 번 낮췄는데 원인은 이쪽이었다.
+      // 소속은 몸 색이 유지하고, 피격은 **붉은 테두리**로 알린다.
+      const body = mine ? C.RAMP_PLAYER[C.rampIndex(0.92)] : C.RAMP_STRUCT[C.rampIndex(0.88)];
+      const dark = hit ? C.COL_DANGER : C.RAMP_BG[C.rampIndex(0.8)];
+
+      // 발밑 그림자 — 지면에 붙어 있다는 느낌을 준다
+      ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.5)];
+      ctx.beginPath();
+      ctx.ellipse(x, gy, w * 0.62, 3.5, 0, 0, TAU);
+      ctx.fill();
+
+      // 공격 순간 앞으로 기운다
+      const lunge = atk > 0 ? dir * 4 : 0;
+      const legH = h * 0.34;
+      const torsoH = h * 0.44;
+      const headR = w * 0.30;
+      const hipY = gy - legH;
+      const shY = hipY - torsoH;
+
+      ctx.fillStyle = body;
+      ctx.strokeStyle = dark;
+      ctx.lineWidth = C.STROKE;
+
+      // 다리 둘 — 걷는 위상에 따라 벌어진다
+      const spread = walk * w * 0.26;
+      const lw = Math.max(3, w * 0.17);
+      ctx.fillRect(x - lw * 0.5 + spread + lunge, hipY, lw, legH);
+      ctx.fillRect(x - lw * 0.5 - spread + lunge, hipY, lw, legH);
+
+      // 몸통
+      const bw = w * (kind === C.U_GIANT ? 0.86 : 0.62);
+      ctx.fillRect(x - bw * 0.5 + lunge, shY, bw, torsoH);
+      ctx.strokeRect(x - bw * 0.5 + lunge, shY, bw, torsoH);
+
+      // 머리
+      ctx.beginPath();
+      ctx.arc(x + lunge + dir * w * 0.06, shY - headR * 0.9, headR, 0, TAU);
+      ctx.fill();
+
+      // ── 종류별 특징 — 이게 실루엣을 가른다 ──
+      const handY = shY + torsoH * 0.3;
       if (kind === C.U_SWORD) {
-        // 날 — 위로 뻗는다
-        ctx.fillRect(x + dir * (w * 0.5) + lunge, y - 12 * grow, 4, 20 * grow);
+        // 칼 — 공격할 때 앞으로 내려친다
+        const swing = atk > 0 ? 0.9 : -0.5;
+        ctx.save();
+        ctx.translate(x + lunge + dir * bw * 0.5, handY);
+        ctx.rotate(dir * swing);
+        ctx.fillRect(0, -2, dir * h * 0.46, 4);
+        ctx.fillRect(-dir * 3, -6, dir * 5, 12);        // 손잡이 가드
+        ctx.restore();
       } else if (kind === C.U_ARCHER) {
-        // 활대 — 앞으로 뻗는다
-        ctx.fillRect(x + dir * (w * 0.5) + lunge, y + h * 0.3, dir * 14 * grow, 3);
+        // 활 — 앞으로 당기고 있다. 공격할 때 더 휜다
+        const flex = atk > 0 ? 1.35 : 1;
+        ctx.strokeStyle = body;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(x + lunge + dir * bw * 0.55, handY, h * 0.3 * flex, -1.1, 1.1);
+        ctx.stroke();
+        ctx.strokeStyle = dark;
+        ctx.lineWidth = C.STROKE;
       } else {
-        // 거인 — 어깨를 얹어 실루엣을 키운다
-        ctx.fillRect(x - w * 0.72, y - 7 * grow, w * 1.44, 8 * grow);
+        // 거인 — 어깨판과 몽둥이. 실루엣을 옆으로 키운다
+        ctx.fillRect(x - w * 0.52 + lunge, shY - 3, w * 1.04, h * 0.11);
+        ctx.strokeRect(x - w * 0.52 + lunge, shY - 3, w * 1.04, h * 0.11);
+        const swing = atk > 0 ? 0.7 : -0.3;
+        ctx.save();
+        ctx.translate(x + lunge + dir * bw * 0.5, handY);
+        ctx.rotate(dir * swing);
+        ctx.fillRect(0, -4, dir * h * 0.4, 9);
+        ctx.restore();
       }
 
-      // 체력 — 남은 만큼만 밑줄. 가득 차 있으면 안 그린다 (선이 시끄러워진다)
+      // ── 시대 표식 — 머리 위 ──
+      const hy = shY - headR * 1.9;
+      if (era === 1) {                                   // 청동 — 볏
+        ctx.beginPath();
+        ctx.moveTo(x + lunge - headR * 0.7, hy + headR * 0.5);
+        ctx.lineTo(x + lunge, hy - headR * 0.5);
+        ctx.lineTo(x + lunge + headR * 0.7, hy + headR * 0.5);
+        ctx.closePath();
+        ctx.fill();
+      } else if (era === 2) {                            // 강철 — 뿔 둘
+        ctx.fillRect(x + lunge - headR * 1.0, hy, 3, headR * 0.9);
+        ctx.fillRect(x + lunge + headR * 0.7, hy, 3, headR * 0.9);
+      } else if (era >= 3) {                             // 기계 — 안테나와 등
+        ctx.fillRect(x + lunge - 1.5, hy - headR * 0.8, 3, headR * 1.4);
+        ctx.fillStyle = C.COL_BONUS;
+        ctx.beginPath();
+        ctx.arc(x + lunge, hy - headR * 0.9, 2.6, 0, TAU);
+        ctx.fill();
+        ctx.fillStyle = body;
+      }
+
+      // 체력 — 남은 만큼만. 가득 차 있으면 안 그린다 (선이 시끄러워진다)
       const hk = game.uHp[i] / game.uHpMax[i];
       if (hk < 0.999) {
+        const bx = x - w * 0.5, by = shY - headR * 2.4;
         ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.9)];
-        ctx.fillRect(x - w * 0.5, y - 8, w, 4);
+        ctx.fillRect(bx, by, w, 3.5);
         ctx.fillStyle = hk > 0.35 ? (mine ? C.COL_PLAYER : C.COL_STRUCT) : C.COL_DANGER;
-        ctx.fillRect(x - w * 0.5, y - 8, w * hk, 4);
+        ctx.fillRect(bx, by, w * hk, 3.5);
       }
+    }
+
+    // 화살 — 궁수가 쏜 것이 날아가는 게 보여야 한다.
+    // 이게 없으면 원거리 공격이 "아무 일도 안 일어나는데 적이 죽는" 것으로 보인다.
+    ctx.lineWidth = 2;
+    for (let i = 0; i < C.ARROW_MAX; i++) {
+      if (game.aLife[i] <= 0) continue;
+      const t = 1 - game.aLife[i] / game.aTotal[i];
+      const ax = game.aX0[i] + (game.aX1[i] - game.aX0[i]) * t;
+      const ay = game.aY0[i] + (game.aY1[i] - game.aY0[i]) * t - Math.sin(t * Math.PI) * 22;
+      ctx.strokeStyle = game.aSide[i] === SIDE_L
+        ? C.RAMP_PLAYER[C.rampIndex(0.9)] : C.RAMP_STRUCT[C.rampIndex(0.9)];
+      const d = game.aX1[i] > game.aX0[i] ? 1 : -1;
+      ctx.beginPath();
+      ctx.moveTo(ax - d * 7, ay);
+      ctx.lineTo(ax + d * 7, ay);
+      ctx.stroke();
     }
   }
 
@@ -361,9 +548,11 @@ export class Renderer {
 
     // 수면 — 사인 두 개를 겹쳐 물결을 만든다. 문자열도 객체도 안 만든다.
     const t = game.simTime * 0.0016;
-    // 0.82 로 뒀더니 물에 잠긴 유닛과 기지가 전부 붉은 덩어리로 뭉개져
-    // 판을 읽을 수가 없었다. 잠긴 것은 **잠긴 채로 보여야** 한다.
-    ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.4)];
+    // 물빛을 붉게 깔았더니 잠긴 유닛이 전부 붉어져 **아군과 적군이 안 갈렸다.**
+    // 0.82 → 0.4 → 0.28 로 낮춰도 색조는 남는다. 색조가 아니라 밝기 문제였다.
+    // 그래서 물속은 **어둡게** 깔고, 붉은색은 수면 근처 띠와 수면선에만 쓴다.
+    // "붉은색 = 나를 죽이는 것"은 유지되면서 아래가 읽힌다.
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.62)];
     ctx.beginPath();
     ctx.moveTo(0, C.VIEW_H);
     for (let x = 0; x <= C.VIEW_W; x += 24) {
@@ -371,6 +560,21 @@ export class Renderer {
       ctx.lineTo(x, y);
     }
     ctx.lineTo(C.VIEW_W, C.VIEW_H);
+    ctx.closePath();
+    ctx.fill();
+
+    // 수면 바로 아래 붉은 띠 — 위험은 수면에 있다
+    ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.34)];
+    ctx.beginPath();
+    ctx.moveTo(0, wy);
+    for (let x = 0; x <= C.VIEW_W; x += 24) {
+      const y = wy + Math.sin(x * 0.017 + t) * 4 + Math.sin(x * 0.041 - t * 1.7) * 2.5;
+      ctx.lineTo(x, y);
+    }
+    for (let x = C.VIEW_W; x >= 0; x -= 24) {
+      const y = wy + 16 + Math.sin(x * 0.017 + t) * 4 + Math.sin(x * 0.041 - t * 1.7) * 2.5;
+      ctx.lineTo(x, y);
+    }
     ctx.closePath();
     ctx.fill();
 
@@ -419,11 +623,30 @@ export class Renderer {
       ctx.fillRect(bx, by, bw * Math.min(1, game.xp / need), bh);
     }
 
+    // ── 전선 막대 — 이 게임에서 가장 중요한 한 줄 ──
+    // 숫자를 읽지 않고도 **내가 밀고 있는지 밀리는지**가 보여야 한다.
+    // 전쟁시대류에서 이게 없으면 판세를 알 수 없어 무엇을 살지 정할 수가 없다.
+    {
+      const bw = 320, bh = 10;
+      const bx = HALF_W - bw * 0.5, by = C.UNIT * 6.5;
+      const f = game.frontline();
+      ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.7)];
+      ctx.fillRect(bx, by, bw, bh);
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.9)];
+      ctx.fillRect(bx, by, bw * f, bh);
+      // 가운데 눈금 — 균형점
+      ctx.fillStyle = C.RAMP_BG[C.rampIndex(1)];
+      ctx.fillRect(HALF_W - 1, by - 3, 2, bh + 6);
+      ctx.strokeStyle = C.RAMP_BG[C.rampIndex(1)];
+      ctx.lineWidth = C.STROKE;
+      ctx.strokeRect(bx, by, bw, bh);
+    }
+
     // 시간 — 가운데 위
     ctx.textAlign = 'center';
     ctx.font = FONT_SMALL;
     ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.55)];
-    this.drawFixed1(game.elapsed(), HALF_W - 14, C.UNIT * 2.5);
+    this.drawFixed1(game.elapsed(), HALF_W - 14, C.UNIT * 2.0);
 
     // 획득 특성 — 오른쪽 위, AI 토글 아래
     ctx.textAlign = 'right';
@@ -479,6 +702,11 @@ export class Renderer {
         ctx.fillRect(x, y + C.BTN_H * (1 - cd), C.BTN_W, C.BTN_H * cd);
       }
 
+      // 아이콘 — 유닛 실루엣을 그대로 축소해 넣는다.
+      // 글자만 있으면 무엇을 사는지 손이 기억하지 못한다.
+      this.drawBtnIcon(i, x + C.BTN_W - C.UNIT * 4, y + C.BTN_H * 0.55,
+                       base[C.rampIndex(ok ? 0.95 : 0.3)]);
+
       ctx.textAlign = 'left';
       ctx.font = FONT_MID;
       ctx.fillStyle = base[C.rampIndex(ok ? 1 : 0.35)];
@@ -501,6 +729,43 @@ export class Renderer {
         if (ok) ctx.fillText(READY, x + C.UNIT * 1.5, y + C.UNIT * 4.6);
         else this.drawLeft(Math.ceil(game.nukeCd / 1000), x + C.UNIT * 1.5, y + C.UNIT * 4.6, 9);
       }
+    }
+  }
+
+  // 버튼 아이콘 — 유닛 실루엣의 축소판. 형태만으로 구분돼야 한다.
+  drawBtnIcon(i, cx, cy, color) {
+    const ctx = this.ctx;
+    ctx.fillStyle = color;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    if (i === C.B_SWORD) {
+      ctx.fillRect(cx - 4, cy - 8, 8, 16);
+      ctx.beginPath(); ctx.arc(cx, cy - 12, 4, 0, TAU); ctx.fill();
+      ctx.fillRect(cx + 5, cy - 10, 3, 18);                 // 칼
+    } else if (i === C.B_ARCHER) {
+      ctx.fillRect(cx - 3, cy - 6, 7, 14);
+      ctx.beginPath(); ctx.arc(cx, cy - 10, 3.5, 0, TAU); ctx.fill();
+      ctx.beginPath(); ctx.arc(cx + 8, cy - 2, 8, -1.1, 1.1); ctx.stroke();
+    } else if (i === C.B_GIANT) {
+      ctx.fillRect(cx - 7, cy - 8, 14, 18);
+      ctx.fillRect(cx - 10, cy - 10, 20, 4);                // 어깨
+      ctx.beginPath(); ctx.arc(cx, cy - 14, 3.5, 0, TAU); ctx.fill();
+    } else if (i === C.B_ERA) {
+      // 위로 향한 화살표 — 올라간다
+      ctx.beginPath();
+      ctx.moveTo(cx, cy - 11); ctx.lineTo(cx + 9, cy + 2); ctx.lineTo(cx + 4, cy + 2);
+      ctx.lineTo(cx + 4, cy + 10); ctx.lineTo(cx - 4, cy + 10); ctx.lineTo(cx - 4, cy + 2);
+      ctx.lineTo(cx - 9, cy + 2); ctx.closePath(); ctx.fill();
+    } else {
+      // 해일 — 파도 두 줄
+      ctx.beginPath();
+      for (let k = 0; k < 2; k++) {
+        const yy = cy - 4 + k * 9;
+        ctx.moveTo(cx - 11, yy);
+        ctx.quadraticCurveTo(cx - 5, yy - 6, cx, yy);
+        ctx.quadraticCurveTo(cx + 5, yy + 6, cx + 11, yy);
+      }
+      ctx.stroke();
     }
   }
 

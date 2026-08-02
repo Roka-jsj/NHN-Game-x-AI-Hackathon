@@ -74,6 +74,15 @@ export class Game {
     this.uHitFlash = new Uint8Array(N);   // 맞은 직후 프레임 수 (렌더용)
     this.uAttack = new Uint8Array(N);     // 공격 모션 프레임 (렌더용)
 
+    // 화살 풀 — 연출 전용. 판정은 쏘는 순간 끝나 있다.
+    const A = C.ARROW_MAX;
+    this.aLife = new Int16Array(A);
+    this.aTotal = new Int16Array(A);
+    this.aX0 = new Float32Array(A); this.aY0 = new Float32Array(A);
+    this.aX1 = new Float32Array(A); this.aY1 = new Float32Array(A);
+    this.aSide = new Uint8Array(A);
+    this.aNext = 0;
+
     this.supplier = null;     // 디렉터가 붙는다. 없으면 고정 웨이브
     this.onEvent = null;
 
@@ -102,6 +111,7 @@ export class Game {
     this.stateTick = 0;
 
     this.uAlive.fill(0);
+    this.aLife.fill(0);
     this.uNext = 0;
     this.aliveL = 0;
     this.aliveR = 0;
@@ -320,6 +330,7 @@ export class Game {
     this.stepEconomy();
     this.stepAI();
     this.stepUnits();
+    this.stepArrows();
     this.stepWater();
     this.checkEnd();
   }
@@ -425,6 +436,7 @@ export class Game {
           this.uCd[i] = this.statCooldown(kind, side);
           this.uAttack[i] = 8;
           this.damage(target, this.statDmg(kind, this.uEra[i], side), side);
+          if (kind === C.U_ARCHER) this.shoot(i, target, side);
           this.emit(EV.ATTACK, kind, side);
         }
         continue;   // 싸우는 동안에는 전진하지 않는다
@@ -455,6 +467,24 @@ export class Game {
       if (groundAt(this.uX[i]) <= this.water) continue;
       this.damage(i, C.DROWN_DPS * dt, this.uSide[i] === SIDE_L ? SIDE_R : SIDE_L);
     }
+  }
+
+  // 화살 하나를 띄운다. 판정과 무관하다 — 이미 맞은 것을 눈에 보이게 할 뿐이다.
+  shoot(from, to, side) {
+    const a = this.aNext;
+    this.aNext = (this.aNext + 1) % C.ARROW_MAX;
+    const total = Math.max(1, Math.round(C.ARROW_MS / C.SIM_DT));
+    this.aLife[a] = total;
+    this.aTotal[a] = total;
+    this.aX0[a] = this.uX[from];
+    this.aY0[a] = groundAt(this.uX[from]) - C.U_H[C.U_ARCHER] * 0.6;
+    this.aX1[a] = this.uX[to];
+    this.aY1[a] = groundAt(this.uX[to]) - C.U_H[this.uKind[to]] * 0.5;
+    this.aSide[a] = side;
+  }
+
+  stepArrows() {
+    for (let i = 0; i < C.ARROW_MAX; i++) if (this.aLife[i] > 0) this.aLife[i]--;
   }
 
   findTarget(i, side, dir, range) {

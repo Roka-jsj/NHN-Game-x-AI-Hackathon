@@ -141,8 +141,32 @@ export class Audio {
       return { osc, lfo, out, lp };
     };
 
+    // 타악 — 노이즈를 밴드패스로 좁혀 LFO 로 여닫으면 하이햇이 된다.
+    // 드럼 샘플이 없어도 박자가 몸으로 느껴진다.
+    const hat = (() => {
+      const src = ctx.createBufferSource();
+      src.buffer = this.noiseBuf; src.loop = true;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass'; bp.frequency.value = 7200; bp.Q.value = 1.4;
+      const lfo = ctx.createOscillator();
+      lfo.type = 'square'; lfo.frequency.value = 8;
+      const amp = ctx.createGain(); amp.gain.value = 0.5;
+      const gate = ctx.createGain(); gate.gain.value = 0.5;
+      lfo.connect(amp); amp.connect(gate.gain);
+      const out = ctx.createGain(); out.gain.value = 0;
+      src.connect(bp); bp.connect(gate); gate.connect(out); out.connect(bus);
+      src.start(0); lfo.start(0);
+      return { out, lfo, bp };
+    })();
+
     this.bgm = {
-      bus,
+      bus, hat,
+      // 화성 진행 — 자연단음계 i · VI · III · VII.
+      // 이걸 넣기 전에는 한 음만 계속 울려 "음악"이 아니라 "웅웅거림"이었다.
+      // 마디마다 베이스 근음과 아르페지오·리드를 이 표에서 다시 잡는다.
+      roots: [82.41, 65.41, 98.00, 73.42],     // E2 C2 G2 D2
+      chordAt: 0,
+      bar: 0,
       // 단조 5음 위에 쌓는다. 물에 잠기는 게임에 장조는 어울리지 않는다.
       bass: layer('triangle', 82.41, 400),      // E2
       arp:  layer('square', 329.63, 1600),      // E4
@@ -175,24 +199,42 @@ export class Audio {
     m.arp.lfo.frequency.setTargetAtTime(beat * 4, t, 0.3);
     m.lead.lfo.frequency.setTargetAtTime(beat * 3, t, 0.3);
 
+    // ── 화성 진행 ──
+    // 마디가 바뀔 때만 근음을 바꾼다. 노드를 만들지 않고 주파수만 옮긴다 —
+    // "루프 안에서 노드를 만들지 않는다"를 지키면서 곡이 흐르게 하는 방법이다.
+    const barLen = 4 / beat;                    // 4박 = 한 마디 (초)
+    if (t - m.chordAt > barLen) {
+      m.chordAt = t;
+      m.bar = (m.bar + 1) % m.roots.length;
+    }
+    const root = m.roots[m.bar];
+
     // 층 0 — 베이스는 항상. 시대가 오르면 한 옥타브 올라간다
     const boost = game.era >= 2;
-    m.bass.osc.frequency.setTargetAtTime(boost ? 164.81 : 82.41, t, 0.08);
-    m.bass.out.gain.setTargetAtTime(dead ? 0 : 0.16, t, 0.2);
+    m.bass.osc.frequency.setTargetAtTime(boost ? root * 2 : root, t, 0.06);
+    m.bass.out.gain.setTargetAtTime(dead ? 0 : 0.17, t, 0.2);
+
+    // 타악 — 유닛이 많을수록 또렷해진다. 판이 달아오르는 게 박자로 들린다
+    m.hat.lfo.frequency.setTargetAtTime(beat * 2, t, 0.3);
+    m.hat.out.gain.setTargetAtTime(dead || draft ? 0 : 0.012 + 0.030 * spd, t, 0.3);
 
     // 층 1 — 전선을 밀수록 열린다. 이기고 있으면 음악이 두꺼워진다
     const tier = Math.min(4, Math.round(game.frontline() * 4));
-    m.arp.out.gain.setTargetAtTime(dead ? 0 : 0.03 * tier, t, 0.25);
+    m.arp.out.gain.setTargetAtTime(dead ? 0 : 0.028 * tier, t, 0.25);
     m.arp.lp.frequency.setTargetAtTime(900 + 500 * tier, t, 0.3);
+    m.arp.osc.frequency.setTargetAtTime(root * 4, t, 0.05);      // 근음 2옥타브 위
 
     // 층 2 — 물이 가까워지면 불협 5도가 깔린다. 시각 경고보다 먼저 느껴져야 한다
     const near = game.waterNear();
     m.pad.out.gain.setTargetAtTime(dead ? 0 : near * near * 0.13, t, 0.2);
-    m.pad.osc.frequency.setTargetAtTime(246.94 * (1 - 0.03 * near), t, 0.3);
+    // 5도 위 — 물이 가까울수록 살짝 어긋나 불협이 된다
+    m.pad.osc.frequency.setTargetAtTime(root * 3 * (1 - 0.03 * near), t, 0.3);
 
     // 층 3 — 계단과 부스트에서만. 규칙이 바뀐 것을 귀로도 안다
-    m.lead.out.gain.setTargetAtTime((stair || boost) && !dead ? 0.09 : 0, t, 0.12);
-    m.lead.osc.frequency.setTargetAtTime(stair ? 587.33 : 493.88, t, 0.1);
+    // 층 3 — 리드는 전선을 밀고 있을 때만 열린다. **이기고 있는 게 귀로 들린다**
+    const winning = game.frontline() > 0.62;
+    m.lead.out.gain.setTargetAtTime((winning || boost) && !dead && !draft ? 0.075 : 0, t, 0.15);
+    m.lead.osc.frequency.setTargetAtTime(root * 6, t, 0.08);     // 근음 위 5도, 2옥타브
   }
 
   setMuted(m) {
@@ -206,7 +248,10 @@ export class Audio {
     const t = this.ctx.currentTime;
     this.runGain.gain.setTargetAtTime(0, t, 0.02);
     this.waterGain.gain.setTargetAtTime(0, t, 0.02);
-    if (this.bgm) this.bgm.bus.gain.setTargetAtTime(0, t, 0.02);
+    if (this.bgm) {
+      this.bgm.bus.gain.setTargetAtTime(0, t, 0.02);
+      this.bgm.hat.out.gain.setTargetAtTime(0, t, 0.02);
+    }
   }
 
   // 같은 소리를 연속 재생할 때 ±3% 피치 변화. 안 하면 기계처럼 들린다.

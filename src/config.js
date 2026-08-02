@@ -83,6 +83,12 @@ export const U_SPAWN_CD = [420, 620, 1050];   // 소환 쿨다운 ms
 // 유닛끼리 겹치지 않게 하는 최소 간격. 이게 없으면 전부 한 점에 뭉친다.
 export const UNIT_GAP = 21;
 
+// 화살 — **연출 전용이다.** 피해는 쏘는 순간 이미 들어갔고, 이건 그게 눈에
+// 보이게 하는 것뿐이다. 화살에 판정을 걸면 원거리 유닛의 실제 사거리가
+// 비행 시간만큼 늘어나 밸런스가 조용히 어긋난다.
+export const ARROW_MAX = 48;
+export const ARROW_MS = 220;
+
 // ─── 경제 ────────────────────────────────────────────────────
 export const GOLD_START = 120;
 export const GOLD_RATE = 16;                  // 초당 자동 수입
