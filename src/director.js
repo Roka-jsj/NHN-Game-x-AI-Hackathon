@@ -406,10 +406,14 @@ export class Director {
     if (maxAvg < C.U_COST[C.U_SWORD]) maxAvg = C.U_COST[C.U_SWORD];
     this.wHoard.push(clamp(avg / maxAvg, 0, 1));
 
-    // 경제 지향 — **번 경험치 중 시대에 넣은 비중.**
+    // 진화 전환율 — **번 경험치 중 시대에 넣은 비중.** (판정에는 안 쓴다)
     //   분자·분모가 같은 단위(경험치)다. 진화는 금이 아니라 경험치를 쓴다 —
     //   금 지출과 비교하던 예전 식은 단위가 서로 달라 애초에 비율이 아니었다.
-    //   0 = 진화를 미룬다, 1 = 버는 족족 시대에 넣는다. 양 끝이 다 도달 가능하다.
+    //   **재 보니 상한이 0.42 였다.** 시대 요구치(240·640·1300·2400)가 벌이보다
+    //   훨씬 느리게 열려서, 번 경험치의 대부분은 늘 "아직 안 쓴" 상태로 남는다.
+    //   그래서 이 값으로는 프로파일을 가를 수 없다 (classify 주석 참고).
+    //   다만 **진화를 아예 안 하는 사람 0.05 / 하는 사람 0.35** 로는 갈려서
+    //   디렉터 뷰에 그대로 보여준다. 판정에 못 쓴다고 못 보여줄 이유는 없다.
     const earned = Math.max(0, (num(game.xp, 0) - this.xpAtStart) + this.eraXpSpent);
     this.wXpEarn.push(earned);
     this.wXpEra.push(this.eraXpSpent);

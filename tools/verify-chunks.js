@@ -134,8 +134,7 @@ console.log('');
 // 이게 없으면 350개를 구워도 전부 같은 웨이브다.
 // 라벨이 다른지가 아니라 **분포가 얼마나 떨어져 있는지**를 본다.
 console.log('  프로파일별 구성 — 서로 달라야 디렉터가 의미를 갖는다');
-console.log('    ' + '프로파일'.padEnd(11) + SHORT.map((s) => (s + '사').slice(0, 1).padStart(6)).join('')
-            + '     최다');
+console.log('    ' + '프로파일'.padEnd(11) + SHORT.map((s) => s.padStart(6)).join('') + '     최다');
 const share = new Map();
 for (const p of profiles) {
   const sel = list.filter((c) => c.profile === p && Array.isArray(c.mix) && c.mix.length === UNIT_KINDS);

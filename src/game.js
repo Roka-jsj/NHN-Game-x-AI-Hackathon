@@ -623,6 +623,11 @@ export class Game {
       // 사거리 안의 가장 가까운 적을 찾는다
       const target = this.findTarget(i, side, dir, range);
       if (target >= 0) {
+        // 너무 가까우면 공격도 전진도 못 한다. 서서 얻어맞는다 —
+        // 이게 "궁수는 근접에 약하다"의 실체다. 더 먼 적으로 표적을 바꾸지도
+        // 않는다. 코앞에 붙은 적을 두고 뒤를 쏘는 것이 오히려 이상하다.
+        const minR = U_MIN_RANGE[kind];
+        if (minR > 0 && (this.uX[target] - this.uX[i]) * dir < minR) continue;
         if (this.uCd[i] <= 0) {
           this.uCd[i] = this.statCooldown(kind, side);
           this.uAttack[i] = 8;
