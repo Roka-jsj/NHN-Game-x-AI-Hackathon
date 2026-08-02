@@ -65,6 +65,7 @@ export const EV = {
   CAMPAIGN_END: 23, // a = 클리어한 전투 수, b = 1이면 완주
   // ── 진화 보상. **0~23 은 건드리지 않는다. 추가는 24부터다** ──
   SKILL_UP: 24,     // a = 스킬 번호, b = 새 등급 — 진화로 그 스킬이 바뀌었다
+  ZODIAC: 25,       // a = 별자리 인덱스, b = 전투 번호 — 이 전투의 하늘이 정해졌다
 };
 
 // 디렉터가 없을 때 적이 쓰는 고정 웨이브. 랜덤 0.
@@ -199,6 +200,14 @@ export class Game {
     // 같은 설명을 다시 읽히는 것은 벌이다.
     this.briefSeen = false;
 
+    // ─ 별자리 — 그 전투의 하늘 ─
+    // 판정에 Math.random() 은 없다. 씨앗 × 전투 번호의 결정론 해시다.
+    // zodiacSeed 를 0 으로 두면 **같은 순서가 재현된다** — 계측기가 흔들리지 않는다.
+    // 사람에게는 전투마다·다시 시작할 때마다 바뀌므로 "판마다 다르다"가 성립한다.
+    this.zodiac = 0;
+    this.zodiacSeed = 0;
+    this.zodiacForce = -1;
+
     this.reset();
   }
 
@@ -237,6 +246,32 @@ export class Game {
   cmdTowerWant() { return idxOf(C.CMD_TOWER, this.commander, 0); }
   cmdHoard() { return idxOf(C.CMD_HOARD, this.commander, 0); }
 
+  // ── 별자리 ──────────────────────────────────────────────────
+  // "게임 시작할 때 랜덤으로 운세처럼." 랜덤과 결정론을 양립시키는 방법:
+  // **씨앗을 판 단위로 두고 해시로 뽑는다.** 판이 바뀌면 하늘이 바뀌고,
+  // 같은 판을 다시 돌리면 같은 하늘이 나온다.
+  //
+  // `>>> 0` 을 빼먹지 마라. 부호 있는 32비트가 되면 음수 위상이 0번 별자리에
+  // 무조건 걸린다 — pickAiKind() 가 그 버그로 적 소환의 49.7%를 검사로 만들었다.
+  pickZodiac() {
+    const n = C.ZODIAC_COUNT > 0 ? C.ZODIAC_COUNT : 1;
+    if (this.zodiacForce >= 0) return this.zodiacForce % n;
+    let h = Math.imul((this.zodiacSeed | 0) + this.runs * 0x2545F491 + this.stage * 0x9E3779B9 + 0x85EBCA6B,
+                      2654435761) >>> 0;
+    h ^= h >>> 15;
+    h = Math.imul(h, 2246822519) >>> 0;
+    h = (h ^ (h >>> 13)) >>> 0;
+    return h % n;
+  }
+  // 계측기·QA 가 별자리를 고정하는 구멍. -1 이면 다시 자동이다.
+  // **이건 선택이 아니라 필수다** — 고정할 수 없으면 QA 가 별자리 때문에
+  // 흔들리는 수치를 게임의 변화로 오독한다.
+  forceZodiac(i) { this.zodiacForce = (i === undefined || i === null) ? -1 : (i | 0); }
+  setZodiacSeed(n) { this.zodiacSeed = n | 0; }
+  zod(i) { return this.zodiac === i; }
+  get zodiacName() { return (C.ZODIAC_NAME && C.ZODIAC_NAME[this.zodiac]) || ''; }
+  get zodiacDesc() { return (C.ZODIAC_DESC && C.ZODIAC_DESC[this.zodiac]) || ''; }
+
   // 다음 전투로. **이긴 직후에만 호출된다.**
   nextStage() {
     if (this.campaignOver) return false;
@@ -263,6 +298,10 @@ export class Game {
   // 전투 하나를 차린다. 특성과 포탑 단계는 **여기서 지우지 않는다.**
   resetBattle() {
     this.commander = this.commanderFor(this.stage);
+    // 그 전투의 하늘. 유닛을 세우기 전에 정해져야 한다 (양자리가 개전 병력을 놓는다).
+    this.zodiac = this.pickZodiac();
+    this.geminiL = 0;
+    this.geminiR = 0;
     const dip = this.stageDip();
     if (dip !== floorDip) { floorDip = dip; this.terrainSeq++; }
     this.floorDip = floorDip;
@@ -383,7 +422,18 @@ export class Game {
     }
     this.runs++;
     this.emit(EV.RESET, 0, 0);
+    this.emit(EV.ZODIAC, this.zodiac, this.stage);
     this.emit(EV.STAGE_START, this.stage, this.commander);
+
+    // 양자리 — **양쪽 다** 기병 두 기로 시작한다. 하늘은 편들지 않는다.
+    // 첫 30초가 조용하던 판이 개전 3초에 부딪히는 판이 된다.
+    if (this.zod(C.ZOD_ARIES)) {
+      const n = C.ZOD_ARIES_CAV | 0;
+      for (let k = 0; k < n; k++) {
+        this.spawn(SIDE_L, C.U_CAV, 0, k * C.UNIT_GAP);
+        this.spawn(SIDE_R, C.U_CAV, 0, k * C.UNIT_GAP);
+      }
+    }
   }
 
   emit(type, a, b) { if (this.onEvent) this.onEvent(type, a, b); }
@@ -440,8 +490,19 @@ export class Game {
     if (side === SIDE_L ? this.surgeMs > 0 : this.aiSurgeMs > 0) v *= C.SURGE_CD_MUL;
     return v;
   }
-  cost(kind) { return Math.round(C.U_COST[kind] * C.ERA_COST_MUL[this.era]); }
-  aiCost(kind) { return Math.round(C.U_COST[kind] * C.ERA_COST_MUL[this.aiEra]); }
+  // 황소자리 — 거인과 투석기가 싸다. **양쪽 다.** 그 판만 무거운 군대가 답이 된다.
+  zodCostMul(kind) {
+    return (this.zod(C.ZOD_TAURUS) && (kind === C.U_GIANT || kind === C.U_CATA))
+      ? C.ZOD_TAURUS_MUL : 1;
+  }
+  cost(kind) { return Math.round(C.U_COST[kind] * C.ERA_COST_MUL[this.era] * this.zodCostMul(kind)); }
+  aiCost(kind) { return Math.round(C.U_COST[kind] * C.ERA_COST_MUL[this.aiEra] * this.zodCostMul(kind)); }
+  // 궁수자리 — 원거리의 사거리가 길다. 사거리는 이 게임에서 가장 힘센 축이라
+  // (실측: 포탑은 사거리만이 참여를 바꿨다) 그 판의 정답이 통째로 바뀐다.
+  statRange(kind) {
+    return (this.zod(C.ZOD_SAGITTARIUS) && (kind === C.U_ARCHER || kind === C.U_CATA))
+      ? C.U_RANGE[kind] * C.ZOD_SAGI_RANGE : C.U_RANGE[kind];
+  }
   spawnCooldown(kind) {
     return C.U_SPAWN_CD[kind] * (this.has('rush') ? 0.7 : 1);
   }
@@ -453,8 +514,10 @@ export class Game {
   }
   goldRate() { return C.GOLD_RATE * this.goldEraK() * (this.has('mine') ? 1.3 : 1); }
   goldCap() { return C.GOLD_CAP * this.goldEraK(); }
+  // 처녀자리 — 진화가 싸다. **양쪽 다** (적은 aiEraNeed 를 쓴다).
+  zodEraMul() { return this.zod(C.ZOD_VIRGO) ? C.ZOD_VIRGO_XP : 1; }
   eraNeed() {
-    return this.era + 1 < C.ERA_COUNT ? C.ERA_XP[this.era + 1] : -1;
+    return this.era + 1 < C.ERA_COUNT ? Math.round(C.ERA_XP[this.era + 1] * this.zodEraMul()) : -1;
   }
   eraReady() {
     const need = this.eraNeed();
@@ -504,13 +567,16 @@ export class Game {
     const tier = this.eraTier(i, era);
     const tm = (C.SKILL_TIER_DMG_MUL && C.SKILL_TIER_DMG_MUL[tier]) || 1;
     const em = (C.SKILL_ERA_MUL && C.SKILL_ERA_MUL[era]) || 1;
-    return C.SKILL_DMG[i] * tm * em;
+    const zm = this.zod(C.ZOD_AQUARIUS) ? C.ZOD_AQUA_DMG : 1;   // 물병자리
+    return C.SKILL_DMG[i] * tm * em * zm;
   }
   // 등급이 오르면 세지는 대신 **자주 못 쓴다.**
   skillCooldown(i, era) {
     const tier = this.eraTier(i, era);
     const cm = (C.SKILL_TIER_CD_MUL && C.SKILL_TIER_CD_MUL[tier]) || 1;
-    return (C.SKILL_CD[i] || 30000) * cm;
+    // 게자리 — 해일만 반값이다. 대신 물이 빨리 찬다 (stepWater).
+    const zm = (this.zod(C.ZOD_CANCER) && i === C.SK_TIDE) ? C.ZOD_CANCER_CD : 1;
+    return (C.SKILL_CD[i] || 30000) * cm * zm;
   }
 
   // 설명 화면을 닫는다. 입력이든 시간이든 여기로 들어온다.
@@ -569,6 +635,12 @@ export class Game {
     this.goldSpentUnits += c;
     this.spawnCd[kind] = this.spawnCooldown(kind);
     this.spawn(SIDE_L, kind, this.era, 0);
+    // 쌍둥이자리 — 세 번째 소환마다 한 기가 공짜로 더 나온다. **양쪽 다.**
+    if (this.zod(C.ZOD_GEMINI)) {
+      this.geminiL++;
+      const n = C.ZOD_GEMINI_EVERY > 0 ? C.ZOD_GEMINI_EVERY : 3;
+      if (this.geminiL % n === 0) this.spawn(SIDE_L, kind, this.era, C.UNIT_GAP);
+    }
   }
 
   // 시대가 오르면 기지도 같이 튼튼해진다. **비율을 유지하며** 곱하므로
@@ -632,9 +704,11 @@ export class Game {
   // 녹고, 한숨 돌린 뒤에 올리면 통째로 강해진 병력을 얻는다.
   promoteArmy(side, to) {
     if (C.ERA_PROMOTE !== 1) return;
-    let stun = C.ERA_REARM_MS > 0 ? Math.round(C.ERA_REARM_MS / C.SIM_DT) : 0;
+    // 사자자리 — 경직이 없다. **그 판만 진화가 공격 수단이 된다** (맞붙은 채로 올려도 된다).
+    let stun = (C.ERA_REARM_MS > 0 && !this.zod(C.ZOD_LEO)) ? Math.round(C.ERA_REARM_MS / C.SIM_DT) : 0;
     if (stun > 250) stun = 250;                    // Uint8Array 상한
-    if (side === SIDE_L) this.rearmMs = C.ERA_REARM_MS; else this.aiRearmMs = C.ERA_REARM_MS;
+    const ms = stun > 0 ? C.ERA_REARM_MS : 0;
+    if (side === SIDE_L) this.rearmMs = ms; else this.aiRearmMs = ms;
     for (let i = 0; i < C.UNIT_MAX; i++) {
       if (!this.uAlive[i] || this.uSide[i] !== side) continue;
       if (this.uEra[i] >= to) continue;
@@ -940,7 +1014,7 @@ export class Game {
     if (this.aiEra + 1 < C.ERA_COUNT) {
       let th = lv ? +lv.eraThresh : 1;
       if (!(th > 0)) th = 1;
-      const need = C.AI_ERA_XP[this.aiEra + 1] * th;
+      const need = C.AI_ERA_XP[this.aiEra + 1] * th * this.zodEraMul();
       if (this.aiXp >= need) {
         this.aiXp -= need;
         this.aiEra++;
@@ -1013,6 +1087,11 @@ export class Game {
     this.aiWait = 0;
     this.aiGold -= this.aiCost(kind);
     this.spawn(SIDE_R, kind, this.aiEra, 0);
+    if (this.zod(C.ZOD_GEMINI)) {
+      this.geminiR++;
+      const gn = C.ZOD_GEMINI_EVERY > 0 ? C.ZOD_GEMINI_EVERY : 3;
+      if (this.geminiR % gn === 0) this.spawn(SIDE_R, kind, this.aiEra, C.UNIT_GAP);
+    }
     const tempo = +lv.tempo;
     // 사령관 성격과 스테이지가 템포를 당긴다. 하한은 디렉터와 같은 420ms.
     let hold = (tempo > 0 ? tempo : C.AI_THINK_MS) * this.cmdTempoMul();
@@ -1055,7 +1134,7 @@ export class Game {
     }
     if (best < 0) return;
 
-    this.aiTowerCd = C.TOWER_CD;
+    this.aiTowerCd = C.TOWER_CD * (this.zod(C.ZOD_SCORPIO) ? C.ZOD_SCORPIO_CD : 1);
     const dmg = C.TOWER_DMG[this.aiTowerLv - 1] * C.ERA_DMG_MUL[this.aiEra];
     this.pushArrow(bx, C.GROUND_Y - C.BASE_H, bestX,
                    groundAt(bestX) - C.U_H[this.uKind[best]] * 0.5, SIDE_R);
@@ -1217,7 +1296,7 @@ export class Game {
       const side = this.uSide[i];
       const kind = this.uKind[i];
       const dir = side === SIDE_L ? 1 : -1;
-      const range = C.U_RANGE[kind];
+      const range = this.statRange(kind);
 
       // 경직 — 재무장(진화) 중이거나 범람에 휩쓸렸다. 서 있기만 한다.
       // **익사는 그대로 받는다** (아래 물 루프). 무방비라는 말이 그런 뜻이다.
@@ -1288,10 +1367,13 @@ export class Game {
       // 시야에 적이 없고 적 기지도 멀면 뛴다. **전투 속도는 1px 도 안 바뀐다** —
       // 빈 벌판을 건너는 시간만 줄어든다. 실측된 "답답하다"의 정체가 그것이었다
       // (첫 전투에서 소환→첫 교전 중앙값 14.1초).
+      // **공성 병기는 뛰지 않는다.** 실측으로 뺀 것이다: 투석기까지 행군시켰더니
+      // 속도 15 가 28.5 가 되어 공성 전략이 원정을 완주했다(완주율 0/8 → 1/8).
+      // 투석기의 값어치는 이동이 아니라 사거리 300 이다 — 그것까지 주면 답이 하나가 된다.
       let sp = this.statSpeed(kind, side);
       const baseGap = (baseX - this.uX[i]) * dir - C.BASE_W * 0.5 - range;
-      if (MARCH_MUL > 1 && nearFoe > MARCH_SIGHT && baseGap > MARCH_SIGHT) {
-        sp *= MARCH_MUL;
+      if (MARCH_MUL > 1 && C.U_SIEGE[kind] !== 1 && nearFoe > MARCH_SIGHT && baseGap > MARCH_SIGHT) {
+        sp *= this.zod(C.ZOD_CAPRICORN) ? (C.ZOD_CAPRI_MARCH > 1 ? C.ZOD_CAPRI_MARCH : MARCH_MUL) : MARCH_MUL;
         this.uMarch[i] = 1;
       } else this.uMarch[i] = 0;
       this.uX[i] += sp * dir * dt;
@@ -1299,10 +1381,14 @@ export class Game {
 
     // 물에 잠긴 유닛은 익사한다. **가운데가 가장 낮으므로 전선이 먼저 잠긴다** —
     // 밀지 못하고 물고 늘어지는 쪽이 먼저 병력을 잃는다.
-    for (let i = 0; i < C.UNIT_MAX; i++) {
-      if (!this.uAlive[i]) continue;
-      if (groundAt(this.uX[i]) <= this.water) continue;
-      this.damage(i, C.DROWN_DPS * dt, this.uSide[i] === SIDE_L ? SIDE_R : SIDE_L, -1);
+    // 물고기자리 — 아무도 익사하지 않는다. 물은 여전히 기지를 삼킨다 —
+    // 마감 시계는 살아 있고 전선만 자유로워진다.
+    if (!this.zod(C.ZOD_PISCES)) {
+      for (let i = 0; i < C.UNIT_MAX; i++) {
+        if (!this.uAlive[i]) continue;
+        if (groundAt(this.uX[i]) <= this.water) continue;
+        this.damage(i, C.DROWN_DPS * dt, this.uSide[i] === SIDE_L ? SIDE_R : SIDE_L, -1);
+      }
     }
   }
 
@@ -1326,7 +1412,7 @@ export class Game {
     }
     if (best < 0) return;
 
-    this.towerCd = C.TOWER_CD;
+    this.towerCd = C.TOWER_CD * (this.zod(C.ZOD_SCORPIO) ? C.ZOD_SCORPIO_CD : 1);
     this.towerShots++;
     // 시대가 오르면 포탑도 같이 큰다. 안 그러면 강철 시대부터 장식이 된다.
     const dmg = C.TOWER_DMG[this.towerLv - 1] * C.ERA_DMG_MUL[this.era];
@@ -1395,7 +1481,9 @@ export class Game {
   // 익사·해일·화살비·포탑처럼 "종류가 없는" 피해는 -1 을 넘긴다.
   damage(idx, dmg, byWhom, atkKind) {
     if (atkKind !== undefined && atkKind >= 0) {
-      const m = C.COUNTER[atkKind * C.UNIT_KINDS + this.uKind[idx]];
+      let m = C.COUNTER[atkKind * C.UNIT_KINDS + this.uKind[idx]];
+      // 천칭자리 — 상성 우위가 더 아프다. 그 판만 **상성이 전부**가 된다.
+      if (m > 1 && this.zod(C.ZOD_LIBRA)) m += C.ZOD_LIBRA_ADD;
       if (m > 1) {
         dmg *= m;
         this.counterHits++;
@@ -1462,6 +1550,7 @@ export class Game {
     // 스테이지 곡선 — **후반의 시간 압박은 여기서 온다.** 익사 피해(DROWN_DPS)가
     // 아니다. 그건 병력이 전선에 닿기도 전에 죽여 교착을 굳혔던 값이다 (계약 §5.5).
     rise *= this.stageWaterMul();
+    if (this.zod(C.ZOD_CANCER)) rise *= C.ZOD_CANCER_WATER;   // 게자리 — 해일이 잦은 대가
     if (this.supplier && this.supplier.levers) {
       const m = +this.supplier.levers.waterMul;
       if (m > 0) rise *= m;      // 깨진 값이면 무시한다. water 가 NaN 이 되면 판이 굳는다

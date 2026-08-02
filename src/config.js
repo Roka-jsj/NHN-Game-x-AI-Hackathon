@@ -347,6 +347,55 @@ export const SURGE_CD_MUL = 0.62;             // 공격 쿨다운이 이만큼�
 export const ERA_PROMOTE = 1;
 export const ERA_REARM_MS = 1250;
 
+// ─── 별자리 — 그 전투의 하늘 ──────────────────────────────────
+// 사용자 요구: "게임 시작할 때 랜덤으로 운세처럼 별자리 역할을 만들어서 능력도 추가해."
+//
+// **양쪽에 걸린다.** 별자리는 내 능력이 아니라 그 판의 규칙이다.
+// 이유가 둘이다:
+//   1) 한쪽에만 주면 매 전투 공짜 버프가 되어 방금 맞춘 난이도가 무너진다
+//      (원정 완주율 0/8 · 다섯 사령관 전승 전략 없음이 지켜야 할 수치다)
+//   2) 그래야 **아는 쪽이 이긴다.** 궁수자리면 궁수가 세고 황소자리면 거인이 싸다 —
+//      적 사령관은 제 성격대로만 뽑으므로, 하늘을 읽고 구성을 바꾸는 쪽이 이득을 본다.
+//      운이 아니라 **판마다 정답이 바뀌는 것**이 이 기능의 값어치다.
+//
+// **판정에 Math.random() 을 쓰지 않는다.** 전투 번호와 씨앗을 섞은 결정론 해시로
+// 뽑는다 — 판이 바뀌면 별자리가 바뀌고, 같은 판을 다시 돌리면 같은 별자리가 나온다.
+// 계측기는 game.forceZodiac(i) 로 고정할 수 있다 (QA 가 흔들리지 않게).
+export const ZODIAC_COUNT = 12;
+export const ZODIAC_NAME = ['양', '황소', '쌍둥이', '게', '사자', '처녀',
+                            '천칭', '전갈', '궁수', '염소', '물병', '물고기'];
+export const ZODIAC_TITLE = ['선봉', '우직', '쌍생', '만조', '포효', '정련',
+                             '균형', '독아', '명궁', '행군', '범람', '유영'];
+// 한 줄로 읽히지 않으면 없는 기능이다. 아트가 이 문장을 그대로 띄운다.
+export const ZODIAC_DESC = [
+  '양쪽 다 기병 두 기로 시작한다',
+  '거인과 투석기가 30% 싸다',
+  '세 번째 소환마다 한 기가 공짜로 더 나온다',
+  '해일 쿨다운이 절반이다. 대신 물이 빨리 찬다',
+  '진화해도 재무장 경직이 없다',
+  '진화에 드는 경험치가 20% 적다',
+  '상성 우위 피해가 더 아프다',
+  '포탑이 두 배로 자주 쏜다',
+  '궁수와 투석기의 사거리가 25% 길다',
+  '행군 속도가 더 빠르다',
+  '스킬 피해가 40% 크다',
+  '아무도 익사하지 않는다',
+];
+export const ZOD_ARIES = 0, ZOD_TAURUS = 1, ZOD_GEMINI = 2, ZOD_CANCER = 3,
+             ZOD_LEO = 4, ZOD_VIRGO = 5, ZOD_LIBRA = 6, ZOD_SCORPIO = 7,
+             ZOD_SAGITTARIUS = 8, ZOD_CAPRICORN = 9, ZOD_AQUARIUS = 10, ZOD_PISCES = 11;
+export const ZOD_ARIES_CAV = 2;               // 양   개전 기병 수 (양쪽)
+export const ZOD_TAURUS_MUL = 0.70;           // 황소 거인·투석기 값
+export const ZOD_GEMINI_EVERY = 3;            // 쌍둥이 이 번째 소환마다 한 기 더
+export const ZOD_CANCER_CD = 0.5;             // 게   해일 쿨다운
+export const ZOD_CANCER_WATER = 1.25;         // 게   수위 속도 (대가)
+export const ZOD_VIRGO_XP = 0.80;             // 처녀 진화 요구 경험치
+export const ZOD_LIBRA_ADD = 0.40;            // 천칭 상성 우위 배수에 더한다
+export const ZOD_SCORPIO_CD = 0.5;            // 전갈 포탑 쿨다운
+export const ZOD_SAGI_RANGE = 1.25;           // 궁수 원거리 사거리
+export const ZOD_CAPRI_MARCH = 2.7;           // 염소 행군 배수 (기본 1.9)
+export const ZOD_AQUA_DMG = 1.40;             // 물병 스킬 피해
+
 // ─── 행군 ────────────────────────────────────────────────────
 // **"답답하다"의 정체는 걷는 시간이었다.** 실측(사람 속도 · 첫 전투):
 // 소환한 유닛이 처음 교전하기까지 중앙값 14.1초. 전장 폭이 730px 인데
