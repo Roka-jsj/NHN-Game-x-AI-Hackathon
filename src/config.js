@@ -253,11 +253,16 @@ export const NUKE_WATER_PUSH = 70;
 // 화면 아래 한 줄. 유닛 3 + 진화 1 + 특수기 1.
 // 유닛 6 + 진화 + 포탑 + 해일 + 화살비 = 10. 증원은 별도 원형 버튼(키 R).
 export const BTN_COUNT = 10;
-export const BTN_W = 88;
+// 폭 88·간격 6 은 5칸짜리였던 시절의 값이다. 10칸이 되자 열 전체가 934px 이
+// 되어 가운데 정렬 식이 **BTN_X0 = -13** 을 내놨다 — 0번 칸이 화면 밖에서
+// 시작하고, 오른쪽 끝은 우하단 증원 원(890~942)과 겹쳤다.
+// 실측으로 맞춘 값이다: 6 + 10*83 + 9*5 = 881 로 증원 원 앞에서 끝난다.
+// 평가기의 `버튼 적중 10/10 · 증원 원형버튼 적중` 이 이 값을 지킨다.
+export const BTN_W = 83;
 export const BTN_H = 66;
-export const BTN_GAP = 6;
+export const BTN_GAP = 5;
 export const BTN_Y = VIEW_H - BTN_H - UNIT * 1.5;
-export const BTN_X0 = (VIEW_W - (BTN_W * BTN_COUNT + BTN_GAP * (BTN_COUNT - 1))) * 0.5 - 26;
+export const BTN_X0 = 6;
 export const B_ERA = 6, B_TOWER = 7, B_TIDE = 8, B_VOLLEY = 9;
 export const RALLY_R = 26;                    // 우하단 원형 버튼 반지름
 export const RALLY_CX = VIEW_W - 44;

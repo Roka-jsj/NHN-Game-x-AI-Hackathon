@@ -98,9 +98,10 @@ const FX_ERA_F = 34;
 const VOLLEY_N = 26;
 
 // ── 순수 드로잉 좌표 (spec-v2 §0 이 render.js 지역 상수로 허용한 것) ──
-// 버튼 열: config 의 BTN_X0 는 −13 이라 0번 칸이 화면 밖에서 시작했다.
-// 열 칸 전부가 화면 안에 있고 우하단 증원 원(890~942)과 겹치지 않아야 한다.
-const BTN_W = 83, BTN_GAP = 5, BTN_X0 = 6;
+// 버튼 열 좌표는 **config 가 단일 출처다.** 한때 여기 지역 상수로 복사해
+// 뒀었는데, 그러면 config 를 고친 사람이 화면이 안 움직이는 이유를 못 찾는다.
+// (config 가 10칸에 맞지 않아 BTN_X0 = -13 을 내놓던 문제는 config 에서 고쳤다.)
+const BTN_W = C.BTN_W, BTN_GAP = C.BTN_GAP, BTN_X0 = C.BTN_X0;
 const BTN_H = C.BTN_H, BTN_Y = C.BTN_Y;
 const BTN_R = 5;                       // 버튼 모서리
 const BTN_ICON_DX = 60;                // 칸 안 아이콘 중심
