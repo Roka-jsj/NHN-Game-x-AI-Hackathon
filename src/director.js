@@ -1,16 +1,28 @@
 // AI 디렉터 계층1 — 런타임. 로컬. 0ms. 절대 안 죽는다.
 //
 // 이건 난이도를 올리는 시스템이 아니다.
-// 플레이어가 **어떻게 돈을 쓰는지**를 판정하고, 그 반대편으로 적을 다시 짠다.
+// 플레이어가 **어떻게 돈을 쓰는지 · 무엇을 뽑는지**를 판정하고,
+// 그 반대편으로 적을 다시 짠다.
 //
 // 러너에서는 "어느 레인을 달리는가"를 읽었다. 여기서는 "무엇을 사는가"를 읽는다.
 // 후자가 훨씬 강한 축이다 — 플레이어의 전략이 통째로 지표가 되기 때문이다.
+//
+// v2 에서 늘어난 것:
+//   - 유닛 3종 → 6종. 레버의 mix 가 길이 6이다
+//   - 상성표(C.COUNTER)를 읽어 **플레이어가 많이 뽑는 유닛을 잡는 유닛**을 늘린다.
+//     이게 "AI가 판단한다"의 가장 직접적인 증거다 — 기병을 뽑으면 창병이 는다
+//   - 포탑이 생겼으므로 "전선에 내보내지 않고 지키는 성향"을 따로 읽는다
 //
 // 규칙:
 //  - 판정은 결정론적이다. Math.random() 을 쓰지 않는다. 재현 불가능해지면 증거가 못 된다
 //  - 프레임 단위 로직에 손대지 않는다. 구간 경계에서만 개입한다
 //  - 네트워크 호출은 같은 도메인 data/*.json 한 번뿐. API 키는 어디에도 없다
 //  - data/*.json 이 죽어도 게임은 100% 돈다. 줄어드는 건 다양성뿐이다
+//
+// ★ 지표의 철칙 (러너에서 크게 데인 곳):
+//   **모든 분모는 "그 구간에 실제로 가능했던 최대치"여야 한다.**
+//   거기서는 분모를 잘못 잡아 두 프로파일이 구조적으로 판정 불가능했다.
+//   여기서 분모는 전부 측정값이다 — 그 구간에 실제로 들어온 금, 실제로 번 경험치.
 
 import * as C from './config.js';
 import { EV, SIDE_L } from './game.js';
@@ -37,9 +49,48 @@ export const DRAFT_REASONS = [
   '균형이 잡혀 있다 — 세 계열을 하나씩 준다',
 ];
 
+const KINDS = C.UNIT_KINDS;
+
+// game.js 가 v2 로 넘어가는 중이라 새 이벤트 코드가 아직 없을 수 있다.
+// 계약(docs/spec-v2.md §7)이 번호를 못 박았으므로 없으면 그 번호로 메운다.
+// 없는 이벤트는 그냥 안 들어올 뿐이고, 그래도 디렉터는 돈다.
+const EV_TOWER_UP = intOr(EV && EV.TOWER_UP, 18);
+
+// 유닛의 "싼 정도" — 0(가장 비쌈) ~ 1(가장 쌈).
+// 물량 지향을 "가장 싼 유닛의 개수 비율"로 재면 6종에서는 너무 거칠다.
+// 단가로 재면 창병·궁수를 섞어도 물량은 물량으로, 투석기를 섞으면 즉시 떨어진다.
+// 시대 배수(ERA_COST_MUL)는 여섯 종에 똑같이 곱해지므로 정규화하면 사라진다.
+const UNIT_CHEAP = (() => {
+  let lo = Infinity, hi = -Infinity;
+  for (let k = 0; k < KINDS; k++) {
+    const c = C.U_COST[k];
+    if (c < lo) lo = c;
+    if (c > hi) hi = c;
+  }
+  const out = new Float32Array(KINDS);
+  const span = hi - lo || 1;
+  for (let k = 0; k < KINDS; k++) out[k] = 1 - (C.U_COST[k] - lo) / span;
+  return out;
+})();
+
+// COUNTERS_OF[플레이어 유닛] = 그것을 **잡는** 유닛들.
+// 표를 손으로 옮겨 적지 않는다. config 의 상성표에서 직접 읽는다 —
+// 밸런스가 바뀌면 디렉터의 대응도 같이 바뀐다.
+const COUNTERS_OF = (() => {
+  const out = [];
+  for (let u = 0; u < KINDS; u++) {
+    const list = [];
+    if (C.COUNTER && C.COUNTER.length === KINDS * KINDS) {
+      for (let e = 0; e < KINDS; e++) if (C.COUNTER[e * KINDS + u] > 1) list.push(e);
+    }
+    out.push(list);
+  }
+  return out;
+})();
+
 class Ring {
   constructor(n) { this.a = new Float32Array(n); this.n = n; this.i = 0; this.c = 0; }
-  reset() { this.i = 0; this.c = 0; }
+  reset() { this.i = 0; this.c = 0; this.a.fill(0); }
   push(v) { this.a[this.i] = v; this.i = (this.i + 1) % this.n; if (this.c < this.n) this.c++; }
   mean() {
     if (this.c === 0) return 0;
@@ -59,6 +110,7 @@ class Ring {
 // ── 내장 폴백 웨이브 12개 ────────────────────────────────────
 // data/*.json 이 죽어도 게임이 100% 돌아가게 하는 최소 라이브러리.
 // 모듈 로드 시 한 번만 만든다. 루프 안이 아니다.
+// mix 는 [검사, 창병, 궁수, 기병, 거인, 투석기] 가중치다.
 const FALLBACK_CHUNKS = [];
 for (let c = 0; c < 12; c++) {
   FALLBACK_CHUNKS.push({
@@ -66,8 +118,10 @@ for (let c = 0; c < 12; c++) {
     profile: 'BALANCED',
     difficulty: (c / 3) | 0,
     tags: ['mix'],
-    // [검사, 궁수, 거인] 가중치 + 템포(ms)
-    mix: [6 - (c % 3), 3 + (c % 2), 1 + ((c / 4) | 0)],
+    mix: [
+      5 - (c % 3), 2 + (c % 2), 3 - ((c / 6) | 0),
+      1 + (c % 2), 1 + ((c / 4) | 0), (c % 3) === 0 ? 1 : 0,
+    ],
     tempo: 1500 - (c % 4) * 120,
   });
 }
@@ -75,8 +129,51 @@ for (let c = 0; c < 12; c++) {
 // 문서 지시대로 폴백에서는 BALANCED 고정이다.
 const FALLBACK_POLICY = {
   BALANCED: {
-    mix: [5, 3, 2], tempo: 1400, goldMul: 1, eraThresh: 1,
-    waterMul: 1, draftSlant: 2, preferTags: ['mix'],
+    mix: [4, 3, 3, 2, 2, 1], tempo: 1400, goldMul: 1, eraThresh: 1,
+    waterMul: 1, draftSlant: 2, counterGain: 6, preferTags: ['mix'],
+  },
+};
+
+// 전 프로파일 정책 — data/policy.json 이 살아 있을 때의 기본값.
+// LLM 베이크가 이 표를 대체·확장한다. (tools/bake.js 의 POLICY 와 같은 표다)
+//
+// **핵심은 "반대편으로 짠다"이지 "더 세게"가 아니다.**
+// mix = [검사, 창병, 궁수, 기병, 거인, 투석기]
+// counterGain = 플레이어 구성에 반응해 상성 유닛에 더 얹는 총 가중치.
+//   0이면 "구성을 안 본다". 클수록 플레이어가 뽑는 것에 직접 맞받는다.
+const BUILTIN_POLICY = {
+  // 돌격형 — 쉬지 않고 쏟아붓는다. 그러면 **벽을 세워 소모를 강요한다.**
+  // 거인이 앞을 막고 창병이 기병 돌파를 끊고 궁수가 뭉친 근접을 녹인다.
+  // 템포는 느리다 — 비싼 벽을 세우는 쪽이 급할 이유가 없다.
+  RUSHER: {
+    mix: [1, 3, 3, 0, 8, 1], tempo: 1900, goldMul: 1.0, eraThresh: 1.0,
+    waterMul: 0.9, draftSlant: 1, counterGain: 4, preferTags: ['wall', 'mix'],
+  },
+  // 수비형 — 웅크린다. **원거리로 찔러 끌어내고 물을 빠르게 민다.**
+  // 투석기는 기지 피해 배수(U_BASE_MUL)가 붙어 있다 — 웅크리면 기지가 깎인다.
+  // 나오지 않으면 손해가 쌓이게 만드는 것이 요점이다.
+  TURTLE: {
+    mix: [1, 0, 6, 1, 0, 5], tempo: 1150, goldMul: 1.05, eraThresh: 1.0,
+    waterMul: 1.35, draftSlant: 0, counterGain: 3, preferTags: ['ranged', 'mix'],
+  },
+  // 경제형 — 진화가 앞선다. **진화가 끝나기 전에 싼 유닛으로 두들긴다.**
+  // 검사로 수를 채우고 기병(가장 빠르다)이 뒤를 파고든다. 템포가 가장 빠르다.
+  ECONOMIST: {
+    mix: [7, 1, 1, 5, 0, 0], tempo: 900, goldMul: 1.15, eraThresh: 0.8,
+    waterMul: 1.0, draftSlant: 1, counterGain: 3, preferTags: ['rush', 'mix'],
+  },
+  // 물량형 — 싼 유닛만 뽑는다. **큰 유닛으로 숫자를 무의미하게 만든다.**
+  // 거인이 좁은 전선을 막고, 궁수가 검사를 상성으로 녹이고, 투석기가 뒤에서 쓴다.
+  SWARMER: {
+    mix: [0, 1, 5, 0, 7, 2], tempo: 1700, goldMul: 1.0, eraThresh: 0.9,
+    waterMul: 1.0, draftSlant: 0, counterGain: 5, preferTags: ['heavy', 'mix'],
+  },
+  // 균형 — 성향이 안 잡힌 상태다. 여기서 레버를 중립으로 두면 디렉터는
+  // **대부분의 판에서 아무것도 안 하는 장식**이 된다 (러너에서 실제로 겪었다).
+  // 그래서 균형일수록 상성 대응을 가장 세게 건다 — 성향이 없으면 구성을 본다.
+  BALANCED: {
+    mix: [4, 3, 3, 2, 2, 1], tempo: 1400, goldMul: 1, eraThresh: 1,
+    waterMul: 1, draftSlant: 2, counterGain: 6, preferTags: ['mix'],
   },
 };
 
@@ -86,49 +183,28 @@ const FALLBACK_LINES = {
   revive: ['다시'],
 };
 
-// 전 프로파일 정책 — data/policy.json 이 살아 있을 때의 기본값.
-// LLM 베이크가 이 표를 대체·확장한다.
-//
-// **핵심은 "반대편으로 짠다"이지 "더 세게"가 아니다.**
-const BUILTIN_POLICY = {
-  // 돌격형 — 계속 쏟아붓는다. 그러면 거인으로 벽을 세워 소모를 강요한다.
-  RUSHER: {
-    mix: [1, 2, 6], tempo: 1900, goldMul: 1.0, eraThresh: 1.0,
-    waterMul: 0.9, draftSlant: 1, preferTags: ['wall', 'mix'],
-  },
-  // 수비형 — 웅크린다. 물이 빨리 차고 원거리로 찔러 나오게 만든다.
-  TURTLE: {
-    mix: [2, 7, 1], tempo: 1150, goldMul: 1.05, eraThresh: 1.0,
-    waterMul: 1.35, draftSlant: 0, preferTags: ['ranged', 'mix'],
-  },
-  // 경제형 — 진화가 앞선다. 진화가 끝나기 전에 두들긴다.
-  ECONOMIST: {
-    mix: [6, 3, 1], tempo: 900, goldMul: 1.15, eraThresh: 0.8,
-    waterMul: 1.0, draftSlant: 1, preferTags: ['rush', 'mix'],
-  },
-  // 물량형 — 싼 유닛만 뽑는다. 광역에 강한 큰 유닛으로 받아친다.
-  SWARMER: {
-    mix: [1, 3, 6], tempo: 1700, goldMul: 1.0, eraThresh: 0.9,
-    waterMul: 1.0, draftSlant: 0, preferTags: ['heavy', 'mix'],
-  },
-  BALANCED: {
-    mix: [5, 3, 2], tempo: 1400, goldMul: 1, eraThresh: 1,
-    waterMul: 1, draftSlant: 2, preferTags: ['mix'],
-  },
-};
-
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+function num(v, d) { return typeof v === 'number' && Number.isFinite(v) ? v : d; }
+function intOr(v, d) { return Number.isInteger(v) ? v : d; }
 
 export class Director {
   constructor(game) {
     this.game = game;
 
     // 지표 — 최근 8구간 슬라이딩 윈도
-    this.wAggro = new Ring(C.METRIC_WINDOW);   // 소환 빈도 (구간당)
-    this.wHoard = new Ring(C.METRIC_WINDOW);   // 금을 쌓아 두는 정도
-    this.wEcon = new Ring(C.METRIC_WINDOW);    // 진화에 쓴 비중
-    this.wSwarm = new Ring(C.METRIC_WINDOW);   // 싼 유닛 비율
+    this.wAggro = new Ring(C.METRIC_WINDOW);   // 유입 금 중 병력에 쓴 비중
+    this.wHoard = new Ring(C.METRIC_WINDOW);   // 쌓아 둘 수 있었던 만큼 쌓아 뒀는가
+    this.wSwarm = new Ring(C.METRIC_WINDOW);   // 뽑은 유닛의 싼 정도 (단가 기준)
+    this.wTower = new Ring(C.METRIC_WINDOW);   // 전선이 아니라 기지에 쓴 정도
     this.wFront = new Ring(C.METRIC_WINDOW);   // 전선 위치
+    // 경제 지향은 **두 개의 합**으로 잡는다. 한 구간에 진화가 0번인 것이 정상이라
+    // 구간마다 비율을 내면 0과 1 사이를 튄다. 윈도 합끼리 나눠야 안정적이다.
+    this.wXpEarn = new Ring(C.METRIC_WINDOW);  // 그 구간에 실제로 번 경험치
+    this.wXpEra = new Ring(C.METRIC_WINDOW);   // 그중 시대에 넣은 경험치
+    // 플레이어 구성 — 상성 대응의 입력. 개수를 담고 총합으로 나눈다.
+    this.wKind = [];
+    for (let k = 0; k < KINDS; k++) this.wKind.push(new Ring(C.METRIC_WINDOW));
+    this.wSpawnN = new Ring(C.METRIC_WINDOW);
 
     this.profile = 'BALANCED';
     this.profileIdx = 4;
@@ -137,7 +213,6 @@ export class Director {
     this.draftReason = DRAFT_REASONS[0];
     this.switches = 0;
 
-    this.levers = BUILTIN_POLICY.BALANCED;
     this.difficulty = 0;
 
     this.chunks = FALLBACK_CHUNKS;
@@ -151,19 +226,42 @@ export class Director {
     this.lastChunk = -1;
     this.lastSwitchChunk = -99;
 
+    // 레버의 mix 는 매번 새로 만들지 않고 이 버퍼를 덮어쓴다.
+    // **데이터의 배열을 그대로 넘기면 안 된다** — 상성 보정이 라이브러리를 영구히 오염시킨다.
+    this.mixBuf = new Array(KINDS).fill(0);
+    this.spawnKind = new Int32Array(KINDS);
+    this.mixShare = new Float32Array(KINDS);
+
+    this.levers = null;
     this.resetCounters();
+    this.beginChunk(game);
+    this.applyLevers();
     game.supplier = this;
   }
 
   resetCounters() {
     this.spawnCount = 0;
-    this.spawnCheap = 0;
+    this.cheapSum = 0;
+    this.spawnKind.fill(0);
     this.goldSum = 0;
     this.goldSamples = 0;
-    this.spentUnits = 0;
-    this.spentEra = 0;
+    this.spawnGold = 0;      // 이벤트로 직접 센 병력 지출 (game 이 안 세줄 때의 대비)
+    this.towerGold = 0;
+    this.eraXpSpent = 0;
     this.draftAtk = 0;
     this.draftDef = 0;
+  }
+
+  // 구간이 시작될 때의 스냅샷. 분모를 "이 구간에 실제로 가능했던 최대치"로
+  // 잡으려면 시작값을 알아야 한다.
+  beginChunk(game) {
+    this.resetCounters();
+    this.goldAtStart = game ? num(game.gold, 0) : 0;
+    this.xpAtStart = game ? num(game.xp, 0) : 0;
+    // game.goldSpentUnits 에는 **포탑 값이 들어 있다** (game.js 가 그렇게 센다).
+    // 공격성은 전선에 나간 금만 세야 하므로 포탑을 따로 빼둔다.
+    this.unitGoldAtStart = game ? num(game.goldSpentUnits, NaN) : NaN;
+    this.towerGoldAtStart = game ? num(game.goldSpentTower, NaN) : NaN;
   }
 
   // ── 계층 2 산출물 로딩 ──────────────────────────────────────
@@ -195,12 +293,15 @@ export class Director {
       this.usingFallback = true;
       this.librarySize = FALLBACK_CHUNKS.length;
     }
+    this.applyLevers();
   }
 
   onRunStart() {
-    this.wAggro.reset(); this.wHoard.reset(); this.wEcon.reset();
-    this.wSwarm.reset(); this.wFront.reset();
-    this.resetCounters();
+    this.wAggro.reset(); this.wHoard.reset(); this.wSwarm.reset();
+    this.wTower.reset(); this.wFront.reset();
+    this.wXpEarn.reset(); this.wXpEra.reset(); this.wSpawnN.reset();
+    for (let k = 0; k < KINDS; k++) this.wKind[k].reset();
+    this.beginChunk(this.game);
     this.lastChunk = -1;
     this.lastSwitchChunk = -99;
     this.observing = true;
@@ -216,12 +317,22 @@ export class Director {
   onEvent(type, a, b, game) {
     switch (type) {
       case EV.SPAWN:
-        if (b === SIDE_L) {
+        if (b === SIDE_L && a >= 0 && a < KINDS) {
           this.spawnCount++;
-          if (a === C.U_SWORD) this.spawnCheap++;
+          this.spawnKind[a]++;
+          this.cheapSum += UNIT_CHEAP[a];
+          this.spawnGold += game && typeof game.cost === 'function'
+            ? num(game.cost(a), C.U_COST[a]) : C.U_COST[a];
         }
         break;
-      case EV.ERA_UP: if (b === SIDE_L) this.spentEra++; break;
+      case EV.ERA_UP:
+        // a = 새 시대. 그 시대에 들어가느라 낸 경험치가 곧 "시대에 넣은 투자"다.
+        if (b === SIDE_L && a > 0 && a < C.ERA_XP.length) this.eraXpSpent += C.ERA_XP[a];
+        break;
+      case EV_TOWER_UP:
+        // a = 새 단계(1~2). 전선이 아니라 기지에 쓴 금이다.
+        if (a > 0 && a <= C.TOWER_COST.length) this.towerGold += C.TOWER_COST[a - 1];
+        break;
       case EV.DRAFT_PICK:
         if (b === 0) this.draftAtk++; else if (b === 1) this.draftDef++;
         break;
@@ -239,6 +350,7 @@ export class Director {
     if (ci !== this.lastChunk) {
       if (this.lastChunk >= 0) this.closeChunk(game);
       this.lastChunk = ci;
+      this.beginChunk(game);
       this.onChunkBoundary(game, ci);
     }
   }
@@ -247,28 +359,64 @@ export class Director {
   //
   // ★ 러너에서 배운 것: **모든 지표는 도달 가능한 범위로 정규화해야 한다.**
   //   거기서는 분모를 잘못 잡아 RECKLESS 와 PRECISE 가 구조적으로 판정 불가능했다.
-  //   그래서 여기서는 분모를 전부 "그 구간에 실제로 가능했던 최대치"로 잡는다.
+  //   그래서 여기서는 분모를 전부 **측정값**으로 잡는다 —
+  //   "그 구간에 실제로 들어온 금", "그 구간에 실제로 번 경험치".
+  //   상수로 박은 분모는 시대·특성·처치 보상이 바뀌는 순간 도달 불가능해진다.
   closeChunk(game) {
     const secs = C.CHUNK_MS / 1000;
-    // 소환 빈도 — 가장 싼 유닛을 쿨다운 한계로 계속 뽑았을 때가 1.0
-    const maxSpawns = secs / (C.U_SPAWN_CD[C.U_SWORD] / 1000);
-    this.wAggro.push(clamp(this.spawnCount / maxSpawns, 0, 1));
 
-    // 쌓아 두는 정도 — 이 구간 평균 보유 금을 상한 대비로
-    const avg = this.goldSamples > 0 ? this.goldSum / this.goldSamples : 0;
-    this.wHoard.push(clamp(avg / (C.GOLD_CAP * 0.5), 0, 1));
+    // 이 구간에 쓴 금. game 이 세주면 그걸 쓰고(무료 증원이 안 섞인다),
+    // 아니면 소환·포탑 이벤트로 직접 센 값을 쓴다.
+    const spentNow = num(game.goldSpentUnits, NaN);
+    const towerNow = num(game.goldSpentTower, NaN);
+    const haveGameCount = Number.isFinite(spentNow) && Number.isFinite(this.unitGoldAtStart);
+    const towerGold = Number.isFinite(towerNow) && Number.isFinite(this.towerGoldAtStart)
+      ? Math.max(0, towerNow - this.towerGoldAtStart) : this.towerGold;
+    // 포탑은 전선에 나가지 않는 금이다. 공격성에서 빼고 "지키는 성향"으로 센다.
+    const spent = haveGameCount
+      ? Math.max(0, spentNow - this.unitGoldAtStart) : (this.spawnGold + towerGold);
+    const spentUnits = Math.max(0, spent - towerGold);
 
-    // 경제 지향 — 진화에 쓴 비중. 유닛에 한 푼도 안 썼으면 1.0
-    const tot = game.goldSpentUnits + game.goldSpentEra;
-    this.wEcon.push(tot > 0 ? clamp(game.goldSpentEra / tot, 0, 1) : 0.5);
+    // 이 구간에 **실제로 들어온 금** = 보유 변화 + 그 사이에 쓴 금.
+    // 수입 특성(광맥)·처치 보상·진화 보너스가 전부 여기 들어간다.
+    // 상수(GOLD_RATE)로 박으면 특성 하나에 분모가 틀어진다.
+    let income = (num(game.gold, 0) - this.goldAtStart) + spent;
+    const floorIncome = C.GOLD_RATE * secs * 0.5;
+    if (!(income > floorIncome)) income = floorIncome;
 
-    // 물량 지향 — 뽑은 것 중 가장 싼 유닛의 비율
-    this.wSwarm.push(this.spawnCount > 0 ? clamp(this.spawnCheap / this.spawnCount, 0, 1) : 0.5);
+    // 공격성 — 들어온 금을 전선으로 얼마나 내보냈는가.
+    // 1.0 = 들어온 만큼 전부 병력으로 바꿨다. **쿨다운이 아니라 금이 한계다** —
+    // 검사 쿨다운(420ms)으로는 구간당 21기가 가능하지만 수입으로는 5기가 한계다.
+    // 쿨다운을 분모로 잡으면 최대치가 0.24 라 TH_AGGRO_HIGH(0.62)가 도달 불가능하다.
+    this.wAggro.push(clamp(spentUnits / income, 0, 1));
 
-    this.wFront.push(game.frontline());
+    // 쌓아 두는 정도 — 이 구간에 **쌓을 수 있었던 최대 평균 보유액** 대비.
+    // 한 푼도 안 쓰면 보유는 시작값에서 유입만큼 선형으로 오른다 →
+    // 그때의 평균이 goldAtStart + income/2 다. 상한(GOLD_CAP)에 막히면 그게 최대다.
+    const avg = this.goldSamples > 0 ? this.goldSum / this.goldSamples : num(game.gold, 0);
+    let maxAvg = Math.min(C.GOLD_CAP, this.goldAtStart + income * 0.5);
+    if (maxAvg < C.U_COST[C.U_SWORD]) maxAvg = C.U_COST[C.U_SWORD];
+    this.wHoard.push(clamp(avg / maxAvg, 0, 1));
 
-    this.spawnCount = 0; this.spawnCheap = 0;
-    this.goldSum = 0; this.goldSamples = 0;
+    // 경제 지향 — **번 경험치 중 시대에 넣은 비중.**
+    //   분자·분모가 같은 단위(경험치)다. 진화는 금이 아니라 경험치를 쓴다 —
+    //   금 지출과 비교하던 예전 식은 단위가 서로 달라 애초에 비율이 아니었다.
+    //   0 = 진화를 미룬다, 1 = 버는 족족 시대에 넣는다. 양 끝이 다 도달 가능하다.
+    const earned = Math.max(0, (num(game.xp, 0) - this.xpAtStart) + this.eraXpSpent);
+    this.wXpEarn.push(earned);
+    this.wXpEra.push(this.eraXpSpent);
+
+    // 물량 지향 — 뽑은 유닛의 단가. 전부 검사면 1.0, 전부 투석기면 0.0.
+    this.wSwarm.push(this.spawnCount > 0 ? clamp(this.cheapSum / this.spawnCount, 0, 1) : 0.5);
+
+    // 지키는 성향 — 포탑은 전선에 나가지 않는 금이다. 0 / 0.5 / 1.
+    this.wTower.push(clamp(num(game.towerLv, 0) / C.TOWER_MAX, 0, 1));
+
+    // 플레이어 구성 — 상성 대응의 입력. 개수 그대로 담고 총합으로 나눈다.
+    for (let k = 0; k < KINDS; k++) this.wKind[k].push(this.spawnKind[k]);
+    this.wSpawnN.push(this.spawnCount);
+
+    this.wFront.push(typeof game.frontline === 'function' ? game.frontline() : 0.5);
   }
 
   onChunkBoundary(game, ci) {
@@ -278,14 +426,15 @@ export class Director {
     if (ci < C.OBSERVE_CHUNKS) { this.observing = true; this.applyLevers(); return; }
     this.observing = false;
 
-    const aggro = this.wAggro.mean();
-    const hoard = this.wHoard.mean();
-    const econ = this.wEcon.mean();
-    const swarm = this.wSwarm.mean();
+    const aggro = this.metricAggro;
+    const hoard = this.metricHoard;
+    const econ = this.metricEcon;
+    const swarm = this.metricSwarm;
+    const tower = this.metricTower;
 
-    const raw = classify(aggro, hoard, econ, swarm);
+    const raw = classify(aggro, hoard, econ, swarm, tower);
     let next = raw;
-    if (raw !== this.profile && nearBoundary(aggro, hoard, econ, swarm)) {
+    if (raw !== this.profile && nearBoundary(aggro, hoard, econ, swarm, tower)) {
       // 히스테리시스 — 경계값 ±0.05 안에서는 직전 프로파일을 유지한다.
       next = this.profile;
     }
@@ -305,30 +454,60 @@ export class Director {
 
   applyLevers() {
     const p = this.policy[this.profile] || this.policy.BALANCED || FALLBACK_POLICY.BALANCED;
-    // 난이도가 오르면 템포가 빨라지고 수입이 는다. 종류 구성은 프로파일이 정한다.
     const d = this.difficulty;
+
+    // 구운 웨이브가 있으면 구성비·템포를 거기서 가져온다 (계층2 산출물).
+    // 없으면 정책의 기본 구성이다.
+    const ch = this.selectChunk(p.preferTags);
+    const base = ch && Array.isArray(ch.mix) ? ch.mix : p.mix;
+    const m = this.mixBuf;
+    for (let k = 0; k < KINDS; k++) m[k] = num(base[k], 0);
+    this.applyCounter(m, p);
+
     this.levers = {
-      mix: p.mix,
-      tempo: Math.max(420, p.tempo * (1 - d * 0.11)),
+      mix: m,
+      tempo: Math.max(420, (ch ? num(ch.tempo, p.tempo) : p.tempo) * (1 - d * 0.11)),
       goldMul: p.goldMul * (1 + d * 0.1),
       eraThresh: p.eraThresh,
       waterMul: p.waterMul,
       draftSlant: p.draftSlant,
       preferTags: p.preferTags,
     };
-    // 구운 웨이브가 있으면 구성비를 거기서 가져온다 (계층2 산출물)
-    const ch = this.selectChunk();
-    if (ch) { this.levers.mix = ch.mix; this.levers.tempo = ch.tempo; }
+  }
+
+  // ── 상성 대응 — "AI가 판단한다"의 가장 직접적인 증거 ─────────
+  // 플레이어가 기병을 많이 뽑으면 창병이 늘고, 검사를 도배하면 궁수가 는다.
+  // 프로파일(성향)이 판의 뼈대를 정하고, 여기서 **플레이어의 실제 구성**에
+  // 반응해 살을 붙인다. 결정론적이다 — 같은 플레이면 같은 대응이 나온다.
+  applyCounter(m, p) {
+    const gain = num(p.counterGain, 0);
+    if (gain <= 0 || this.observing) return;
+    const tot = this.wSpawnN.mean();
+    if (tot < 0.5) return;      // 표본이 없으면 손대지 않는다
+    for (let u = 0; u < KINDS; u++) {
+      const share = clamp(this.wKind[u].mean() / tot, 0, 1);
+      this.mixShare[u] = share;
+      if (share <= 0) continue;
+      const list = COUNTERS_OF[u];
+      // 한 유닛을 여러 종이 잡으면 나눠 준다. 총 가중치는 gain 을 넘지 않는다.
+      const add = gain * share / (list.length || 1);
+      for (let i = 0; i < list.length; i++) m[list[i]] += add;
+    }
+    for (let k = 0; k < KINDS; k++) m[k] = Math.round(m[k] * 100) / 100;
   }
 
   // ── 웨이브 선택 — 결정론적. Math.random() 없음 ───────────────
-  selectChunk() {
+  selectChunk(tags) {
     if (!this.chunks || this.chunks.length === 0) return null;
-    const tags = this.levers ? this.levers.preferTags : null;
     let n = this.collect(this.profile, this.difficulty, tags);
     if (n === 0) n = this.collect(this.profile, this.difficulty, null);
     if (n === 0) n = this.collect(this.profile, -1, null);
-    if (n === 0) n = this.collect(null, -1, null);
+    // **다른 프로파일의 웨이브로는 절대 메우지 않는다.**
+    // 예전엔 마지막 수단으로 아무 웨이브나 집었는데, 폴백 라이브러리가 전부
+    // BALANCED 라서 다섯 프로파일이 전부 같은 구성을 냈다. 계측에서 잡혔다 —
+    // RUSHER 와 SWARMER 의 적 구성 차이가 정확히 0.00 이었다.
+    // 프로파일 전용 웨이브가 없으면 null 을 돌려주고 **정책의 기본 구성**을 쓴다.
+    // 정책은 언제나 프로파일별로 다르므로 그게 항상 더 낫다.
     if (n === 0) return null;
     // 구간 인덱스로 순환한다. 같은 판이면 같은 순서가 나온다.
     const pick = this.candidates[Math.abs(this.lastChunk * 7 + this.switches) % n];
@@ -393,49 +572,85 @@ export class Director {
   pickDeathLine(game) {
     const pool = this.lines.death;
     if (!pool || pool.length === 0) return;
-    this.deathLine = pool[(game.runs * 7 + (game.kills | 0)) % pool.length];
+    this.deathLine = pool[((game ? game.runs * 7 + (game.kills | 0) : 0)) % pool.length];
   }
 
   // ── 디렉터 뷰가 읽는 값 ─────────────────────────────────────
   get profileName() { return PROFILE_KR[this.profileIdx] || PROFILE_KR[4]; }
   get metricAggro() { return this.wAggro.mean(); }
   get metricHoard() { return this.wHoard.mean(); }
-  get metricEcon() { return this.wEcon.mean(); }
   get metricSwarm() { return this.wSwarm.mean(); }
+  get metricTower() { return this.wTower.mean(); }
   get metricFront() { return this.wFront.mean(); }
+  // 경제 지향 — 윈도 합끼리 나눈다. 경험치가 거의 안 돌면 판단 보류(0.5)다.
+  get metricEcon() {
+    const earn = this.wXpEarn.mean();
+    if (earn < 1) return 0.5;
+    return clamp(this.wXpEra.mean() / earn, 0, 1);
+  }
+  // 플레이어 구성비 — 디렉터 뷰·검수가 읽는다. 매번 새 배열을 만들지 않는다.
+  get playerMix() {
+    const tot = this.wSpawnN.mean();
+    for (let k = 0; k < KINDS; k++) {
+      this.mixShare[k] = tot > 0 ? clamp(this.wKind[k].mean() / tot, 0, 1) : 0;
+    }
+    return this.mixShare;
+  }
 }
 
 // ── 프로파일 판정 — 결정론적 ──────────────────────────────────
-function classify(aggro, hoard, econ, swarm) {
+//
+// 다섯이 전부 **구조적으로 도달 가능해야** 한다. 각 조건이 실제로 닿는 이유:
+//   TURTLE     들어온 금의 30% 미만만 병력에 쓰고, 쌓을 수 있는 만큼 쌓았거나
+//              포탑을 올렸다. 안 쓰면 hoard 는 정의상 1.0 에 붙는다
+//   ECONOMIST  번 경험치의 55% 이상을 시대에 넣었고 병력 지출은 절반 미만.
+//              진화 버튼을 뜨는 족족 누르면 econ 은 1.0 에 붙는다
+//   SWARMER    금의 62% 이상을 병력에 쓰고, 그 병력의 평균 단가가 싸다(검·창·궁)
+//   RUSHER     금의 62% 이상을 병력에 쓰는데 비싼 것(기병·거인·투석기)이 섞인다
+//   BALANCED   그 사이 어디도 아니다 — 실제로 존재하는 넓은 영역이다
+const MID_AGGRO = (C.TH_AGGRO_HIGH + C.TH_AGGRO_LOW) * 0.5;
+
+function classify(aggro, hoard, econ, swarm, tower) {
   // 순서가 곧 우선순위다. 웅크리는 사람을 먼저 잡아야 한다 —
   // 물이 차오르는 게임에서 가장 위험한 습관이기 때문이다.
-  if (aggro < C.TH_AGGRO_LOW && hoard > C.TH_HOARD_HIGH) return 'TURTLE';
-  if (econ > C.TH_ECON_HIGH) return 'ECONOMIST';
+  // 단, **웅크리면서 진화는 앞서는 사람은 경제형이다.** 이 단서가 없으면
+  // 경제형이 수비형에 통째로 먹혀 구조적으로 판정 불가능해진다.
+  if (aggro < C.TH_AGGRO_LOW && econ <= C.TH_ECON_HIGH
+      && (hoard > C.TH_HOARD_HIGH || tower > C.TH_HOARD_HIGH)) return 'TURTLE';
+  if (econ > C.TH_ECON_HIGH && aggro < MID_AGGRO) return 'ECONOMIST';
   if (aggro > C.TH_AGGRO_HIGH && swarm > C.TH_SWARM_HIGH) return 'SWARMER';
   if (aggro > C.TH_AGGRO_HIGH) return 'RUSHER';
   return 'BALANCED';
 }
 
-function nearBoundary(aggro, hoard, econ, swarm) {
+function nearBoundary(aggro, hoard, econ, swarm, tower) {
   const m = C.HYSTERESIS;
   return Math.abs(aggro - C.TH_AGGRO_HIGH) < m
       || Math.abs(aggro - C.TH_AGGRO_LOW) < m
+      || Math.abs(aggro - MID_AGGRO) < m
       || Math.abs(hoard - C.TH_HOARD_HIGH) < m
+      || Math.abs(tower - C.TH_HOARD_HIGH) < m
       || Math.abs(econ - C.TH_ECON_HIGH) < m
       || Math.abs(swarm - C.TH_SWARM_HIGH) < m;
 }
 
 // ── 스키마 검증 — 파손된 데이터는 폴백으로 간다 ───────────────
+// mix 는 **길이 6**이다. 길이 3짜리 옛 데이터는 통과시키지 않는다 —
+// 통과시키면 기병·거인·투석기가 영원히 안 나오는 조용한 고장이 된다.
 function validateChunks(doc) {
   if (!doc || !Array.isArray(doc.chunks) || doc.chunks.length === 0) return false;
   for (let i = 0; i < doc.chunks.length; i++) {
     const c = doc.chunks[i];
     if (!c || typeof c.profile !== 'string') return false;
     if (!Number.isInteger(c.difficulty) || c.difficulty < 0 || c.difficulty > 4) return false;
-    if (!Array.isArray(c.mix) || c.mix.length !== 3) return false;
-    for (let k = 0; k < 3; k++) {
-      if (typeof c.mix[k] !== 'number' || c.mix[k] < 0 || c.mix[k] > 99) return false;
+    if (!Array.isArray(c.mix) || c.mix.length !== KINDS) return false;
+    let sum = 0;
+    for (let k = 0; k < KINDS; k++) {
+      const v = c.mix[k];
+      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 99) return false;
+      sum += v;
     }
+    if (sum <= 0) return false;      // 적이 한 명도 안 나온다
     if (typeof c.tempo !== 'number' || c.tempo < 200 || c.tempo > 6000) return false;
   }
   return true;
@@ -458,13 +673,24 @@ function mergePolicy(p) {
     const base = BUILTIN_POLICY[k];
     const got = p[k];
     if (!got) { out[k] = base; continue; }
+    let mix = base.mix;
+    if (Array.isArray(got.mix) && got.mix.length === KINDS) {
+      let sum = 0, ok = true;
+      for (let i = 0; i < KINDS; i++) {
+        const v = got.mix[i];
+        if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) { ok = false; break; }
+        sum += v;
+      }
+      if (ok && sum > 0) mix = got.mix;
+    }
     out[k] = {
-      mix: Array.isArray(got.mix) && got.mix.length === 3 ? got.mix : base.mix,
+      mix,
       tempo: typeof got.tempo === 'number' ? got.tempo : base.tempo,
       goldMul: typeof got.goldMul === 'number' ? got.goldMul : base.goldMul,
       eraThresh: typeof got.eraThresh === 'number' ? got.eraThresh : base.eraThresh,
       waterMul: typeof got.waterMul === 'number' ? got.waterMul : base.waterMul,
       draftSlant: Number.isInteger(got.draftSlant) ? got.draftSlant : base.draftSlant,
+      counterGain: typeof got.counterGain === 'number' ? got.counterGain : base.counterGain,
       preferTags: Array.isArray(got.preferTags) ? got.preferTags : base.preferTags,
     };
   }

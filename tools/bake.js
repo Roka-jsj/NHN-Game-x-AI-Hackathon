@@ -11,9 +11,9 @@
 //   그래서 LLM 은 개발 중에만 돌고, 런타임은 정적 JSON 만 읽는다.
 //
 // 산출물:
-//   data/chunks.json  5프로파일 × 5난이도 × 14변형 = 350
-//   data/policy.json  프로파일 → 레버 매핑
-//   data/lines.json   연출 문구 (사망 40 / 신기록 40 / 부활 40)
+//   data/chunks.json  5프로파일 × 5난이도 × 14변형 = 350   (mix 는 **길이 6**)
+//   data/policy.json  프로파일 → 레버 매핑 + 상성 대응표
+//   data/lines.json   연출 문구
 
 'use strict';
 
@@ -26,10 +26,33 @@ const OUT = path.join(ROOT, 'data');
 const PROFILES = ['RUSHER', 'TURTLE', 'ECONOMIST', 'SWARMER', 'BALANCED'];
 const DIFFICULTIES = [0, 1, 2, 3, 4];
 const VARIANTS = 14;
-const CHUNK_ROWS = 6;
 
-const LANES = 3;
-const OB_NONE = 0, OB_LOW = 1, OB_BEAM = 2, OB_PILLAR = 3;
+// ─── 유닛 6종 — src/config.js 와 같은 순서다 ───────────────────
+// 이 파일은 게임 코드를 import 하지 않는다 (게임은 ESM, 도구는 CJS).
+// 그래서 순서와 상성만 여기 다시 적는다. **순서가 곧 계약이다.**
+const UNIT_KINDS = 6;
+const U_SWORD = 0, U_SPEAR = 1, U_ARCHER = 2, U_CAV = 3, U_GIANT = 4, U_CATA = 5;
+const UNIT_NAME = ['검사', '창병', '궁수', '기병', '거인', '투석기'];
+
+// 상성 — [이기는 쪽, 지는 쪽]. 삼각형이 돌아야 한다.
+//   창병 > 기병   기병 > 궁수·투석기   궁수 > 검사·거인   검사 > 창병
+const BEATS = [
+  [U_SPEAR, U_CAV],
+  [U_CAV, U_ARCHER], [U_CAV, U_CATA],
+  [U_ARCHER, U_SWORD], [U_ARCHER, U_GIANT],
+  [U_SWORD, U_SPEAR],
+];
+
+// counterMap[지는 쪽] = [그것을 잡는 쪽들]
+// 런타임은 이 표를 쓰지 않는다 — config.js 의 COUNTER 를 직접 읽는다.
+// 이건 **검수와 사람 눈을 위한 산출물**이고, verify-chunks 가 삼각형이
+// 돌아가는지(하나가 전부를 이기지 않는지)를 이걸로 확인한다.
+function buildCounterMap() {
+  const map = [];
+  for (let u = 0; u < UNIT_KINDS; u++) map.push([]);
+  for (const [a, d] of BEATS) map[d].push(a);
+  return map;
+}
 
 const OFFLINE = process.argv.includes('--offline');
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
@@ -45,23 +68,62 @@ function lcg(seed) {
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 // ─── 프로파일별 설계 의도 ─────────────────────────────────────
-// 디렉터는 난이도를 올리는 시스템이 아니다. 성향의 반대편으로 판을 다시 짠다.
+// 디렉터는 난이도를 올리는 시스템이 아니다. 성향의 **반대편으로** 판을 다시 짠다.
 const INTENT = {
-  // 프로파일마다 **반대편으로** 짠다. 더 세게가 아니다.
-  RUSHER:    '쉬지 않고 병력을 쏟아붓는 상대다. 거인 비중을 높여 벽을 세우고 템포를 늦춰 소모를 강요해라.',
-  TURTLE:    '금을 쌓고 나오지 않는 상대다. 궁수 비중을 높이고 템포를 빠르게 해 찔러서 끌어내라.',
-  ECONOMIST: '병력보다 시대에 먼저 투자하는 상대다. 싼 유닛으로 템포를 최대한 빠르게 해 진화가 끝나기 전에 두들겨라.',
-  SWARMER:   '싼 유닛만 끝없이 뽑는 상대다. 거인 비중을 높여 숫자를 무의미하게 만들어라.',
-  BALANCED:  '치우침이 없는 상대다. 세 종류를 고르게 섞고 템포는 중간으로 둬라.',
+  RUSHER:
+    '쉬지 않고 병력을 쏟아붓는 상대다. 거인으로 벽을 세우고 창병으로 돌파를 끊어 '
+    + '소모를 강요해라. 궁수를 섞어 뭉친 근접을 녹여라. 템포는 느려도 된다 — '
+    + '벽을 세우는 쪽이 급할 이유가 없다.',
+  TURTLE:
+    '금을 쌓고 나오지 않는 상대다. 궁수와 투석기로 찔러서 끌어내라. '
+    + '투석기는 기지에 강하니 웅크릴수록 손해가 쌓인다. 근접은 최소로 둬라.',
+  ECONOMIST:
+    '병력보다 시대에 먼저 투자하는 상대다. 검사로 수를 채우고 가장 빠른 기병으로 '
+    + '뒤를 파고들어라. 진화가 끝나기 전에 두들겨야 하므로 템포가 가장 빨라야 한다. '
+    + '느리고 비싼 유닛(거인·투석기)은 쓰지 마라.',
+  SWARMER:
+    '싼 유닛만 끝없이 뽑는 상대다. 거인으로 앞을 막아 숫자를 무의미하게 만들고 '
+    + '궁수로 검사를 상성으로 녹여라. 투석기를 뒤에 둬도 좋다.',
+  BALANCED:
+    '치우침이 없는 상대다. 여섯 종을 고르게 섞고 템포는 중간으로 둬라. '
+    + '한 종에 쏠리면 그 종을 잡는 유닛 하나에 판이 끝난다.',
 };
 
-const TAG_POOL = ['mix', 'wall', 'ranged', 'rush', 'heavy', 'swarm'];
+// 프로파일별 기본 구성 — [검사, 창병, 궁수, 기병, 거인, 투석기]
+// src/director.js 의 BUILTIN_POLICY 와 같은 표다. 여기가 구워져 policy.json 이 된다.
+const POLICY = {
+  RUSHER: {
+    mix: [1, 3, 3, 0, 8, 1], tempo: 1900, goldMul: 1.0, eraThresh: 1.0,
+    waterMul: 0.9, draftSlant: 1, counterGain: 4, preferTags: ['wall', 'mix'],
+  },
+  TURTLE: {
+    mix: [1, 0, 6, 1, 0, 5], tempo: 1150, goldMul: 1.05, eraThresh: 1.0,
+    waterMul: 1.35, draftSlant: 0, counterGain: 3, preferTags: ['ranged', 'mix'],
+  },
+  ECONOMIST: {
+    mix: [7, 1, 1, 5, 0, 0], tempo: 900, goldMul: 1.15, eraThresh: 0.8,
+    waterMul: 1.0, draftSlant: 1, counterGain: 3, preferTags: ['rush', 'mix'],
+  },
+  SWARMER: {
+    mix: [0, 1, 5, 0, 7, 2], tempo: 1700, goldMul: 1.0, eraThresh: 0.9,
+    waterMul: 1.0, draftSlant: 0, counterGain: 5, preferTags: ['heavy', 'mix'],
+  },
+  // 균형에서 레버를 완전 중립으로 두면 디렉터는 대부분의 판에서 장식이 된다.
+  // 그래서 균형일수록 **상성 대응(counterGain)을 가장 세게** 건다.
+  BALANCED: {
+    mix: [4, 3, 3, 2, 2, 1], tempo: 1400, goldMul: 1, eraThresh: 1,
+    waterMul: 1, draftSlant: 2, counterGain: 6, preferTags: ['mix'],
+  },
+};
+
+const TAG_POOL = ['mix', 'wall', 'ranged', 'rush', 'heavy', 'swarm', 'siege', 'fast'];
 
 function tagsFor(profile, difficulty, variant) {
   const t = ['mix'];
-  if (profile === 'RUSHER' || profile === 'SWARMER') t.push(variant % 2 ? 'wall' : 'heavy');
-  if (profile === 'TURTLE') t.push('ranged');
-  if (profile === 'ECONOMIST') t.push('rush');
+  if (profile === 'RUSHER') t.push(variant % 2 ? 'wall' : 'heavy');
+  if (profile === 'SWARMER') t.push(variant % 2 ? 'heavy' : 'wall');
+  if (profile === 'TURTLE') t.push(variant % 2 ? 'ranged' : 'siege');
+  if (profile === 'ECONOMIST') t.push(variant % 2 ? 'rush' : 'fast');
   if (difficulty >= 3) t.push('swarm');
   return t;
 }
@@ -70,21 +132,23 @@ function tagsFor(profile, difficulty, variant) {
 // **결정론적이다** — 같은 입력이면 같은 웨이브가 나온다.
 function offlineChunk(profile, difficulty, variant) {
   const rnd = lcg(hash(profile) * 7919 + difficulty * 131 + variant * 17);
-  let mix;
-  switch (profile) {
-    case 'RUSHER':    mix = [1, 2, 6]; break;
-    case 'TURTLE':    mix = [2, 7, 1]; break;
-    case 'ECONOMIST': mix = [6, 3, 1]; break;
-    case 'SWARMER':   mix = [1, 3, 6]; break;
-    default:          mix = [5, 3, 2]; break;
+  const base = (POLICY[profile] || POLICY.BALANCED).mix;
+
+  // 변형마다 흔든다. **0인 자리는 0으로 둔다** — 프로파일의 성격을 지우면
+  // 350개를 구워도 전부 같은 웨이브가 된다. 검수의 "프로파일 분화"가 이걸 잡는다.
+  const mix = base.map((v) => (v === 0 ? 0 : clamp(Math.round(v + (rnd() * 4 - 2)), 0, 9)));
+  let sum = 0;
+  for (let k = 0; k < UNIT_KINDS; k++) sum += mix[k];
+  if (sum === 0) {
+    // 성격이 가장 강한 자리를 되살린다. 적이 한 명도 안 나오는 판은 없어야 한다.
+    let top = 0;
+    for (let k = 1; k < UNIT_KINDS; k++) if (base[k] > base[top]) top = k;
+    mix[top] = Math.max(1, base[top]);
   }
-  // 변형마다 ±2 흔든다. 0 밑으로는 안 내려간다.
-  mix = mix.map((v) => clamp(Math.round(v + (rnd() * 4 - 2)), 0, 9));
-  if (mix[0] + mix[1] + mix[2] === 0) mix[0] = 1;
 
   // 난이도가 오르면 템포가 빨라진다. 이건 단조여야 한다 — 검수가 확인한다.
-  const base = profile === 'ECONOMIST' ? 900 : (profile === 'TURTLE' ? 1150 : 1700);
-  const tempo = clamp(Math.round(base * (1 - difficulty * 0.11) + (rnd() * 160 - 80)), 420, 3000);
+  const b = (POLICY[profile] || POLICY.BALANCED).tempo;
+  const tempo = clamp(Math.round(b * (1 - difficulty * 0.11) + (rnd() * 160 - 80)), 420, 3000);
 
   return {
     id: `${profile}-${difficulty}-${variant}`,
@@ -103,29 +167,39 @@ function hash(str) {
 const SYSTEM = `너는 한 화면 레인 전투 게임의 웨이브 디자이너다.
 플레이어는 왼쪽 기지에서 유닛을 소환하고, 너는 오른쪽(적) 사령관의 웨이브 구성을 설계한다.
 
-유닛 세 종류:
-  0 검사  싸고 빠르다. 물량
-  1 궁수  멀리서 때린다. 근접에 약하다
-  2 거인  느리고 비싸고 단단하다. 앞을 막는다
+유닛 여섯 종류 (mix 배열의 순서가 이것이다):
+  0 검사    가장 싸고 빠르다. 물량
+  1 창병    근접인데 사거리가 길다. 기병을 막는다
+  2 궁수    원거리. 근접에 약하다
+  3 기병    가장 빠르다. 파고들어 궁수·투석기를 썬다
+  4 거인    느리고 단단하다. 앞을 막는다. 비싸다
+  5 투석기  초장거리. 기지에 강하다. 매우 느리고 가장 비싸다
 
-너는 두 가지를 정한다.
-  mix    [검사, 궁수, 거인] 가중치. 각 0~9 정수. 합이 0이면 안 된다
+상성 (삼각형이 돈다. 하나로 전부를 이길 수 없다):
+  창병 > 기병      기병 > 궁수·투석기      궁수 > 검사·거인      검사 > 창병
+
+너는 웨이브마다 두 가지를 정한다.
+  mix    [검사, 창병, 궁수, 기병, 거인, 투석기] 가중치. 각 0~9 정수. 합이 0이면 안 된다
   tempo  소환 간격 ms. 420~3000
 
 **절대 규칙**
-1. 셋 다 0인 mix 를 만들지 마라 — 적이 아무것도 안 나온다
+1. 여섯 다 0인 mix 를 만들지 마라 — 적이 한 명도 안 나온다
 2. tempo 는 420 밑으로 내려가면 화면이 유닛으로 막힌다. 그 밑으로 쓰지 마라
 3. 난이도가 오르면 tempo 가 **줄어야** 한다 (더 자주 나온다)
 4. **프로파일의 반대편으로 짜라.** 더 세게가 아니라 다르게다
+5. 한 프로파일 안의 14개 변형은 서로 달라야 한다. 같은 mix 를 반복하지 마라
+6. 프로파일의 성격은 유지해라 — 벽을 세우라고 했는데 거인이 0이면 안 된다
 
 JSON 하나만 출력해라. 설명을 붙이지 마라.
-{"mix":[정수,정수,정수],"tempo":정수,"tags":["문자열"]}`;
+{"chunks":[{"mix":[정수×6],"tempo":정수,"tags":["문자열"]}, ... 정확히 14개]}`;
 
 function userPrompt(profile, difficulty) {
+  const base = (POLICY[profile] || POLICY.BALANCED).mix;
   return `프로파일: ${profile}
 난이도: ${difficulty} (0=가장 쉬움, 4=가장 어려움)
 상대에 대한 판단: ${INTENT[profile]}
-위 판단의 **반대편으로** 웨이브를 짜라.`;
+설계 기준 구성(참고): [${base.join(', ')}]  기준 템포: ${(POLICY[profile] || POLICY.BALANCED).tempo}ms
+위 판단의 **반대편으로** 웨이브 14개를 짜라. 쓸 수 있는 태그: ${TAG_POOL.join(', ')}`;
 }
 
 async function callLLM(profile, difficulty) {
@@ -153,9 +227,11 @@ async function callLLM(profile, difficulty) {
 function coerce(raw, profile, difficulty, variant) {
   const fb = offlineChunk(profile, difficulty, variant);
   let mix = Array.isArray(raw && raw.mix) ? raw.mix : null;
-  if (!mix || mix.length !== 3) mix = fb.mix;
+  if (!mix || mix.length !== UNIT_KINDS) mix = fb.mix;
   mix = mix.map((v) => clamp(Math.round(Number(v) || 0), 0, 9));
-  if (mix[0] + mix[1] + mix[2] === 0) mix = fb.mix;
+  let sum = 0;
+  for (let k = 0; k < UNIT_KINDS; k++) sum += mix[k];
+  if (sum === 0) mix = fb.mix;
 
   let tempo = Math.round(Number(raw && raw.tempo));
   if (!Number.isFinite(tempo)) tempo = fb.tempo;
@@ -167,29 +243,6 @@ function coerce(raw, profile, difficulty, variant) {
   return { id: fb.id, profile, difficulty, tags, mix, tempo };
 }
 
-const POLICY = {
-  RUSHER: {
-    mix: [1, 2, 6], tempo: 1900, goldMul: 1.0, eraThresh: 1.0,
-    waterMul: 0.9, draftSlant: 1, preferTags: ['wall', 'mix'],
-  },
-  TURTLE: {
-    mix: [2, 7, 1], tempo: 1150, goldMul: 1.05, eraThresh: 1.0,
-    waterMul: 1.35, draftSlant: 0, preferTags: ['ranged', 'mix'],
-  },
-  ECONOMIST: {
-    mix: [6, 3, 1], tempo: 900, goldMul: 1.15, eraThresh: 0.8,
-    waterMul: 1.0, draftSlant: 1, preferTags: ['rush', 'mix'],
-  },
-  SWARMER: {
-    mix: [1, 3, 6], tempo: 1700, goldMul: 1.0, eraThresh: 0.9,
-    waterMul: 1.0, draftSlant: 0, preferTags: ['heavy', 'mix'],
-  },
-  BALANCED: {
-    mix: [5, 3, 2], tempo: 1400, goldMul: 1, eraThresh: 1,
-    waterMul: 1, draftSlant: 2, preferTags: ['mix'],
-  },
-};
-
 const OFFLINE_LINES = {
   death: [
     '기지가 무너졌다', '한 파도 늦었다', '아끼다 잠겼다', '병력이 모자랐다',
@@ -198,7 +251,8 @@ const OFFLINE_LINES = {
     '해일을 아꼈어야 했다', '두 번은 못 막는다', '전선이 너무 멀었다',
     '물은 기다려주지 않는다', '경제만으로는 못 이긴다', '한 번 더 뽑을 수 있었다',
     '거인 하나가 부족했다', '궁수를 놓친 대가다', '여기까지가 오늘의 끝이다',
-    '적이 먼저 시대를 넘었다',
+    '적이 먼저 시대를 넘었다', '창병을 세웠어야 했다', '기병이 뒤를 돌았다',
+    '투석기가 기지를 갈았다', '포탑 하나면 달랐다', '화살비를 아꼈다',
   ],
   record: ['적진을 넘었다', '전선이 뒤집혔다', '물보다 빨랐다'],
   revive: ['다시', '한 판 더', '이번엔 다르게'],
@@ -242,7 +296,11 @@ async function main() {
           for (let v = 0; v < VARIANTS; v++) chunks.push(offlineChunk(p, d, v));
           continue;
         }
-        const list = Array.isArray(raw.chunks) ? raw.chunks : [];
+        // 모델이 {chunks:[...]} 를 주는 게 정상이고, 배열 하나만 줄 수도 있다.
+        // 둘 다 받아준다 — 못 받으면 그 호출의 결과가 통째로 버려진다.
+        const list = Array.isArray(raw) ? raw
+          : (Array.isArray(raw && raw.chunks) ? raw.chunks : []);
+        if (list.length === 0) console.log('(빈 응답 — 오프라인으로 메운다) ');
         for (let v = 0; v < VARIANTS; v++) chunks.push(coerce(list[v], p, d, v));
         console.log('완료');
       }
@@ -250,9 +308,17 @@ async function main() {
   }
 
   const stamp = new Date().toISOString();
-  write('chunks.json', { generator, bakedAt: stamp, version: 1, chunks });
-  write('policy.json', { generator, bakedAt: stamp, version: 1, policies: POLICY });
-  write('lines.json', Object.assign({ generator, bakedAt: stamp, version: 1 }, OFFLINE_LINES));
+  write('chunks.json', {
+    generator, bakedAt: stamp, version: 2,
+    unitOrder: UNIT_NAME, unitKinds: UNIT_KINDS, chunks,
+  });
+  write('policy.json', {
+    generator, bakedAt: stamp, version: 2,
+    unitOrder: UNIT_NAME, unitKinds: UNIT_KINDS,
+    counterMap: buildCounterMap(),
+    policies: POLICY,
+  });
+  write('lines.json', Object.assign({ generator, bakedAt: stamp, version: 2 }, OFFLINE_LINES));
 
   console.log('');
   console.log('다음: node tools/verify-chunks.js');

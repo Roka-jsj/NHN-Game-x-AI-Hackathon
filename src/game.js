@@ -1,10 +1,11 @@
-// 시뮬레이션 — 유닛 · 전투 · 경제 · 시대 진화 · 물 · 특성.
+// 시뮬레이션 — 유닛 · 전투 · 상성 · 경제 · 시대 진화 · 물 · 포탑 · 스킬 · 특성.
 // 이 파일은 시각·청각·입력장치를 모른다. 순수하게 상태만 굴린다.
 //
 // 규칙 1: 고정 스텝이다. 이 파일 어디에도 deltaTime을 곱하는 코드가 없다.
 // 규칙 2: 상태 전이는 setState() 한 곳에서만 일어난다.
 // 규칙 3: 판정에 Math.random()을 쓰지 않는다. 재현 가능해야 한다.
 // 규칙 4: 루프 안에서 객체·배열을 만들지 않는다. 유닛은 전부 타입배열 풀이다.
+// 규칙 5: 종류 개수를 하드코딩하지 않는다. 전부 C.UNIT_KINDS 를 돈다.
 
 import * as C from './config.js';
 
@@ -14,11 +15,24 @@ export const STATE_NAME = ['PLAY', 'DRAFT', 'OVER'];
 // 진영. 0 = 나, 1 = 적.
 export const SIDE_L = 0, SIDE_R = 1;
 
-// 입력 행동 — 버튼 다섯 개가 전부다. 플래시게임답게 손가락 하나로 끝난다.
+// 입력 행동 — 메인이 못 박은 배치다. 버튼 인덱스가 곧 행동 번호이고,
+// **유닛 행동 번호(0~5)는 곧 유닛 종류 인덱스**다. 그래서 변환표가 필요 없다.
+//   버튼줄  0 검사 1 창병 2 궁수 3 기병 4 거인 5 투석기 6 진화 7 포탑 8 해일 9 화살비
+//   증원만 버튼줄 밖(우하단 원형 버튼 · 키 R)이라 10 이다.
 export const ACT = {
-  SWORD: 0, ARCHER: 1, GIANT: 2, ERA: 3, NUKE: 4,
-  PICK0: 5, PICK1: 6, PICK2: 7, RESTART: 8,
+  SWORD: 0, SPEAR: 1, ARCHER: 2, CAV: 3, GIANT: 4, CATA: 5,
+  ERA: 6, TOWER: 7, TIDE: 8, VOLLEY: 9, RALLY: 10,
+  PICK0: 11, PICK1: 12, PICK2: 13, RESTART: 14,
+  // 예전 이름 호환 — 해일이 필살기를 흡수했다. 값이 TIDE 와 같다.
+  NUKE: 8,
 };
+
+// 화면 버튼 인덱스 → 행동. 지금은 항등이지만 계약이 여기 적혀 있어야
+// 버튼 줄이 바뀔 때 고칠 곳이 한 군데로 남는다.
+export const BTN_ACT = new Uint8Array([
+  ACT.SWORD, ACT.SPEAR, ACT.ARCHER, ACT.CAV, ACT.GIANT, ACT.CATA,
+  ACT.ERA, ACT.TOWER, ACT.TIDE, ACT.VOLLEY,
+]);
 
 export const EV = {
   SPAWN: 0,         // a = 종류, b = 진영
@@ -37,14 +51,21 @@ export const EV = {
   WIN: 13,
   LOSE: 14,
   RESET: 15,
+  // ── v2 확장. 기존 번호는 건드리지 않는다 ──
+  TOWER_FIRE: 16,   // a = 포탑 단계, b = 진영
+  SKILL: 17,        // a = 스킬 번호(0 해일 1 화살비 2 증원), b = 진영
+  TOWER_UP: 18,     // a = 새 단계, b = 진영
+  COUNTER_HIT: 19,  // a = 공격자 종류, b = 진영 — 상성 우위로 때렸다
 };
 
 // 디렉터가 없을 때 적이 쓰는 고정 웨이브. 랜덤 0.
 // [지연ms, 유닛종류] 가 반복된다. 이것만으로도 게임은 100% 돌아간다.
+// v2: 여섯 종류가 전부 나온다 — 폴백만 봐도 상성이 도는 것이 보여야 한다.
 export const FALLBACK_WAVE = new Int16Array([
-  1200, 0,  1600, 0,  2400, 1,  1800, 0,
-  3000, 2,  1600, 1,  1400, 0,  2600, 1,
-  3400, 2,  1500, 0,  2000, 1,  2800, 0,
+  1200, C.U_SWORD,   1600, C.U_SPEAR,   2400, C.U_ARCHER,  1800, C.U_SWORD,
+  3000, C.U_CAV,     1600, C.U_SPEAR,   1400, C.U_SWORD,   2600, C.U_ARCHER,
+  3400, C.U_GIANT,   1500, C.U_SWORD,   2000, C.U_CAV,     2800, C.U_SPEAR,
+  3600, C.U_CATA,    1500, C.U_SWORD,   2200, C.U_ARCHER,  2000, C.U_GIANT,
 ]);
 
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -99,9 +120,19 @@ export class Game {
     this.traits = new Uint8Array(C.TRAITS.length);
     this.draftIdx = new Int8Array(C.TRAIT_OFFER);
     this.spawnCd = new Float32Array(C.UNIT_KINDS);
+    this.skillCd = new Float32Array(C.SKILL_COUNT);
+    this.skillUsed = new Uint16Array(C.SKILL_COUNT);
+    this.spawnedKind = new Uint16Array(C.UNIT_KINDS);
+    // 적 AI 가 매 판단마다 쓰는 가중치 버퍼. 여기서 한 번만 만든다.
+    this.aiMix = new Float32Array(C.UNIT_KINDS);
 
     this.reset();
   }
+
+  // 예전 이름 호환 — render.js·evaluate.mjs 가 game.nukeCd 를 읽는다.
+  // 해일이 필살기를 흡수했으므로 실체는 skillCd[SK_TIDE] 하나뿐이다.
+  get nukeCd() { return this.skillCd[C.SK_TIDE]; }
+  set nukeCd(v) { this.skillCd[C.SK_TIDE] = v; }
 
   // ── 리셋 ────────────────────────────────────────────────────
   reset() {
@@ -128,12 +159,22 @@ export class Game {
     this.xp = 0;
     this.era = 0;
     this.spawnCd.fill(0);
-    this.nukeCd = C.NUKE_CD * 0.45;    // 첫 판에도 한 번은 쓸 수 있게 절반만 채워 시작
+
+    // 스킬 셋. 첫 판에도 한 번은 쓸 수 있게 절반만 채워 시작한다.
+    for (let i = 0; i < C.SKILL_COUNT; i++) this.skillCd[i] = C.SKILL_CD[i] * 0.45;
+    this.skillUsed.fill(0);
+
+    // 기지 포탑. 0 = 아직 없다.
+    this.towerLv = 0;
+    this.towerCd = 0;
 
     this.aiGold = C.AI_GOLD_START;
     this.aiXp = 0;
     this.aiEra = 0;
     this.aiThink = 0;
+    this.aiHold = 0;
+    this.aiWait = 0;
+    this.aiPick = -1;      // 붙들고 있는 구매 예정 종류. -1 = 아직 안 정했다
     this.aiWaveIdx = 0;
     this.aiWaveTimer = FALLBACK_WAVE[0];
 
@@ -143,12 +184,15 @@ export class Game {
 
     // 통계 — 디렉터의 지표이자 결과 화면의 재료
     this.spawned = 0;
-    this.spawnedKind = new Uint16Array(C.UNIT_KINDS);
+    this.spawnedKind.fill(0);
     this.goldSpentUnits = 0;
     this.goldSpentEra = 0;
+    this.goldSpentTower = 0;
     this.kills = 0;
     this.lost = 0;
     this.nukes = 0;
+    this.counterHits = 0;
+    this.towerShots = 0;
     this.goldPeak = 0;
     this.goldSum = 0;
     this.goldSamples = 0;
@@ -228,6 +272,12 @@ export class Game {
     return need > 0 && this.xp >= need;
   }
 
+  // 다음 포탑 단계의 값. 최대면 -1.
+  towerCost() { return this.towerLv >= C.TOWER_MAX ? -1 : C.TOWER_COST[this.towerLv]; }
+  skillReady(i) {
+    return i >= 0 && i < C.SKILL_COUNT && this.skillCd[i] <= 0;
+  }
+
   // ── 입력 진입점 — main 의 입력 큐만 이걸 부른다 ──────────────
   input(act, simTs, wallTs) {
     if (this.state === S.OVER) {
@@ -237,14 +287,20 @@ export class Game {
     }
     if (this.state === S.DRAFT) {
       if (act >= ACT.PICK0 && act <= ACT.PICK2) this.pickTrait(act - ACT.PICK0);
-      // 유닛 버튼도 그대로 선택에 매핑한다 — 손이 이미 거기 있다
-      else if (act <= ACT.GIANT) this.pickTrait(act);
+      // 앞의 유닛 버튼 세 개도 그대로 선택에 매핑한다 — 손이 이미 거기 있다
+      else if (act < C.TRAIT_OFFER) this.pickTrait(act);
       return;
     }
+
+    // 행동 0~5 가 곧 유닛 종류 0~5 다. 변환도 분기도 없다.
+    if (act >= 0 && act < C.UNIT_KINDS) { this.buy(act); return; }
+
     switch (act) {
-      case ACT.SWORD: case ACT.ARCHER: case ACT.GIANT: this.buy(act); break;
       case ACT.ERA: this.buyEra(); break;
-      case ACT.NUKE: this.fireNuke(); break;
+      case ACT.TOWER: this.buyTower(); break;
+      case ACT.TIDE: this.useSkill(C.SK_TIDE); break;
+      case ACT.VOLLEY: this.useSkill(C.SK_VOLLEY); break;
+      case ACT.RALLY: this.useSkill(C.SK_RALLY); break;
       default: break;
     }
   }
@@ -257,7 +313,7 @@ export class Game {
     this.gold -= c;
     this.goldSpentUnits += c;
     this.spawnCd[kind] = this.spawnCooldown(kind);
-    this.spawn(SIDE_L, kind, this.era);
+    this.spawn(SIDE_L, kind, this.era, 0);
   }
 
   buyEra() {
@@ -272,21 +328,77 @@ export class Game {
     this.openDraft();
   }
 
-  fireNuke() {
-    if (this.nukeCd > 0) { this.emit(EV.COOLDOWN, -1, 0); return; }
-    this.nukeCd = C.NUKE_CD;
-    this.nukes++;
-    // 적 유닛 전부에게 피해. 기지는 건드리지 않는다 — 그러면 이건 승리 버튼이 된다
+  // 기지 포탑. 웅크리는 선택지에 실체를 준다 — 지금까지 수비는 그냥 지는 길이었다.
+  buyTower() {
+    const c = this.towerCost();
+    if (c < 0) { this.emit(EV.COOLDOWN, -1, 0); return; }
+    if (this.gold < c) { this.emit(EV.NO_GOLD, -1, 0); return; }
+    this.gold -= c;
+    // 포탑은 병력 지출로 센다. 디렉터가 "진화에 쓴 비중"을 볼 때
+    // 포탑 값이 분모에서 빠지면 수비형이 경제형으로 오독된다.
+    this.goldSpentUnits += c;
+    this.goldSpentTower += c;
+    this.towerLv++;
+    this.towerCd = C.TOWER_CD;      // 사자마자 쏘지는 않는다
+    this.emit(EV.TOWER_UP, this.towerLv, SIDE_L);
+  }
+
+  // ── 스킬 ────────────────────────────────────────────────────
+  // 해일 · 화살비 · 증원. 셋 다 쿨다운이 독립이고 전부 결정론적이다.
+  useSkill(i) {
+    if (i < 0 || i >= C.SKILL_COUNT) return;
+    if (this.state !== S.PLAY) return;
+    if (this.skillCd[i] > 0) { this.emit(EV.COOLDOWN, -1, 0); return; }
+    this.skillCd[i] = C.SKILL_CD[i];
+    this.skillUsed[i]++;
+    this.emit(EV.SKILL, i, SIDE_L);
+    if (i === C.SK_TIDE) this.doTide();
+    else if (i === C.SK_VOLLEY) this.doVolley();
+    else this.doRally();
+  }
+
+  // 예전 이름 호환. 필살기는 해일이 되었다.
+  fireNuke() { this.useSkill(C.SK_TIDE); }
+
+  // 해일 — 적 전체에 피해를 주고 물을 크게 민다.
+  // 기지는 건드리지 않는다. 그러면 이건 그냥 승리 버튼이 된다.
+  doTide() {
+    const dmg = C.SKILL_DMG[C.SK_TIDE];
     for (let i = 0; i < C.UNIT_MAX; i++) {
       if (!this.uAlive[i] || this.uSide[i] !== SIDE_R) continue;
-      this.damage(i, C.NUKE_DMG, SIDE_L);
+      this.damage(i, dmg, SIDE_L, -1);
     }
     this.water += C.NUKE_WATER_PUSH;
-    this.emit(EV.NUKE, 0, 0);
+    this.nukes++;
+    this.emit(EV.NUKE, 0, 0);     // feel·audio 의 기존 연출을 그대로 쓴다
+  }
+
+  // 화살비 — **전선 부근에만** 떨어진다. 아군은 한 대도 맞지 않는다.
+  // 해일과 다른 점은 "언제 쓰는가"다. 전선이 뭉쳐 있을 때만 값이 나온다.
+  doVolley() {
+    const cx = this.frontlineX();
+    const r = C.VOLLEY_RADIUS;
+    const dmg = C.SKILL_DMG[C.SK_VOLLEY];
+    for (let i = 0; i < C.UNIT_MAX; i++) {
+      if (!this.uAlive[i] || this.uSide[i] !== SIDE_R) continue;
+      const x = this.uX[i];
+      const d = x - cx;
+      if (d < -r || d > r) continue;
+      const gy = groundAt(x);
+      this.pushArrow(x, gy - 320, x, gy - C.U_H[this.uKind[i]] * 0.5, SIDE_L);
+      this.damage(i, dmg, SIDE_L, -1);
+    }
+  }
+
+  // 증원 — 현재 시대 검사를 공짜로 즉시 세운다. 한 점에 겹치지 않게 뒤로 벌린다.
+  doRally() {
+    for (let k = 0; k < C.RALLY_COUNT; k++) {
+      this.spawn(SIDE_L, C.U_SWORD, this.era, k * C.UNIT_GAP);
+    }
   }
 
   // ── 유닛 소환 ───────────────────────────────────────────────
-  spawn(side, kind, era) {
+  spawn(side, kind, era, xoff) {
     // 풀에서 빈 자리를 찾는다. 없으면 소환하지 않는다 — 조용히 실패해야
     // 프레임이 튀지 않는다.
     let idx = -1;
@@ -297,12 +409,13 @@ export class Game {
     if (idx < 0) return;
     this.uNext = (idx + 1) % C.UNIT_MAX;
 
+    const off = xoff > 0 ? xoff : 0;
     const hp = this.statHp(kind, era, side);
     this.uAlive[idx] = 1;
     this.uSide[idx] = side;
     this.uKind[idx] = kind;
     this.uEra[idx] = era;
-    this.uX[idx] = side === SIDE_L ? C.SPAWN_L_X : C.SPAWN_R_X;
+    this.uX[idx] = side === SIDE_L ? C.SPAWN_L_X - off : C.SPAWN_R_X + off;
     this.uPrevX[idx] = this.uX[idx];
     this.uHp[idx] = hp;
     this.uHpMax[idx] = hp;
@@ -330,6 +443,7 @@ export class Game {
     this.stepEconomy();
     this.stepAI();
     this.stepUnits();
+    this.stepTower();
     this.stepArrows();
     this.stepWater();
     this.checkEnd();
@@ -349,14 +463,22 @@ export class Game {
         if (this.spawnCd[k] < 0) this.spawnCd[k] = 0;
       }
     }
-    if (this.nukeCd > 0) {
-      this.nukeCd -= C.SIM_DT;
-      if (this.nukeCd < 0) this.nukeCd = 0;
+    for (let k = 0; k < C.SKILL_COUNT; k++) {
+      if (this.skillCd[k] > 0) {
+        this.skillCd[k] -= C.SIM_DT;
+        if (this.skillCd[k] < 0) this.skillCd[k] = 0;
+      }
     }
 
     // 적도 같은 규칙으로 번다. 레버가 배수를 준다.
+    // 레버 값이 깨져 있으면 배수를 무시한다. aiGold 가 한 번 NaN 이 되면
+    // "살 돈이 있는가" 비교가 전부 false 가 되어 적이 무한히 쏟아진다 —
+    // 판이 즉사로 끝나는데 원인이 여기라는 것을 아무도 못 찾는다.
     let rate = C.AI_GOLD_RATE;
-    if (this.supplier && this.supplier.levers) rate *= this.supplier.levers.goldMul;
+    if (this.supplier && this.supplier.levers) {
+      const m = +this.supplier.levers.goldMul;
+      if (m > 0) rate *= m;
+    }
     this.aiGold += rate * dt;
   }
 
@@ -370,7 +492,9 @@ export class Game {
 
     // 시대 진화 — 경험치가 차면 올린다. 레버가 문턱을 조절한다.
     if (this.aiEra + 1 < C.ERA_COUNT) {
-      const need = C.AI_ERA_XP[this.aiEra + 1] * (lv ? lv.eraThresh : 1);
+      let th = lv ? +lv.eraThresh : 1;
+      if (!(th > 0)) th = 1;
+      const need = C.AI_ERA_XP[this.aiEra + 1] * th;
       if (this.aiXp >= need) {
         this.aiXp -= need;
         this.aiEra++;
@@ -383,7 +507,7 @@ export class Game {
       this.aiWaveTimer -= C.AI_THINK_MS;
       if (this.aiWaveTimer <= 0) {
         const kind = FALLBACK_WAVE[this.aiWaveIdx * 2 + 1];
-        this.spawn(SIDE_R, kind, this.aiEra);
+        this.spawn(SIDE_R, kind, this.aiEra, 0);
         this.aiWaveIdx = (this.aiWaveIdx + 1) % (FALLBACK_WAVE.length / 2);
         this.aiWaveTimer = FALLBACK_WAVE[this.aiWaveIdx * 2];
       }
@@ -392,27 +516,84 @@ export class Game {
 
     // 레버가 정한 구성비대로, 살 수 있으면 산다.
     // 무엇을 뽑을지는 mix 로, 얼마나 자주 뽑을지는 tempo 로 정해진다.
-    if (this.aiHold === undefined) this.aiHold = 0;
     this.aiHold -= C.AI_THINK_MS;
     if (this.aiHold > 0) return;
 
-    const kind = this.pickAiKind(lv);
-    const c = this.aiCost(kind);
-    if (this.aiGold < c) return;
-    this.aiGold -= c;
-    this.spawn(SIDE_R, kind, this.aiEra);
-    this.aiHold = lv.tempo;
+    const total = this.loadAiMix(lv);
+
+    // **뽑을 것을 정했으면 살 때까지 붙든다.**
+    // 판단마다 다시 뽑으면 비싼 유닛이 나올 때마다 "못 사니 다음 판단" 이 되고,
+    // 다음 판단에서는 싼 유닛이 뽑혀 그냥 사 버린다 — 그래서 적이 영원히
+    // 검사만 뽑는다. 구성비를 줬는데 구성이 안 갈리는 이유가 이거였다.
+    if (this.aiPick < 0) this.aiPick = this.pickAiKind(total);
+    let kind = this.aiPick;
+
+    if (this.aiGold < this.aiCost(kind)) {
+      // 모으는 것은 좋다. 다만 **영원히 모으면 안 된다** —
+      // 적이 아무것도 안 내보내는 구간이 생기면 판이 그대로 늘어진다.
+      this.aiWait++;
+      if (this.aiWait < 8) return;
+      const alt = this.cheapestAffordable();
+      if (alt < 0) return;
+      kind = alt;
+    }
+    this.aiPick = -1;
+    this.aiWait = 0;
+    this.aiGold -= this.aiCost(kind);
+    this.spawn(SIDE_R, kind, this.aiEra, 0);
+    const tempo = +lv.tempo;
+    this.aiHold = tempo > 0 ? tempo : C.AI_THINK_MS;
+  }
+
+  // 레버의 mix 를 길이 6 가중치 버퍼로 옮긴다.
+  // **길이가 6이 아니어도 게임은 돌아가야 한다.** 밸런스 감독이 아직 스키마를
+  // 안 늘렸을 수 있고, 그때 게임이 죽으면 그건 이쪽 잘못이다.
+  // 짧으면 앞에서부터 있는 만큼만 쓰고 나머지는 0으로 둔다.
+  loadAiMix(lv) {
+    const w = this.aiMix;
+    const mix = lv && lv.mix ? lv.mix : null;
+    const n = mix && mix.length > 0 ? (mix.length < C.UNIT_KINDS ? mix.length : C.UNIT_KINDS) : 0;
+    let total = 0;
+    for (let k = 0; k < C.UNIT_KINDS; k++) {
+      let v = 0;
+      if (k < n) {
+        v = +mix[k];
+        if (!(v > 0)) v = 0;      // NaN·음수·undefined 전부 0으로 떨어진다
+      }
+      w[k] = v;
+      total += v;
+    }
+    return total;
   }
 
   // 결정론적 선택. Math.random 없음 — 재현 불가능해지면 증거가 못 된다.
-  pickAiKind(lv) {
-    // mix 는 세 종류의 가중치다. 누적 합을 tick 기반 위상으로 자른다.
-    const total = lv.mix[0] + lv.mix[1] + lv.mix[2];
-    if (total <= 0) return C.U_SWORD;
-    const phase = ((this.tick * 2654435761) % 1000) / 1000 * total;
-    if (phase < lv.mix[0]) return C.U_SWORD;
-    if (phase < lv.mix[0] + lv.mix[1]) return C.U_ARCHER;
-    return C.U_GIANT;
+  // tick 을 정수 해시로 섞어 위상을 만든다. 같은 판이면 같은 순서가 나온다.
+  // total 은 loadAiMix() 가 방금 채운 aiMix 의 합이다.
+  pickAiKind(total) {
+    if (!(total > 0)) return C.U_SWORD;
+    let h = Math.imul(this.tick + 0x9E3779B9, 2654435761) >>> 0;
+    h ^= h >>> 15;
+    h = Math.imul(h, 2246822519) >>> 0;
+    h ^= h >>> 13;
+    const phase = (h % 100003) / 100003 * total;
+    let acc = 0;
+    for (let k = 0; k < C.UNIT_KINDS; k++) {
+      acc += this.aiMix[k];
+      if (phase < acc) return k;
+    }
+    return C.U_SWORD;
+  }
+
+  // 가중치가 있는 것 중 지금 살 수 있는 가장 싼 종류. 없으면 -1.
+  cheapestAffordable() {
+    let best = -1, bestC = 1e9;
+    for (let k = 0; k < C.UNIT_KINDS; k++) {
+      if (this.aiMix[k] <= 0) continue;
+      const c = this.aiCost(k);
+      if (c > this.aiGold || c >= bestC) continue;
+      bestC = c; best = k;
+    }
+    return best;
   }
 
   // ── 유닛 갱신 ───────────────────────────────────────────────
@@ -435,8 +616,9 @@ export class Game {
         if (this.uCd[i] <= 0) {
           this.uCd[i] = this.statCooldown(kind, side);
           this.uAttack[i] = 8;
-          this.damage(target, this.statDmg(kind, this.uEra[i], side), side);
-          if (kind === C.U_ARCHER) this.shoot(i, target, side);
+          // 상성은 여기서 곱해진다. damage() 안 한 곳에서만.
+          this.damage(target, this.statDmg(kind, this.uEra[i], side), side, kind);
+          if (kind === C.U_ARCHER || kind === C.U_CATA) this.shoot(i, target, side);
           this.emit(EV.ATTACK, kind, side);
         }
         continue;   // 싸우는 동안에는 전진하지 않는다
@@ -448,8 +630,13 @@ export class Game {
         if (this.uCd[i] <= 0) {
           this.uCd[i] = this.statCooldown(kind, side);
           this.uAttack[i] = 8;
-          let dmg = this.statDmg(kind, this.uEra[i], side) * C.BASE_DMG_MUL;
+          // 투석기는 기지를 부수라고 있는 유닛이다. U_BASE_MUL 이 그걸 정한다.
+          let dmg = this.statDmg(kind, this.uEra[i], side) * C.BASE_DMG_MUL * C.U_BASE_MUL[kind];
           if (side === SIDE_L && this.has('siege')) dmg *= 2;
+          if (kind === C.U_ARCHER || kind === C.U_CATA) {
+            const gy = groundAt(this.uX[i]);
+            this.pushArrow(this.uX[i], gy - C.U_H[kind] * 0.6, baseX, C.GROUND_Y - C.BASE_H * 0.5, side);
+          }
           this.hitBase(side === SIDE_L ? SIDE_R : SIDE_L, dmg);
         }
         continue;
@@ -465,22 +652,57 @@ export class Game {
     for (let i = 0; i < C.UNIT_MAX; i++) {
       if (!this.uAlive[i]) continue;
       if (groundAt(this.uX[i]) <= this.water) continue;
-      this.damage(i, C.DROWN_DPS * dt, this.uSide[i] === SIDE_L ? SIDE_R : SIDE_L);
+      this.damage(i, C.DROWN_DPS * dt, this.uSide[i] === SIDE_L ? SIDE_R : SIDE_L, -1);
     }
   }
 
+  // ── 기지 포탑 ───────────────────────────────────────────────
+  // 사거리 안에서 **가장 앞선 적**(내 기지에 가장 가까운 적)을 자동으로 쏜다.
+  // 뒤에 있는 적을 먼저 때리면 포탑이 방어를 못 한다.
+  stepTower() {
+    if (this.towerLv <= 0) return;
+    if (this.towerCd > 0) {
+      this.towerCd -= C.SIM_DT;
+      if (this.towerCd > 0) return;
+      this.towerCd = 0;
+    }
+    const bx = C.BASE_L_X;
+    let best = -1, bestX = 1e9;
+    for (let i = 0; i < C.UNIT_MAX; i++) {
+      if (!this.uAlive[i] || this.uSide[i] !== SIDE_R) continue;
+      const x = this.uX[i];
+      if (x - bx > C.TOWER_RANGE) continue;
+      if (x < bestX) { bestX = x; best = i; }
+    }
+    if (best < 0) return;
+
+    this.towerCd = C.TOWER_CD;
+    this.towerShots++;
+    // 시대가 오르면 포탑도 같이 큰다. 안 그러면 강철 시대부터 장식이 된다.
+    const dmg = C.TOWER_DMG[this.towerLv - 1] * C.ERA_DMG_MUL[this.era];
+    this.pushArrow(bx, C.GROUND_Y - C.BASE_H, bestX, groundAt(bestX) - C.U_H[this.uKind[best]] * 0.5, SIDE_L);
+    this.damage(best, dmg, SIDE_L, -1);
+    this.emit(EV.TOWER_FIRE, this.towerLv, SIDE_L);
+  }
+
   // 화살 하나를 띄운다. 판정과 무관하다 — 이미 맞은 것을 눈에 보이게 할 뿐이다.
-  shoot(from, to, side) {
+  pushArrow(x0, y0, x1, y1, side) {
     const a = this.aNext;
     this.aNext = (this.aNext + 1) % C.ARROW_MAX;
     const total = Math.max(1, Math.round(C.ARROW_MS / C.SIM_DT));
     this.aLife[a] = total;
     this.aTotal[a] = total;
-    this.aX0[a] = this.uX[from];
-    this.aY0[a] = groundAt(this.uX[from]) - C.U_H[C.U_ARCHER] * 0.6;
-    this.aX1[a] = this.uX[to];
-    this.aY1[a] = groundAt(this.uX[to]) - C.U_H[this.uKind[to]] * 0.5;
+    this.aX0[a] = x0; this.aY0[a] = y0;
+    this.aX1[a] = x1; this.aY1[a] = y1;
     this.aSide[a] = side;
+  }
+
+  shoot(from, to, side) {
+    const k = this.uKind[from];
+    this.pushArrow(
+      this.uX[from], groundAt(this.uX[from]) - C.U_H[k] * 0.6,
+      this.uX[to], groundAt(this.uX[to]) - C.U_H[this.uKind[to]] * 0.5,
+      side);
   }
 
   stepArrows() {
@@ -509,7 +731,18 @@ export class Game {
     return false;
   }
 
-  damage(idx, dmg, byWhom) {
+  // atkKind 를 넘기면 상성 배수가 여기서 곱해진다.
+  // 익사·해일·화살비·포탑처럼 "종류가 없는" 피해는 -1 을 넘긴다.
+  damage(idx, dmg, byWhom, atkKind) {
+    if (atkKind !== undefined && atkKind >= 0) {
+      const m = C.COUNTER[atkKind * C.UNIT_KINDS + this.uKind[idx]];
+      if (m > 1) {
+        dmg *= m;
+        this.counterHits++;
+        this.emit(EV.COUNTER_HIT, atkKind, byWhom);
+      }
+    }
+
     this.uHp[idx] -= dmg;
     this.uHitFlash[idx] = 4;
     if (this.uHp[idx] > 0) return;
@@ -550,7 +783,10 @@ export class Game {
     let rise = C.WATER_RISE;
     if (t > C.WATER_ACCEL_AT) rise *= C.WATER_ACCEL_MUL;
     if (this.has('drain')) rise *= 0.75;
-    if (this.supplier && this.supplier.levers) rise *= this.supplier.levers.waterMul;
+    if (this.supplier && this.supplier.levers) {
+      const m = +this.supplier.levers.waterMul;
+      if (m > 0) rise *= m;      // 깨진 값이면 무시한다. water 가 NaN 이 되면 판이 굳는다
+    }
 
     this.water -= rise * dt;                       // y가 작아질수록 높이 찬다
     if (this.water < C.WATER_MIN_Y) this.water = C.WATER_MIN_Y;
