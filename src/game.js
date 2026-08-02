@@ -1096,6 +1096,14 @@ export class Game {
     // 사령관 성격과 스테이지가 템포를 당긴다. 하한은 디렉터와 같은 420ms.
     let hold = (tempo > 0 ? tempo : C.AI_THINK_MS) * this.cmdTempoMul();
     hold /= (1 + (this.stageDiff() - 1) * 0.6);
+    // 쌍둥이자리 — **소환 한 번당 보너스는 자주 누르는 쪽에 유리하다.**
+    // 실측: 그냥 두었더니 쌍둥이만 승률 6/6 이었다(다른 열한 별자리는 2~4/6).
+    // 플레이어는 프레임마다 누르고 적은 템포로 뽑기 때문이다.
+    // 적에게는 같은 크기를 **빈도**로 돌려준다. 그래야 하늘이 편들지 않는다.
+    if (this.zod(C.ZOD_GEMINI)) {
+      const gn = C.ZOD_GEMINI_EVERY > 0 ? C.ZOD_GEMINI_EVERY : 3;
+      hold *= (gn - 1) / gn;
+    }
     this.aiHold = hold > 420 ? hold : 420;
   }
 
