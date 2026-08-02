@@ -38,7 +38,7 @@ const FONT_TINY = '12px ' + C.FONT_STACK;
 const FONT_MICRO = '10px ' + C.FONT_STACK;
 const FONT_BTN = '14px ' + C.FONT_STACK;
 // 폰 세로 전용 — 화면 전체가 0.4배가 되므로 UI 글자만 키운다. 문자열은 모듈에 굽는다
-const FONT_BTN_P = '21px ' + C.FONT_STACK;
+const FONT_BTN_P = '19px ' + C.FONT_STACK;
 const FONT_SMALL_P = '22px ' + C.FONT_STACK;
 const FONT_MICRO_P = '15px ' + C.FONT_STACK;
 
@@ -84,11 +84,21 @@ const LBL_NEXT_KEY = '아무 키나 눌러 다음 전투';
 const LBL_NEW_KEY = '아무 키나 눌러 새 원정';
 const LBL_BEATEN = '격파한 사령관';
 const LBL_SLASH = '/';
+const BR_TITLE = '차오른다';
+const BR_SUB = '금으로 병력을 사서 적 기지를 부순다. 버티면 물이 먼저 삼킨다.';
+const BR_1 = '적 기지를 부순다';
+const BR_2 = '금이 차면 병력을 산다';
+const BR_3 = '물이 차오른다';
+const BR_RING = '상성이 돈다 — 하나로 전부를 이길 수 없다';
+const BR_ARROW = '화살표 쪽이 이긴다';
+const BR_START = '아무 곳이나 눌러 시작';
 const CMD_NAME = C.COMMANDER_NAME || null;
 const CMD_TITLE = C.COMMANDER_TITLE || null;
 const CMD_LINE = C.COMMANDER_LINE || null;
 const CMD_TAUNT = C.COMMANDER_TAUNT || null;
 const CAMP_LEN = C.CAMPAIGN_LEN || 5;
+// game.js 가 S.BRIEF 를 아직 안 줬으면 -1 — 어떤 state 와도 안 같으므로 조용히 꺼진다
+const BRIEF = (typeof S.BRIEF === 'number') ? S.BRIEF : -1;
 
 const DV_TITLE = 'AI 디렉터';
 const DV_OBSERVING = '관찰 중';
@@ -155,7 +165,7 @@ const STRIP_W = C.BTN_COUNT * (BTN_W + BTN_GAP) - BTN_GAP + 6;
 const STRIP_MAXH = 92 + 6;
 
 // ── 사령관 카드 — 오른쪽 위. AI 토글(904~) 앞에서 끝난다 ──
-const CMD_X = 700, CMD_Y = 8, CMD_W = 196, CMD_H = 58;
+const CMD_X = 706, CMD_Y = 8, CMD_W = 190, CMD_H = 98;
 const CMD_PR = 21;                     // 초상 반지름
 const FX_LINE_F = 250;                 // 전투 시작 대사가 떠 있는 렌더 프레임
 const FX_TAUNT_F = 200;                // 도발
@@ -210,6 +220,16 @@ export class Renderer {
     this.btnScale = -1;
     this.bakedScale = -1;
     this.bakedEra = -1;
+    this.cmdCanvas = null;
+    this.cmdSig = -1;
+    this.cmdScale = -1;
+    this.briefCanvas = null;
+    this.briefScale = -1;
+    this.stageSeed = 0;              // 전투마다 지형·능선이 달라진다
+    this.bakedStage = -1;
+    this.bakedDip = -1;
+    this.fallX = FALL_X_L;
+    this.fallX2 = -1;
 
     // 결정론적 잡음. Math.random 을 쓰면 프레임마다 지형이 바뀐다.
     this.rnd = new Float32Array(RND_N);
@@ -226,6 +246,32 @@ export class Renderer {
 
   rn(i) { return this.rnd[i & (RND_N - 1)]; }
 
+  // 지금 상대하는 사령관. 필드가 없으면 -1 — 사령관 UI 를 통째로 안 그린다
+  commanderOf(game) {
+    if (!CMD_NAME) return -1;
+    const c = game.commander;
+    if (typeof c !== 'number') return -1;
+    const i = c | 0;
+    return (i >= 0 && i < CMD_NAME.length) ? i : -1;
+  }
+
+  // ── 전장 변주 — 전투마다 협곡이 다르다 ─────────────────────
+  // groundAt() 의 서명은 game.js 소유다. 여기서는 **결과를 관찰만** 한다 —
+  // 가운데 깊이가 바뀌었으면 정적 지형을 다시 굽는다. 능선·잡석 씨앗도
+  // 전투 번호로 흔들어 사령관마다 다른 전장이라는 인상을 만든다.
+  syncStage(game) {
+    const st = (typeof game.stage === 'number') ? (game.stage | 0) : 0;
+    const dip = groundAt(HALF_W);
+    if (st === this.bakedStage && Math.abs(dip - this.bakedDip) < 0.5) return;
+    this.bakedStage = st;
+    this.bakedDip = dip;
+    this.stageSeed = (st * 53) & 255;
+    this.fallX = FALL_X_L + (st * 17) % 44;
+    this.fallX2 = (st & 1) ? C.VIEW_W - FALL_X_L - (st * 23) % 44 : -1;
+    this.buildBackground();
+    this.bakedScale = -1;              // 오프스크린 배경을 다시 굽는다
+  }
+
   // ── 배경 — 전부 정적이다. 한 번만 굽는다 ────────────────────
   buildBackground() {
     // 격자 — 하늘의 눈금. 깊이만 담당한다
@@ -240,14 +286,15 @@ export class Renderer {
     }
 
     // 원경 — 능선 세 겹. 뒤로 갈수록 낮은 대비, 높은 위치
-    this.ridgeFar = this.buildRidge(13, 176, 250, 3);
-    this.ridgeMid = this.buildRidge(9, 128, 206, 11);
-    this.ridgeNear = this.buildRidge(6, 92, 156, 29);
+    const SD = this.stageSeed;
+    this.ridgeFar = this.buildRidge(13, 176, 250, 3 + SD);
+    this.ridgeMid = this.buildRidge(9, 128, 206, 11 + SD);
+    this.ridgeNear = this.buildRidge(6, 92, 156, 29 + SD);
     // 근경 능선의 등줄기 — 봉우리에서 발치로 내려긋는 선. 결이 있어야 바위로 읽힌다
     this.ridgeLines = new Path2D();
     for (let i = 0; i <= 6; i++) {
       const x = (C.VIEW_W / 6) * i;
-      const h = 92 + this.rn(29 + i * 5) * 64;
+      const h = 92 + this.rn(29 + SD + i * 5) * 64;
       this.ridgeLines.moveTo(x, C.GROUND_Y - h);
       this.ridgeLines.lineTo(x + 22, C.GROUND_Y);
       this.ridgeLines.moveTo(x, C.GROUND_Y - h);
@@ -302,9 +349,9 @@ export class Renderer {
     // 바닥 위 잡석 — 지면이 평면이 아니라 땅으로 읽히게 한다
     this.rubble = new Path2D();
     for (let i = 0; i < 46; i++) {
-      const x = 20 + this.rn(i * 3) * (C.VIEW_W - 40);
+      const x = 20 + this.rn(SD + i * 3) * (C.VIEW_W - 40);
       const g = groundAt(x);
-      const r = 2 + this.rn(i * 3 + 1) * 4;
+      const r = 2 + this.rn(SD + i * 3 + 1) * 4;
       this.rubble.moveTo(x - r, g);
       this.rubble.lineTo(x - r * 0.4, g - r * 0.9);
       this.rubble.lineTo(x + r * 0.5, g - r * 0.7);
@@ -501,6 +548,16 @@ export class Renderer {
     this.prevEra = new Int8Array(2);
     this.prevTick = -1;
 
+    // 원정·사령관 — 상태의 변화만 본다. 필드가 없으면 전부 -1 로 남아 아무 일도 안 난다
+    this.prevStage = -2;
+    this.prevProfile = -1;
+    this.prevObserving = 1;
+    this.fxLine = 0;                 // 전투 시작 대사
+    this.fxTaunt = 0;                // 도발
+    this.overTime = -1;              // 결과 화면에 **멈춘** 시간을 찍기 위해 판이 끝난 순간을 잡는다
+    this.foeMix = new Int32Array(C.UNIT_KINDS);   // 지금 살아 있는 적 구성
+    this.foeMax = 1;
+
     // 화살비 — 결정론적 산포. Math.random 을 쓰면 매 프레임 화살이 순간이동한다.
     this.vOff = new Float32Array(VOLLEY_N);
     this.vDelay = new Float32Array(VOLLEY_N);
@@ -658,7 +715,8 @@ export class Renderer {
     ctx.fillStyle = C.COL_BG;
     ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
 
-    this.pollFx(game);
+    this.pollFx(game, director);
+    this.syncStage(game);
 
     if (feel.shakeX !== 0 || feel.shakeY !== 0 || feel.shakeA !== 0) {
       ctx.translate(HALF_W + feel.shakeX, HALF_H + feel.shakeY);
@@ -691,13 +749,16 @@ export class Renderer {
     this.drawBanner(feel);
     if (game.state === S.DRAFT) this.drawDraft(game, feel, director);
     if (game.state === S.OVER) this.drawResult(game, feel, director);
+    // 설명 화면 — game.js 가 아직 S.BRIEF 를 안 줬으면 BRIEF 가 -1 이라 절대 안 걸린다
+    if (game.state === BRIEF) this.drawBrief(game, feel);
   }
 
   // ── 연출 트리거 — 상태의 변화만 본다 ────────────────────────
   // 쿨다운이 **올라간** 프레임이 곧 발동한 순간이다. 이벤트 배선이 없어도,
   // 그 필드가 아직 없어도 (undefined → 0) 조용히 아무 일도 안 일어난다.
-  pollFx(game) {
-    if (game.tick < this.prevTick) {          // 새 판
+  pollFx(game, director) {
+    const restart = game.tick < this.prevTick;
+    if (restart) {                            // 새 판
       this.fxSkill.fill(0);
       this.fxTower.fill(0);
       this.fxEra.fill(0);
@@ -705,8 +766,33 @@ export class Renderer {
       this.prevTowerCd.fill(0);
       this.prevTowerLv.fill(0);
       this.prevEra.fill(0);
+      this.prevProfile = -1;
+      this.prevObserving = 1;
     }
     this.prevTick = game.tick;
+
+    // ── 원정 — 전투가 바뀌면 사령관이 나타나 한마디 한다 ──
+    // game.js 가 아직 stage/commander 를 안 주면 stage 는 -1 로 남고 아무것도 안 뜬다.
+    const stage = (typeof game.stage === 'number') ? (game.stage | 0) : -1;
+    const cmd = this.commanderOf(game);
+    if (cmd >= 0 && (stage !== this.prevStage || restart)) this.fxLine = FX_LINE_F;
+    this.prevStage = stage;
+    if (this.fxLine > 0) this.fxLine--;
+
+    // ── 도발 — **디렉터가 플레이어를 새로 판정한 순간**이 곧 이 기능이다 ──
+    // 이벤트 배선 없이 판정값의 변화만 본다. 디렉터가 없으면 조용히 지나간다.
+    if (director) {
+      const pi = director.profileIdx | 0;
+      const obs = director.observing ? 1 : 0;
+      if (!obs && (pi !== this.prevProfile || this.prevObserving)) this.fxTaunt = FX_TAUNT_F;
+      this.prevProfile = pi;
+      this.prevObserving = obs;
+    }
+    if (this.fxTaunt > 0) this.fxTaunt--;
+
+    // 결과 화면의 시간은 **멈춰 있어야 한다.** 판이 끝난 순간을 한 번만 잡는다
+    if (game.state === S.OVER) { if (this.overTime < 0) this.overTime = game.elapsed(); }
+    else this.overTime = -1;
 
     const cds = game.skillCd;
     const front = game.frontlineX ? game.frontlineX() : HALF_W;
@@ -853,15 +939,21 @@ export class Renderer {
     if (!(fx > 0)) fx = HALF_W;
     if (fx < 24) fx = 24; else if (fx > C.VIEW_W - 24) fx = C.VIEW_W - 24;
 
+    // **선이 아니라 띠로 채운다.** 긴 stroke 는 소프트웨어 래스터에서
+    // 눈에 띄게 비싸다 (실측: 이 한 줄이 avg +0.5ms · 초과 +5회였다).
+    // 같은 그림을 폴리곤 두 개의 fill 로 내면 그 비용이 사라진다.
     for (let s = 0; s < 2; s++) {
       const x0 = s ? fx : 0, x1 = s ? C.VIEW_W : fx;
-      ctx.strokeStyle = s ? C.RAMP_STRUCT[C.rampIndex(0.62)] : C.RAMP_PLAYER[C.rampIndex(0.62)];
-      ctx.lineWidth = 4;
+      ctx.fillStyle = s ? C.RAMP_STRUCT[C.rampIndex(0.62)] : C.RAMP_PLAYER[C.rampIndex(0.62)];
       ctx.beginPath();
-      ctx.moveTo(x0, groundAt(x0) + 1);
-      for (let x = x0 + 16; x < x1; x += 16) ctx.lineTo(x, groundAt(x) + 1);
-      ctx.lineTo(x1, groundAt(x1) + 1);
-      ctx.stroke();
+      ctx.moveTo(x0, groundAt(x0) - 1);
+      for (let x = x0 + 48; x < x1; x += 48) ctx.lineTo(x, groundAt(x) - 1);
+      ctx.lineTo(x1, groundAt(x1) - 1);
+      ctx.lineTo(x1, groundAt(x1) + 3);
+      for (let x = x1 - 48; x > x0; x -= 48) ctx.lineTo(x, groundAt(x) + 3);
+      ctx.lineTo(x0, groundAt(x0) + 3);
+      ctx.closePath();
+      ctx.fill();
     }
     // 전선 말뚝 — 두 지배선이 맞닿는 자리
     const gy = groundAt(fx);
@@ -939,9 +1031,9 @@ export class Renderer {
     const wy = game.prevWater + (game.water - game.prevWater) * alpha;
     const t = game.simTime * 0.001;
 
-    {
-      const s = 0;
-      const x = FALL_X_L;
+    for (let s = 0; s < 2; s++) {
+      const x = s === 0 ? this.fallX : this.fallX2;
+      if (x < 0) continue;
       const g = groundAt(x);
       const bot = wy < g ? wy : g;
 
@@ -1251,10 +1343,13 @@ export class Renderer {
     bucket.fill(0);
 
     // 0) 한 번만 계산해 두고 여러 패스에서 나눠 쓴다
+    // 적 구성도 여기서 센다 — 이미 도는 루프다. HUD 가 "적이 뭘 뽑고 있나"를 그린다
+    this.foeMix.fill(0);
     let n = 0;
     for (let i = 0; i < C.UNIT_MAX; i++) {
       if (!game.uAlive[i]) continue;
       const kind = game.uKind[i];
+      if (game.uSide[i] === SIDE_R) this.foeMix[kind]++;
       const x = game.uPrevX[i] + (game.uX[i] - game.uPrevX[i]) * alpha;
       const grow = 1 + game.uEra[i] * 0.08;
       sx[i] = x;
@@ -1268,6 +1363,9 @@ export class Renderer {
       list[n++] = i;
     }
     this.aliveN = n;
+    let fmx = 3;
+    for (let k = 0; k < C.UNIT_KINDS; k++) if (this.foeMix[k] > fmx) fmx = this.foeMix[k];
+    this.foeMax = fmx;
 
     // 상성 우위로 때리는 중인가 — 공격 모션인 유닛만 앞쪽 칸을 훑는다
     for (let j = 0; j < n; j++) {
@@ -2235,6 +2333,7 @@ export class Renderer {
     this.drawFrontBar(game);
     this.drawWaterGauge(game);
 
+    this.drawCommander(game, director);
     if (director && directorView) this.drawDirectorView(game, director);
     this.drawToggle(directorView);
     this.drawMute(muted);
@@ -2344,6 +2443,255 @@ export class Renderer {
     ctx.fillStyle = C.COL_DANGER;
     ctx.fillText(LABEL_WATER, WG_X + WG_W * 0.5 - 4, WG_Y - 16);
     ctx.textAlign = 'left';
+  }
+
+  // ── 사령관 — AI 디렉터에게 얼굴을 준다 (spec-v3 §3) ─────────
+  // 카드(초상·이름·칭호·원정 진행·적 편성 아이콘)는 **거의 안 바뀐다.** 구워 둔다.
+  // 매 프레임 그리는 것은 편성 막대 두 번과 말풍선뿐이다.
+  drawCommander(game, director) {
+    const ctx = this.ctx;
+    const cmd = this.commanderOf(game);
+    if (cmd < 0) return;
+    const stage = (typeof game.stage === 'number') ? (game.stage | 0) : 0;
+    const stageMax = (typeof game.stageMax === 'number') ? (game.stageMax | 0) : CAMP_LEN;
+
+    const sig = cmd * 977 + stage * 31 + stageMax;
+    if (typeof document !== 'undefined') {
+      const s = this.viewScale > 2 ? 2 : (this.viewScale < 0.25 ? 0.25 : this.viewScale);
+      if (this.cmdSig !== sig || this.cmdScale !== s) {
+        const w = Math.ceil(CMD_W * s), h = Math.ceil(CMD_H * s);
+        if (!this.cmdCanvas) this.cmdCanvas = document.createElement('canvas');
+        if (this.cmdCanvas.width !== w || this.cmdCanvas.height !== h) {
+          this.cmdCanvas.width = w; this.cmdCanvas.height = h;
+        }
+        const octx = this.cmdCanvas.getContext('2d');
+        const prev = this.ctx;
+        this.ctx = octx;
+        octx.setTransform(s, 0, 0, s, -CMD_X * s, -CMD_Y * s);
+        octx.clearRect(CMD_X, CMD_Y, CMD_W, CMD_H);
+        this.paintCommanderCard(cmd, stage, stageMax);
+        this.ctx = prev;
+        this.cmdSig = sig; this.cmdScale = s;
+      }
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(this.cmdCanvas, CMD_X, CMD_Y, CMD_W, CMD_H);
+      ctx.imageSmoothingEnabled = true;
+    } else {
+      this.paintCommanderCard(cmd, stage, stageMax);
+    }
+
+    // 적 편성 막대 — **"적이 뭘 뽑고 있나"가 1초 안에 읽혀야 한다.**
+    // 지금 살아 있는 적 구성이다. 아이콘 줄은 카드에 구워져 있고 여기서는 막대만 칠한다.
+    const mx = CMD_X + 10, mw = CMD_W - 20, cw = mw / C.UNIT_KINDS;
+    const my = CMD_Y + 54, mh = 16;
+    ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.16)];
+    ctx.beginPath();
+    for (let k = 0; k < C.UNIT_KINDS; k++) ctx.rect(mx + cw * k + 2, my, cw - 4, mh);
+    ctx.fill();
+    ctx.fillStyle = C.COL_STRUCT;
+    ctx.beginPath();
+    let anyF = 0;
+    for (let k = 0; k < C.UNIT_KINDS; k++) {
+      const v = this.foeMix[k];
+      if (v <= 0) continue;
+      const f = v / this.foeMax;
+      ctx.rect(mx + cw * k + 2, my + mh * (1 - f), cw - 4, mh * f);
+      anyF = 1;
+    }
+    if (anyF) ctx.fill();
+
+    // 도발 중이면 초상에 금빛 고리가 돈다 — 놓치지 않게
+    if (this.fxTaunt > 0) {
+      const t = this.fxTaunt / FX_TAUNT_F;
+      const px = CMD_X + 8 + CMD_PR, py = CMD_Y + 6 + CMD_PR;
+      ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(0.35 + 0.65 * t)];
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(px, py, CMD_PR + 4 + (1 - t) * 7, 0, TAU);
+      ctx.stroke();
+      ctx.lineWidth = C.STROKE;
+    }
+
+    // 말풍선 — 도발이 대사보다 우선한다
+    if (this.fxTaunt > 0) {
+      this.drawBubble(CMD_TAUNT ? CMD_TAUNT[cmd] : null,
+                      director && !director.observing ? director.profileName : null,
+                      1 - this.fxTaunt / FX_TAUNT_F, 1);
+    } else if (this.fxLine > 0) {
+      this.drawBubble(CMD_LINE ? CMD_LINE[cmd] : null, null,
+                      1 - this.fxLine / FX_LINE_F, 0);
+    }
+  }
+
+  // 말풍선 — 카드 아래에서 오른쪽 정렬로 자란다. 하늘 쪽이라 전장을 안 가린다.
+  // 문자열을 만들지 않는다. 폭은 글자 수로 잡는다 (measureText 는 객체를 만든다).
+  drawBubble(text, tag, t, taunt) {
+    if (!text) return;
+    const ctx = this.ctx;
+    const fade = t > 0.85 ? 1 - (t - 0.85) / 0.15 : 1;
+    const grow = t < 0.12 ? easeOutBack(t / 0.12) : 1;
+    const fs = taunt ? 19 : 16;
+    let w = text.length * fs * 0.94 + 30;
+    if (w > BUB_W_MAX) w = BUB_W_MAX;
+    const h = tag ? 56 : 40;
+    const x = CMD_X + CMD_W - w * grow, y = CMD_Y + CMD_H + 10;
+
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.94 * fade)];
+    ctx.beginPath();
+    ctx.roundRect(x, y, w * grow, h, 7);
+    ctx.moveTo(CMD_X + CMD_W - 40, y - 9);       // 꼬리 — 초상 쪽을 가리킨다
+    ctx.lineTo(CMD_X + CMD_W - 18, y + 1);
+    ctx.lineTo(CMD_X + CMD_W - 42, y + 1);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = (taunt ? C.RAMP_BONUS : C.RAMP_STRUCT)[C.rampIndex((taunt ? 0.95 : 0.6) * fade)];
+    ctx.lineWidth = taunt ? 2.5 : 1.6;
+    ctx.beginPath();
+    ctx.roundRect(x + 0.5, y + 0.5, w * grow - 1, h - 1, 7);
+    ctx.stroke();
+    ctx.lineWidth = C.STROKE;
+    if (grow < 1) return;
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    let ty = y + 11;
+    if (tag) {
+      ctx.font = FONT_MICRO;
+      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.85 * fade)];
+      ctx.fillText(LBL_READ, x + 14, ty);
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.75 * fade)];
+      ctx.fillText(tag, x + 14 + LBL_READ.length * 10.5, ty);
+      ty += 17;
+    }
+    ctx.font = taunt ? FONT_MID : FONT_SMALL;
+    ctx.fillStyle = taunt ? C.RAMP_BONUS[C.rampIndex(fade)] : C.RAMP_PLAYER[C.rampIndex(0.9 * fade)];
+    ctx.fillText(text, x + 14, ty);
+  }
+
+  // 카드 한 장 — 초상 · 이름 · 칭호 · 원정 진행 · 적 편성 아이콘 줄
+  paintCommanderCard(cmd, stage, stageMax) {
+    const ctx = this.ctx;
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.92)];
+    ctx.beginPath();
+    ctx.roundRect(CMD_X, CMD_Y, CMD_W, CMD_H, 7);
+    ctx.fill();
+    ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.5)];
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(CMD_X + 0.5, CMD_Y + 0.5, CMD_W - 1, CMD_H - 1, 7);
+    ctx.stroke();
+    ctx.lineWidth = C.STROKE;
+
+    const px = CMD_X + 8 + CMD_PR, py = CMD_Y + 6 + CMD_PR;
+    this.drawEmblem(cmd, px, py, CMD_PR);
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    const tx = CMD_X + CMD_PR * 2 + 18;
+    ctx.font = FONT_MID;
+    ctx.fillStyle = C.COL_STRUCT;
+    ctx.fillText(CMD_NAME[cmd], tx, CMD_Y + 8);
+    ctx.font = FONT_MICRO;
+    ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.62)];
+    if (CMD_TITLE) ctx.fillText(CMD_TITLE[cmd], tx + CMD_NAME[cmd].length * 20 + 6, CMD_Y + 15);
+
+    // 원정 진행 — 몇 번째 전투인가. 지나온 칸은 금색이다
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.9)];
+    ctx.beginPath();
+    for (let i = 0; i < stageMax; i++) {
+      if (i >= stage) continue;
+      ctx.rect(tx + i * 13, CMD_Y + 32, 9, 6);
+    }
+    ctx.fill();
+    ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.28)];
+    ctx.beginPath();
+    for (let i = 0; i < stageMax; i++) {
+      if (i <= stage) continue;
+      ctx.rect(tx + i * 13, CMD_Y + 32, 9, 6);
+    }
+    ctx.fill();
+    ctx.fillStyle = C.COL_PLAYER;                       // 지금 전투
+    ctx.fillRect(tx + stage * 13, CMD_Y + 31, 9, 8);
+    ctx.font = FONT_MICRO;
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
+    ctx.fillText(LBL_STAGE, tx + stageMax * 13 + 6, CMD_Y + 32);
+    this.drawLeft(stage + 1, tx + stageMax * 13 + 24, CMD_Y + 32, 7);
+    ctx.fillText(LBL_SLASH, tx + stageMax * 13 + 32, CMD_Y + 32);
+    this.drawLeft(stageMax, tx + stageMax * 13 + 38, CMD_Y + 32, 7);
+
+    // 적 편성 아이콘 줄 — 막대는 매 프레임 위에 얹는다
+    const mx = CMD_X + 10, mw = CMD_W - 20, cw = mw / C.UNIT_KINDS;
+    for (let k = 0; k < C.UNIT_KINDS; k++) {
+      this.drawMixIcon(k, mx + cw * (k + 0.5), CMD_Y + 83, C.RAMP_STRUCT[C.rampIndex(0.8)]);
+    }
+  }
+
+  // ── 사령관 문장(紋章) — 사진이 아니라 기호다 ────────────────
+  // 여섯 색 안에서 다섯이 갈리려면 **형태가 서로 다른 종류**여야 한다:
+  //   무리 = 점의 무리 · 쇄도 = 겹친 화살촉 · 금고 = 금화와 자물쇠
+  //   성벽 = 총안 있는 벽 · 거울 = 좌우 대칭축
+  drawEmblem(cmd, cx, cy, r) {
+    const ctx = this.ctx;
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(1)];
+    ctx.beginPath();
+    this.addCircle(cx, cy, r);
+    ctx.fill();
+    ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.55)];
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    this.addCircle(cx, cy, r);
+    ctx.stroke();
+
+    ctx.fillStyle = C.COL_STRUCT;
+    ctx.beginPath();
+    const u = r / 21;                       // 21 기준으로 그리고 배율만 곱한다
+    if (cmd === 0) {                        // 무리 — 점이 떼로 몰려온다
+      for (let row = 0; row < 3; row++) {
+        const n = 3 - Math.abs(row - 1);
+        for (let k = 0; k < n; k++) {
+          const px = cx + (row - 1) * 9 * u;
+          const py = cy + (k - (n - 1) * 0.5) * 9 * u;
+          this.addSpike(px + 4 * u, py, -1, 0, 8 * u, 3.4 * u);
+        }
+      }
+    } else if (cmd === 1) {                 // 쇄도 — 겹친 화살촉
+      for (let k = 0; k < 3; k++) {
+        const ox = cx + 11 * u - k * 9 * u;
+        ctx.moveTo(ox, cy - 11 * u);
+        ctx.lineTo(ox - 9 * u, cy);
+        ctx.lineTo(ox, cy + 11 * u);
+        ctx.lineTo(ox - 3.4 * u, cy + 11 * u);
+        ctx.lineTo(ox - 12.4 * u, cy);
+        ctx.lineTo(ox - 3.4 * u, cy - 11 * u);
+        ctx.closePath();
+      }
+    } else if (cmd === 2) {                 // 금고 — 자물쇠 손잡이와 금화
+      ctx.rect(cx - 12 * u, cy - 7 * u, 24 * u, 18 * u);
+      ctx.rect(cx - 7 * u, cy - 13 * u, 14 * u, 6 * u);
+    } else if (cmd === 3) {                 // 성벽 — 총안
+      ctx.rect(cx - 13 * u, cy - 3 * u, 26 * u, 15 * u);
+      for (let k = 0; k < 3; k++) ctx.rect(cx - 13 * u + k * 10 * u, cy - 11 * u, 6 * u, 8 * u);
+    } else {                                // 거울 — 좌우 대칭
+      ctx.moveTo(cx - 3 * u, cy - 12 * u);
+      ctx.lineTo(cx - 3 * u, cy + 12 * u);
+      ctx.lineTo(cx - 14 * u, cy);
+      ctx.closePath();
+      ctx.moveTo(cx + 3 * u, cy - 12 * u);
+      ctx.lineTo(cx + 3 * u, cy + 12 * u);
+      ctx.lineTo(cx + 14 * u, cy);
+      ctx.closePath();
+    }
+    ctx.fill();
+
+    // 금색 한 점 — 다섯이 한 벌로 보이게 하는 표식. 자리가 다 다르다
+    ctx.fillStyle = C.COL_BONUS;
+    ctx.beginPath();
+    if (cmd === 0) this.addCircle(cx - 13 * u, cy, 3 * u);
+    else if (cmd === 1) this.addSpike(cx - 13 * u, cy, -1, 0, 7 * u, 3 * u);
+    else if (cmd === 2) this.addCircle(cx, cy + 2 * u, 5 * u);
+    else if (cmd === 3) ctx.rect(cx - 4 * u, cy + 1 * u, 8 * u, 11 * u);
+    else { ctx.rect(cx - 1 * u, cy - 15 * u, 2 * u, 30 * u); }
+    ctx.fill();
   }
 
   // ── 버튼 열 — 이 게임의 조작 전부 ───────────────────────────
@@ -2925,6 +3273,236 @@ export class Renderer {
     ctx.textAlign = 'left';
   }
 
+  // ── 설명 화면 — 심사자가 이 게임을 처음 보는 2초 ────────────
+  // **읽는 화면이 아니라 보는 화면이다.** 긴 문단은 아무도 안 읽는다.
+  // 좌우 기지 · 금으로 병력 · 차오르는 물, 그리고 **상성 고리**를 그림으로 말한다.
+  // 고리는 4순환(검사→창병→기병→궁수→검사)에 위성 둘(기병→투석기, 궁수→거인)이다.
+  // 전부 정적이므로 한 번 굽고, 매 프레임은 "눌러 시작"만 깜빡인다.
+  drawBrief(game, feel) {
+    const ctx = this.ctx;
+    if (typeof document !== 'undefined') {
+      const s = this.viewScale > 2 ? 2 : (this.viewScale < 0.25 ? 0.25 : this.viewScale);
+      if (this.briefScale !== s + LAY.portrait * 100) {
+        const w = Math.ceil(C.VIEW_W * s), h = Math.ceil(C.VIEW_H * s);
+        if (!this.briefCanvas) this.briefCanvas = document.createElement('canvas');
+        if (this.briefCanvas.width !== w || this.briefCanvas.height !== h) {
+          this.briefCanvas.width = w; this.briefCanvas.height = h;
+        }
+        const octx = this.briefCanvas.getContext('2d');
+        const prev = this.ctx;
+        this.ctx = octx;
+        octx.setTransform(s, 0, 0, s, 0, 0);
+        octx.clearRect(0, 0, C.VIEW_W, C.VIEW_H);
+        this.paintBrief();
+        this.ctx = prev;
+        this.briefScale = s + LAY.portrait * 100;
+      }
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(this.briefCanvas, 0, 0, C.VIEW_W, C.VIEW_H);
+      ctx.imageSmoothingEnabled = true;
+    } else {
+      this.paintBrief();
+    }
+    // 진짜 버튼 열을 설명 위에 다시 올린다 — 화살표가 가리키는 그 칸이다
+    this.drawButtons(game);
+    this.drawRally(game);
+    // 깜빡이는 안내 — 결정론이 아니어도 되는 유일한 곳이라 시뮬 시각으로 돈다
+    const pulse = 0.6 + 0.4 * Math.sin(game.simTime * 0.005);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = FONT_MID;
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(pulse)];
+    ctx.fillText(BR_START, HALF_W, LAY.y - 26);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+  }
+
+  paintBrief() {
+    const ctx = this.ctx;
+    // 화면을 덮되 **버튼 열은 위에 다시 올린다** (drawBrief 가 그 일을 한다).
+    // 설명이 가리키는 손가락 자리가 진짜 버튼이어야 배운다.
+    const H = LAY.y - 6;
+    ctx.fillStyle = C.COL_BG;
+    ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, C.VIEW_W, H);
+    ctx.clip();
+    ctx.strokeStyle = C.RAMP_GRID[C.rampIndex(0.55)];
+    ctx.lineWidth = 1;
+    ctx.stroke(this.bgPath);
+    ctx.restore();
+    ctx.lineWidth = C.STROKE;
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = FONT_BIG;
+    ctx.fillStyle = C.COL_PLAYER;
+    ctx.fillText(BR_TITLE, HALF_W, 40);
+    ctx.font = FONT_SMALL;
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.6)];
+    ctx.fillText(BR_SUB, HALF_W, 72);
+    ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(0.5)];
+    ctx.beginPath();
+    ctx.moveTo(HALF_W - 210, 90); ctx.lineTo(HALF_W + 210, 90);
+    ctx.stroke();
+
+    // ── 왼쪽 — 상성 고리. 이 화면에서 가장 중요한 그림이다 ──
+    ctx.font = FONT_MID;
+    ctx.fillStyle = C.COL_BONUS;
+    ctx.fillText(BR_RING, 286, 118);
+
+    const cx = 286, cy = 272, R = 78;
+    const NX = [cx, cx + R, cx, cx - R];
+    const NY = [cy - R, cy, cy + R, cy];
+    const NK = [C.U_SWORD, C.U_SPEAR, C.U_CAV, C.U_ARCHER];
+    const SX = 414, SY = 350, GX = 158, GY = 350;
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.85)];
+    ctx.beginPath();
+    for (let k = 0; k < 4; k++) {
+      const j = (k + 1) & 3;
+      this.addArrow(NX[k], NY[k], NX[j], NY[j], 30);
+    }
+    this.addArrow(NX[2], NY[2], SX, SY, 30);        // 기병 → 투석기
+    this.addArrow(NX[3], NY[3], GX, GY, 30);        // 궁수 → 거인
+    ctx.fill();
+
+    for (let k = 0; k < 4; k++) this.drawUnitBadge(NK[k], NX[k], NY[k], 1, C.COL_PLAYER);
+    this.drawUnitBadge(C.U_CATA, SX, SY, 1, C.COL_PLAYER);
+    this.drawUnitBadge(C.U_GIANT, GX, GY, 1, C.COL_PLAYER);
+
+    ctx.font = FONT_SMALL;
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.85)];
+    ctx.fillText(BTN_NAME[NK[0]], NX[0], NY[0] - 44);          // 위 칸은 이름을 위에
+    for (let k = 1; k < 4; k++) ctx.fillText(BTN_NAME[NK[k]], NX[k], NY[k] + 44);
+    ctx.fillText(BTN_NAME[C.U_CATA], SX, SY + 44);
+    ctx.fillText(BTN_NAME[C.U_GIANT], GX, GY + 44);
+    ctx.font = FONT_MICRO;
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.62)];
+    ctx.fillText(BR_ARROW, cx, cy);
+
+    // ── 오른쪽 — 판이 어떻게 굴러가는가. 세 줄 ──
+    const RX = 600;
+    ctx.textAlign = 'left';
+    for (let r = 0; r < 3; r++) {
+      const y = 150 + r * 84;
+      ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.75)];
+      ctx.beginPath();
+      ctx.roundRect(RX - 26, y - 34, 330, 68, 8);
+      ctx.fill();
+      ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(0.14)];
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(RX - 26, y - 34, 330, 68, 8);
+      ctx.stroke();
+      ctx.lineWidth = C.STROKE;
+
+      if (r === 0) {                                 // 기지 → 기지
+        ctx.fillStyle = C.COL_PLAYER;
+        ctx.beginPath();
+        ctx.rect(RX - 8, y - 14, 20, 28);
+        for (let k = 0; k < 3; k++) ctx.rect(RX - 8 + k * 7, y - 20, 5, 6);
+        ctx.fill();
+        ctx.fillStyle = C.COL_STRUCT;
+        ctx.beginPath();
+        ctx.rect(RX + 76, y - 14, 20, 28);
+        for (let k = 0; k < 3; k++) ctx.rect(RX + 76 + k * 7, y - 20, 5, 6);
+        ctx.fill();
+        ctx.fillStyle = C.COL_BONUS;
+        ctx.beginPath();
+        this.addBar(RX + 20, y, 1, 0, 34, 0, 2.4, 2.4);
+        this.addSpike(RX + 54, y, 1, 0, 14, 7);
+        ctx.fill();
+      } else if (r === 1) {                          // 금 → 병력
+        ctx.fillStyle = C.COL_BONUS;
+        ctx.beginPath();
+        this.addCircle(RX + 2, y, 12);
+        ctx.fill();
+        ctx.fillStyle = C.COL_BG;
+        ctx.beginPath();
+        this.addCircle(RX + 2, y, 4.6);
+        ctx.fill();
+        ctx.fillStyle = C.COL_BONUS;
+        ctx.beginPath();
+        this.addBar(RX + 22, y, 1, 0, 26, 0, 2.4, 2.4);
+        this.addSpike(RX + 48, y, 1, 0, 13, 7);
+        ctx.fill();
+        this.drawUnitBadge(C.U_SWORD, RX + 82, y, 0.9, C.COL_PLAYER);
+      } else {                                       // 물이 차오른다
+        ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.5)];
+        ctx.fillRect(RX - 10, y + 4, 116, 20);
+        ctx.fillStyle = C.COL_DANGER;
+        ctx.fillRect(RX - 10, y + 2, 116, 3);
+        ctx.beginPath();
+        for (let k = 0; k < 3; k++) {
+          const ax = RX + 8 + k * 40;
+          this.addBar(ax, y + 2, 0, -1, 18, 0, 2.2, 2.2);
+          this.addSpike(ax, y - 16, 0, -1, 11, 6.5);
+        }
+        ctx.fill();
+      }
+      ctx.font = FONT_SMALL;
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.8)];
+      ctx.fillText(r === 0 ? BR_1 : (r === 1 ? BR_2 : BR_3), RX + 132, y);
+    }
+
+    // ── 아래 — 진짜 버튼 열을 가리키는 화살표 ──
+    // 이 화면은 버튼을 덮지 않는다. 손가락이 갈 곳을 그림이 직접 가리킨다.
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.9)];
+    ctx.beginPath();
+    for (let k = 0; k < 2; k++) {
+      const ax = 214 + k * 532;
+      this.addBar(ax, H - 46, 0, 1, 22, 0, 2.6, 2.6);
+      this.addSpike(ax, H - 24, 0, 1, 15, 8.5);
+    }
+    ctx.fill();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+  }
+
+  // 두 점을 잇는 화살표. 양 끝을 gap 만큼 비워 아이콘을 안 덮는다
+  addArrow(x0, y0, x1, y1, gap) {
+    let dx = x1 - x0, dy = y1 - y0;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    const ux = dx / len, uy = dy / len;
+    const sx = x0 + ux * gap, sy = y0 + uy * gap;
+    const ex = x1 - ux * gap, ey = y1 - uy * gap;
+    const body = Math.sqrt((ex - sx) * (ex - sx) + (ey - sy) * (ey - sy)) - 14;
+    if (body <= 0) return;
+    this.addBar(sx, sy, ux, uy, body, 0, 2.2, 2.2);
+    this.addSpike(sx + ux * body, sy + uy * body, ux, uy, 14, 7);
+  }
+
+  // 유닛 배지 — 버튼 아이콘을 그대로 키워 쓴다. 버튼과 같은 그림이어야 배운다
+  drawUnitBadge(kind, cx, cy, sc, color) {
+    const ctx = this.ctx;
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(1)];
+    ctx.beginPath();
+    this.addCircle(cx, cy, 27 * sc);
+    ctx.fill();
+    ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(0.35)];
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    this.addCircle(cx, cy, 27 * sc);
+    ctx.stroke();
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(sc, sc);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    if (this.addBtnIconFill(kind, 0, 0)) ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    if (this.addBtnIconStroke(kind, 0, 0)) ctx.stroke();
+    ctx.fillStyle = C.COL_BG;
+    ctx.beginPath();
+    this.addBtnIconHole(kind, 0, 0);
+    ctx.fill();
+    ctx.restore();
+    ctx.lineWidth = C.STROKE;
+  }
+
   // ── 결과 ────────────────────────────────────────────────────
   drawResult(game, feel, director) {
     const ctx = this.ctx;
@@ -2932,36 +3510,103 @@ export class Renderer {
     const t = feel.resultStep / feel.resultSteps;
     const e = t >= 1 ? 1 : easeOutBack(t);
 
+    // 원정 상태 — 필드가 없으면 stage = -1 이고 예전 화면 그대로다
+    const stage = (typeof game.stage === 'number') ? (game.stage | 0) : -1;
+    const stageMax = (typeof game.stageMax === 'number') ? (game.stageMax | 0) : CAMP_LEN;
+    const won = game.outcome === C.WIN_PLAYER;
+    const campOver = !!game.campaignOver;
+    const camp = stage >= 0 && !!CMD_NAME;
+    const cleared = camp ? stage + (won ? 1 : 0) : 0;
+    const goNext = camp && won && !campOver;
+
     ctx.fillStyle = t >= 1 ? C.COL_BG : C.RAMP_BG[C.rampIndex(0.55 + 0.45 * t)];
     ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    const won = game.outcome === C.WIN_PLAYER;
-    const col = won ? C.RAMP_BONUS : (game.outcome === C.WIN_DROWN ? C.RAMP_DANGER : C.RAMP_PLAYER);
+    // 제목 — **전투 클리어와 원정 종료는 다르게 느껴져야 한다**
+    let title = won ? LABEL_WIN : (game.outcome === C.WIN_DROWN ? LABEL_DROWN : LABEL_LOSE);
+    if (camp) {
+      if (goNext) title = LBL_CLEAR;
+      else if (cleared >= stageMax) title = LBL_CAMP_WIN;
+      else title = LBL_CAMP_END;
+    }
+    const col = (won || cleared >= stageMax) ? C.RAMP_BONUS
+      : (game.outcome === C.WIN_DROWN ? C.RAMP_DANGER : C.RAMP_PLAYER);
+    const topY = camp ? HALF_H - C.UNIT * 20 : HALF_H - C.UNIT * 15;
     ctx.strokeStyle = col[C.rampIndex(0.4 * e)];
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(HALF_W - 200 * e, HALF_H - C.UNIT * 15); ctx.lineTo(HALF_W + 200 * e, HALF_H - C.UNIT * 15);
-    ctx.moveTo(HALF_W - 200 * e, HALF_H - C.UNIT * 7.5); ctx.lineTo(HALF_W + 200 * e, HALF_H - C.UNIT * 7.5);
+    ctx.moveTo(HALF_W - 200 * e, topY); ctx.lineTo(HALF_W + 200 * e, topY);
+    ctx.moveTo(HALF_W - 200 * e, topY + C.UNIT * 7.5); ctx.lineTo(HALF_W + 200 * e, topY + C.UNIT * 7.5);
     ctx.stroke();
     ctx.lineWidth = C.STROKE;
     ctx.font = FONT_BIG;
     ctx.fillStyle = col[C.rampIndex(1)];
-    ctx.fillText(won ? LABEL_WIN : (game.outcome === C.WIN_DROWN ? LABEL_DROWN : LABEL_LOSE),
-                 HALF_W, HALF_H - C.UNIT * 11.2);
+    ctx.fillText(title, HALF_W, topY + C.UNIT * 3.8);
 
-    if (director && director.deathLine && !won) {
+    // 원정 행렬 — 다섯 사령관. 격파한 자는 금색이고 가위표가 쳐진다.
+    // 이 한 줄이 "한 판"이 아니라 "여정"이라고 말한다.
+    if (camp) {
+      const n = stageMax < CMD_NAME.length ? stageMax : CMD_NAME.length;
+      const gap = 96, x0 = HALF_W - (n - 1) * gap * 0.5;
+      const ey = topY + C.UNIT * 16;
+      ctx.font = FONT_MICRO;
+      for (let i = 0; i < n; i++) {
+        const ex = x0 + i * gap;
+        const beaten = i < cleared;
+        this.drawEmblem(i, ex, ey, 26 * (beaten ? 1 : 0.86));
+        if (beaten) {                        // 격파 — 금색 가위표
+          ctx.strokeStyle = C.COL_BONUS;
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.moveTo(ex - 16, ey - 16); ctx.lineTo(ex + 16, ey + 16);
+          ctx.moveTo(ex + 16, ey - 16); ctx.lineTo(ex - 16, ey + 16);
+          ctx.stroke();
+          ctx.lineWidth = C.STROKE;
+        } else if (i === cleared) {          // 다음 상대 — 흰 고리
+          ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(0.9)];
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.arc(ex, ey, 31, 0, TAU);
+          ctx.stroke();
+          ctx.lineWidth = C.STROKE;
+        }
+        ctx.fillStyle = beaten ? C.COL_BONUS
+          : (i === cleared ? C.COL_PLAYER : C.RAMP_STRUCT[C.rampIndex(0.45)]);
+        ctx.fillText(CMD_NAME[i], ex, ey + 40);
+      }
+      ctx.font = FONT_SMALL;
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.55)];
+      ctx.fillText(LBL_BEATEN, HALF_W, ey - 44);
+      ctx.fillStyle = C.COL_BONUS;
+      this.drawNumber(cleared, HALF_W + 54, ey - 44, 10);
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.45)];
+      ctx.fillText(LBL_SLASH, HALF_W + 64, ey - 44);
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.7)];
+      this.drawNumber(stageMax, HALF_W + 76, ey - 44, 10);
+      // 다음 상대의 대사 한 줄 — "한 판 더"가 눌리는 자리다
+      if (goNext && cleared < CMD_NAME.length && CMD_LINE) {
+        ctx.font = FONT_MICRO;
+        ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.7)];
+        ctx.fillText(LBL_NEXT_FOE, HALF_W, ey + 64);
+        ctx.font = FONT_SMALL;
+        ctx.fillStyle = C.COL_STRUCT;
+        ctx.fillText(CMD_LINE[cleared], HALF_W, ey + 86);
+      }
+    }
+
+    if (director && director.deathLine && !won && !camp) {
       ctx.font = FONT_SMALL;
       ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
       ctx.fillText(director.deathLine, HALF_W, HALF_H - C.UNIT * 5);
     }
 
-    // 통계 다섯 — 라벨은 오른쪽 정렬, 값은 왼쪽 정렬
+    // 통계 — 원정 화면에서는 줄을 줄인다. 숫자보다 여정이 먼저다
     ctx.font = FONT_SMALL;
     const lx = HALF_W - C.UNIT * 2, vx = HALF_W + C.UNIT * 2;
-    let y = HALF_H - C.UNIT * 0.5;
+    let y = camp ? HALF_H + C.UNIT * 11 : HALF_H - C.UNIT * 0.5;
     const row = (label, drawVal) => {
       ctx.textAlign = 'right';
       ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.55)];
@@ -2969,21 +3614,31 @@ export class Renderer {
       ctx.textAlign = 'left';
       ctx.fillStyle = C.COL_PLAYER;
       drawVal(vx, y);
+      ctx.textAlign = 'center';
       y += C.UNIT * 3.4;
     };
+    // **판이 끝난 순간에 멈춘 시간**을 찍는다. elapsed() 를 매 프레임 읽으면
+    // 결과 화면에서 시간이 계속 늘어난다 (실제로 그렇게 보였다)
+    const secs = this.overTime >= 0 ? this.overTime : game.elapsed();
     row(LABEL_TIME, (x, yy) => {
-      const w = this.drawFixed1(game.elapsed() * e, x, yy);
+      const w = this.drawFixed1(secs * e, x, yy);
       ctx.fillText(LABEL_S, x + w + 2, yy);
     });
-    row(LABEL_KILL, (x, yy) => this.drawLeft(game.kills * e, x, yy, 9));
-    row(LABEL_LOST, (x, yy) => this.drawLeft(game.lost * e, x, yy, 9));
-    row(LABEL_SPAWN, (x, yy) => this.drawLeft(game.spawned * e, x, yy, 9));
+    if (!camp) {
+      row(LABEL_KILL, (x, yy) => this.drawLeft(game.kills * e, x, yy, 9));
+      row(LABEL_LOST, (x, yy) => this.drawLeft(game.lost * e, x, yy, 9));
+      row(LABEL_SPAWN, (x, yy) => this.drawLeft(game.spawned * e, x, yy, 9));
+    } else {
+      row(LABEL_KILL, (x, yy) => this.drawLeft(game.kills * e, x, yy, 9));
+    }
     row(LABEL_PROFILE, (x, yy) =>
       ctx.fillText(director ? director.profileName : PROFILE_UNKNOWN, x, yy));
 
     ctx.textAlign = 'center';
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.6)];
-    ctx.fillText(LABEL_RETRY, HALF_W, C.VIEW_H - C.UNIT * 5);
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(goNext ? 0.95 : 0.6)];
+    ctx.font = goNext ? FONT_MID : FONT_SMALL;
+    ctx.fillText(camp ? (goNext ? LBL_NEXT_KEY : LBL_NEW_KEY) : LABEL_RETRY,
+                 HALF_W, C.VIEW_H - C.UNIT * 4);
     ctx.textBaseline = 'top';
     ctx.textAlign = 'left';
   }

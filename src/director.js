@@ -328,6 +328,7 @@ export class Director {
 
     this.candidates = new Int32Array(512);
     this.lastChunk = -1;
+    this.lastSub = -1;
     this.lastSwitchChunk = -99;
 
     // 레버의 mix 는 매번 새로 만들지 않고 이 버퍼를 덮어쓴다.
@@ -437,6 +438,7 @@ export class Director {
     for (let k = 0; k < KINDS; k++) this.wKind[k].reset();
     this.beginChunk(this.game);
     this.lastChunk = -1;
+    this.lastSub = -1;
     this.lastSwitchChunk = -99;
     this.observing = true;
     this.reasonIdx = 0;

@@ -652,9 +652,12 @@ export class Game {
     if (d.observing) return;                     // 관찰 중은 판정이 아니다
     const idx = d.profileIdx;
     if (!Number.isInteger(idx) || idx < 0) return;
-    if (idx === this.tauntProfile) return;
+    // 밸런스 감독이 justSwitched 를 내놓으면 **그쪽이 정본이다** —
+    // 같은 프로파일로 "다시" 판정한 것까지 잡아 준다. 없으면 값 변화로 감지한다.
+    const flagged = (d.justSwitched === true);
+    if (!flagged && idx === this.tauntProfile) return;
     // 첫 판정이 '균형'이면 그건 아직 아무것도 못 읽은 것이다. 말없이 받아 둔다.
-    if (this.tauntProfile < 0 && idx === C.PROFILE_NEUTRAL) { this.tauntProfile = idx; return; }
+    if (!flagged && this.tauntProfile < 0 && idx === C.PROFILE_NEUTRAL) { this.tauntProfile = idx; return; }
     // 너무 잦으면 시끄럽다. 최소 간격을 둔다.
     if (this.simTime - this.tauntAt < C.TAUNT_MIN_MS) return;
     this.tauntProfile = idx;
@@ -1197,7 +1200,9 @@ export class Game {
       this.gold += C.U_BOUNTY[kind] * (this.has('loot') ? 2 : 1);
       this.xp += xpGain * (this.has('study') ? 1.4 : 1);
       // 적을 잡으면 물이 밀린다. **공격이 곧 생존이다** — 이게 교착을 푼다.
-      this.water += C.WATER_KILL_PUSH * (this.has('revive') ? 1.8 : 1);
+      // 다만 시간이 갈수록 덜 밀린다. 안 그러면 오래 싸울수록 물이 사라져
+      // 마감 시계가 꺼진다 (config 의 WATER_PUSH_FADE_MS 주석 참조).
+      this.water += C.WATER_KILL_PUSH * (this.has('revive') ? 1.8 : 1) * this.waterPushK();
     } else {
       this.lost++;
       this.aiXp += xpGain;
@@ -1206,6 +1211,15 @@ export class Game {
       this.aiGold += C.U_BOUNTY[kind] * (C.AI_BOUNTY_MUL > 0 ? C.AI_BOUNTY_MUL : 1);
     }
     this.emit(EV.KILL, kind, byWhom);
+  }
+
+  // 물 밀어내기의 감쇠 계수. 1 에서 시작해 WATER_PUSH_FLOOR 까지 내려간다.
+  waterPushK() {
+    const f = C.WATER_PUSH_FADE_MS;
+    if (!(f > 0)) return 1;
+    const floor = C.WATER_PUSH_FLOOR > 0 ? C.WATER_PUSH_FLOOR : 0;
+    const k = 1 - this.simTime / f;
+    return k > floor ? k : floor;
   }
 
   hitBase(side, dmg) {
