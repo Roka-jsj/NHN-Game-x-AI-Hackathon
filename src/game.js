@@ -56,6 +56,11 @@ export const EV = {
   SKILL: 17,        // a = 스킬 번호(0 해일 1 화살비 2 증원), b = 진영
   TOWER_UP: 18,     // a = 새 단계, b = 진영
   COUNTER_HIT: 19,  // a = 공격자 종류, b = 진영 — 상성 우위로 때렸다
+  // ── v3 원정. 0~19 는 건드리지 않는다 ──
+  STAGE_START: 20,  // a = 전투 번호(0-based), b = 사령관 인덱스
+  STAGE_CLEAR: 21,  // a = 전투 번호
+  TAUNT: 22,        // a = 사령관 인덱스, b = 디렉터가 판정한 플레이어 프로파일
+  CAMPAIGN_END: 23, // a = 클리어한 전투 수, b = 1이면 완주
 };
 
 // 디렉터가 없을 때 적이 쓰는 고정 웨이브. 랜덤 0.
@@ -80,14 +85,38 @@ function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 const U_MIN_RANGE = (C.U_MIN_RANGE && C.U_MIN_RANGE.length >= C.UNIT_KINDS)
   ? C.U_MIN_RANGE : new Float32Array(C.UNIT_KINDS);
 
-// 협곡 바닥. 가운데가 FLOOR_DIP 만큼 낮다.
+// ── 원정 상수 — 방어적으로 읽는다 ─────────────────────────────
+// config 이 아직 v3 상수를 안 줬으면 **원정이 없는 예전 게임**으로 조용히 돈다.
+// 게임이 죽는 것보다 기능 하나가 없는 편이 낫다.
+const CAMPAIGN_LEN = (Number.isInteger(C.CAMPAIGN_LEN) && C.CAMPAIGN_LEN > 0) ? C.CAMPAIGN_LEN : 1;
+// 배열 상수를 스테이지로 꺼낸다. 길이가 모자라면 마지막 값으로 이어 쓴다.
+function stageOf(arr, i, dflt) {
+  if (!arr || arr.length === 0) return dflt;
+  const k = i < 0 ? 0 : (i >= arr.length ? arr.length - 1 : i);
+  const v = +arr[k];
+  return (v > 0 && Number.isFinite(v)) ? v : dflt;
+}
+function idxOf(arr, i, dflt) {
+  if (!arr || arr.length === 0) return dflt;
+  const k = i < 0 ? 0 : (i >= arr.length ? arr.length - 1 : i);
+  const v = +arr[k];
+  return Number.isFinite(v) ? v : dflt;
+}
+
+// 협곡 바닥. 가운데가 이만큼 낮다 — 전투마다 다르다 (C.STAGE_DIP).
+// **groundAt(x) 의 서명은 계약이다** (render 도 같이 쓴다). 그래서 스테이지 값은
+// 인자가 아니라 모듈 지역 변수로 들어온다. 전투가 바뀔 때 한 번만 갱신된다.
+let floorDip = C.FLOOR_DIP;
+
 // 이 한 줄이 이 게임의 교착을 푼다 — 전선이 기지보다 먼저 잠긴다.
 export function groundAt(x) {
   const mid = C.VIEW_W * 0.5;
   const half = C.VIEW_W * 0.5;
   const t = (x - mid) / half;               // -1 .. 1
-  return C.GROUND_Y + C.FLOOR_DIP * (1 - t * t);
+  return C.GROUND_Y + floorDip * (1 - t * t);
 }
+// 지형이 바뀐 것을 렌더가 알아야 한다. game.floorDip · game.terrainSeq 를 본다.
+export function currentDip() { return floorDip; }
 
 export class Game {
   constructor() {
@@ -135,6 +164,19 @@ export class Game {
     this.spawnedKind = new Uint16Array(C.UNIT_KINDS);
     // 적 AI 가 매 판단마다 쓰는 가중치 버퍼. 여기서 한 번만 만든다.
     this.aiMix = new Float32Array(C.UNIT_KINDS);
+    // 적 사령관도 스킬을 쓴다. 쿨다운은 플레이어와 같은 표(C.SKILL_CD)를 쓴다.
+    this.aiSkillCd = new Float32Array(C.SKILL_COUNT);
+    this.aiSkillUsed = new Uint16Array(C.SKILL_COUNT);
+
+    // ─ 원정. 여기 값만 전투를 넘어 살아남는다 ─
+    // **localStorage 금지이므로 새로고침하면 사라진다. 제약이지 버그가 아니다.**
+    this.stage = 0;
+    this.stageMax = CAMPAIGN_LEN;
+    this.commander = 0;
+    this.campaignOver = false;
+    this.stagesCleared = 0;
+    this.terrainSeq = 0;          // 지형이 바뀐 횟수. 렌더가 캐시를 다시 구울 신호
+    this.floorDip = floorDip;
 
     this.reset();
   }
@@ -144,8 +186,63 @@ export class Game {
   get nukeCd() { return this.skillCd[C.SK_TIDE]; }
   set nukeCd(v) { this.skillCd[C.SK_TIDE] = v; }
 
-  // ── 리셋 ────────────────────────────────────────────────────
+  // ── 원정 ────────────────────────────────────────────────────
+  // 판 하나가 아니라 여정이다. 이기면 다음 사령관, 지면 원정이 끝난다.
+  //
+  // **원정은 리셋이 아니다.** 다음 전투로 넘어갈 때
+  //   유지: 특성(traits) · 포탑 단계 · 세션 기록
+  //   초기화: 금 · 시대 · 경험치 · 병력 · 물 · 스킬 쿨다운
+  // 그래야 앞 전투의 선택이 뒤에 살아 있으면서 매 전투는 처음부터 시작한다.
+
+  // 스테이지 곡선 — 세 축이 따로 논다. 한 축만 올리면 나쁜 난이도가 된다.
+  stageHpMul() { return stageOf(C.STAGE_HP_MUL, this.stage, 1); }   // 판 길이
+  stageDiff() { return stageOf(C.STAGE_DIFF, this.stage, 1); }      // 적 수입·공격성
+  stageWaterMul() { return stageOf(C.STAGE_WATER_MUL, this.stage, 1); } // 마감 시계
+  stageDip() { return stageOf(C.STAGE_DIP, this.stage, C.FLOOR_DIP); }
+
+  // 사령관 — 디렉터의 다섯 프로파일에 얼굴을 준 것. 순서는 가르치는 순서다.
+  commanderFor(stage) {
+    const n = (C.COMMANDER_PROFILE && C.COMMANDER_PROFILE.length) ? C.COMMANDER_PROFILE.length : 1;
+    return stage < 0 ? 0 : (stage % n);
+  }
+  get commanderProfile() {
+    return (C.COMMANDER_PROFILE && C.COMMANDER_PROFILE[this.commander]) || 'BALANCED';
+  }
+  // 사령관 성격 — **디렉터를 대체하지 않는다.** 사령관은 그 전투의 기본 성격이고
+  // 디렉터는 그 위에서 플레이어를 읽는다. 여기 값은 전자만 만진다.
+  cmdTempoMul() { return stageOf(C.CMD_TEMPO_MUL, this.commander, 1); }
+  cmdGoldMul() { return stageOf(C.CMD_GOLD_MUL, this.commander, 1); }
+  cmdSkillMul() { return stageOf(C.CMD_SKILL_MUL, this.commander, 1); }
+  cmdTowerWant() { return idxOf(C.CMD_TOWER, this.commander, 0); }
+  cmdHoard() { return idxOf(C.CMD_HOARD, this.commander, 0); }
+
+  // 다음 전투로. **이긴 직후에만 호출된다.**
+  nextStage() {
+    if (this.campaignOver) return false;
+    if (this.stage + 1 >= this.stageMax) { this.campaignOver = true; return false; }
+    this.stage++;
+    this.resetBattle();
+    return true;
+  }
+
+  // ── 리셋 — 원정 전체를 처음부터 ──────────────────────────────
   reset() {
+    this.stage = 0;
+    this.stageMax = CAMPAIGN_LEN;
+    this.campaignOver = false;
+    this.stagesCleared = 0;
+    this.traits.fill(0);
+    this.towerLv = 0;
+    this.resetBattle();
+  }
+
+  // 전투 하나를 차린다. 특성과 포탑 단계는 **여기서 지우지 않는다.**
+  resetBattle() {
+    this.commander = this.commanderFor(this.stage);
+    const dip = this.stageDip();
+    if (dip !== floorDip) { floorDip = dip; this.terrainSeq++; }
+    this.floorDip = floorDip;
+
     this.tick = 0;
     this.simTime = 0;
     this.state = S.PLAY;
@@ -157,8 +254,11 @@ export class Game {
     this.aliveL = 0;
     this.aliveR = 0;
 
-    this.baseHp = [C.BASE_HP, C.BASE_HP];
-    this.baseMax = [C.BASE_HP, C.BASE_HP];
+    // 기지 체력은 **판 길이만** 정한다. 첫 전투가 0.45 인 이유는 그것뿐이다 —
+    // 짧게 끝나야 가르치는 전투가 된다. 어려움은 여기가 아니라 STAGE_DIFF 가 만든다.
+    const hp0 = C.BASE_HP * this.stageHpMul();
+    this.baseHp = [hp0, hp0];
+    this.baseMax = [hp0, hp0];
     this.baseFlash = [0, 0];
     // 무엇이 기지를 무너뜨렸는가. 0=아직 1=병력 2=물.
     // 물과 병력이 같은 프레임에 기지를 0으로 만들면 무승부로 끝나 버린다.
@@ -166,7 +266,9 @@ export class Game {
     this.baseDownBy = [0, 0];
 
     this.gold = C.GOLD_START;
-    this.xp = 0;
+    // 첫 전투만 경험치를 안고 시작한다. **온보딩이다** —
+    // 시대 진화와 드래프트가 21초에 처음 나오면 심사자는 이미 판단을 끝냈다.
+    this.xp = idxOf(C.STAGE_XP_HEAD, this.stage, 0);
     this.era = 0;
     this.spawnCd.fill(0);
 
@@ -174,11 +276,12 @@ export class Game {
     for (let i = 0; i < C.SKILL_COUNT; i++) this.skillCd[i] = C.SKILL_CD[i] * 0.45;
     this.skillUsed.fill(0);
 
-    // 기지 포탑. 0 = 아직 없다.
-    this.towerLv = 0;
+    // 기지 포탑 — **원정에서 유지된다.** 여기서 0으로 만들지 않는다.
+    // (원정을 처음부터 다시 하는 reset() 만 0으로 되돌린다)
+    if (!(this.towerLv > 0)) this.towerLv = 0;
     this.towerCd = 0;
 
-    this.aiGold = C.AI_GOLD_START;
+    this.aiGold = C.AI_GOLD_START * this.stageDiff();
     this.aiXp = 0;
     this.aiEra = 0;
     this.aiThink = 0;
@@ -187,6 +290,12 @@ export class Game {
     this.aiPick = -1;      // 붙들고 있는 구매 예정 종류. -1 = 아직 안 정했다
     this.aiWaveIdx = 0;
     this.aiWaveTimer = FALLBACK_WAVE[0];
+    // 적 사령관의 포탑과 스킬. 첫 전투(가르치는 전투)에서는 둘 다 안 쓴다.
+    this.aiTowerLv = 0;
+    this.aiTowerCd = 0;
+    this.aiIntro = 0;
+    for (let i = 0; i < C.SKILL_COUNT; i++) this.aiSkillCd[i] = this.aiSkillCooldown(i);
+    this.aiSkillUsed.fill(0);
 
     this.water = C.WATER_Y0;
     this.prevWater = this.water;
@@ -207,7 +316,14 @@ export class Game {
     this.goldSum = 0;
     this.goldSamples = 0;
 
-    this.traits.fill(0);
+    // **특성은 지우지 않는다.** 원정에서 유지되는 것이 traits 와 towerLv 다.
+    // 다만 기지 체력을 늘리는 특성은 새 기지에 다시 얹어야 한다 —
+    // baseMax 를 방금 새로 계산했기 때문이다.
+    if (this.has('wall')) {
+      const add = 400 * this.stageHpMul();
+      this.baseMax[SIDE_L] += add;
+      this.baseHp[SIDE_L] += add;
+    }
     this.draftOpen = false;
     this.draftFrames = 0;
     this.pendingDraft = 0;
@@ -215,9 +331,20 @@ export class Game {
     this.outcome = C.WIN_NONE;
     this.endTick = -1;
 
+    // 도발 — 디렉터가 플레이어를 새로 판정한 순간에만 나온다.
+    this.tauntProfile = -1;
+    this.tauntAt = -1e9;
+    this.taunts = 0;
+
     if (this.supplier && this.supplier.onRunStart) this.supplier.onRunStart();
+    // 사령관을 디렉터에게 알린다. 밸런스 감독이 이 훅을 아직 안 만들었을 수 있다 —
+    // 없으면 조용히 지나간다. 게임은 그래도 돈다.
+    if (this.supplier && typeof this.supplier.setCommander === 'function') {
+      this.supplier.setCommander(this.commander, this.stage, this.commanderProfile);
+    }
     this.runs++;
     this.emit(EV.RESET, 0, 0);
+    this.emit(EV.STAGE_START, this.stage, this.commander);
   }
 
   emit(type, a, b) { if (this.onEvent) this.onEvent(type, a, b); }
@@ -241,8 +368,11 @@ export class Game {
   applyTrait(idx) {
     this.traits[idx] = 1;
     if (C.TRAITS[idx].id === 'wall') {
-      this.baseMax[SIDE_L] += 400;
-      this.baseHp[SIDE_L] += 400;
+      // 기지 체력 특성은 **그 전투의 기지 크기에 비례한다.** 상수 400 을 그대로
+      // 얹으면 기지가 작은 첫 전투(0.45배)에서만 특성 하나가 판을 결정한다.
+      const add = 400 * this.stageHpMul();
+      this.baseMax[SIDE_L] += add;
+      this.baseHp[SIDE_L] += add;
     }
   }
 
@@ -291,7 +421,10 @@ export class Game {
   // ── 입력 진입점 — main 의 입력 큐만 이걸 부른다 ──────────────
   input(act, simTs, wallTs) {
     if (this.state === S.OVER) {
-      // 결과 화면에서는 아무 입력이나 재시작이다
+      // 결과 화면에서는 아무 입력이나 "계속"이다. 무엇으로 이어지는지만 다르다.
+      //   이겼고 원정이 남았다 → 다음 사령관
+      //   그 밖 (졌거나 완주했거나) → 원정을 처음부터
+      if (this.outcome === C.WIN_PLAYER && !this.campaignOver && this.nextStage()) return;
       this.reset();
       return;
     }
@@ -464,9 +597,32 @@ export class Game {
     this.stepAI();
     this.stepUnits();
     this.stepTower();
+    this.stepAiTower();
     this.stepArrows();
     this.stepWater();
+    this.stepTaunt();
     this.checkEnd();
+  }
+
+  // ── 도발 — AI 가 나를 읽은 순간이 문장이 된다 ─────────────────
+  // 판정은 디렉터가 한다. 여기서는 **판정이 바뀐 것을 감지해서** 사령관에게
+  // 말을 시킬 뿐이다. 디렉터가 아직 이 필드를 안 내놨으면 조용히 아무것도 안 한다.
+  // (director.js 는 지금 다른 사람이 고치고 있다. 없어도 게임은 돈다)
+  stepTaunt() {
+    const d = this.supplier;
+    if (!d) return;
+    if (d.observing) return;                     // 관찰 중은 판정이 아니다
+    const idx = d.profileIdx;
+    if (!Number.isInteger(idx) || idx < 0) return;
+    if (idx === this.tauntProfile) return;
+    // 첫 판정이 '균형'이면 그건 아직 아무것도 못 읽은 것이다. 말없이 받아 둔다.
+    if (this.tauntProfile < 0 && idx === C.PROFILE_NEUTRAL) { this.tauntProfile = idx; return; }
+    // 너무 잦으면 시끄럽다. 최소 간격을 둔다.
+    if (this.simTime - this.tauntAt < C.TAUNT_MIN_MS) return;
+    this.tauntProfile = idx;
+    this.tauntAt = this.simTime;
+    this.taunts++;
+    this.emit(EV.TAUNT, this.commander, idx);
   }
 
   stepEconomy() {
@@ -490,6 +646,13 @@ export class Game {
       }
     }
 
+    for (let k = 0; k < C.SKILL_COUNT; k++) {
+      if (this.aiSkillCd[k] > 0) {
+        this.aiSkillCd[k] -= C.SIM_DT;
+        if (this.aiSkillCd[k] < 0) this.aiSkillCd[k] = 0;
+      }
+    }
+
     // 적도 같은 규칙으로 번다. 레버가 배수를 준다.
     // 레버 값이 깨져 있으면 배수를 무시한다. aiGold 가 한 번 NaN 이 되면
     // "살 돈이 있는가" 비교가 전부 false 가 되어 적이 무한히 쏟아진다 —
@@ -499,7 +662,24 @@ export class Game {
       const m = +this.supplier.levers.goldMul;
       if (m > 0) rate *= m;
     }
-    this.aiGold += rate * dt;
+    // 스테이지 곡선과 사령관 성격. 둘 다 1 근처의 작은 배수다 —
+    // **적 수입을 크게 올리면 초반에 손 쓸 새 없이 밀려 학습이 안 된다** (계약 §5.5).
+    this.aiGold += rate * this.stageDiff() * this.cmdGoldMul() * dt;
+
+    // 적의 시대 경험치는 지금까지 **플레이어를 죽여야만** 들어왔다.
+    // 그래서 이기고 있는 판에서는 적이 영원히 돌 시대에 머물고, 플레이어만
+    // 5시대를 열어 눈덩이가 굴렀다 — 실측 8판 중 5판이 적 기지 체력 0 으로 끝났다.
+    // 시간으로 조금씩 흘려 넣으면 **후반이 어려워지되 초반은 그대로다.**
+    // 이것이 "곡선이지 상수가 아니다"의 실제 구현이다.
+    const xpRate = (C.AI_XP_RATE > 0) ? C.AI_XP_RATE : 0;
+    this.aiXp += xpRate * this.stageDiff() * dt;
+  }
+
+  // 적 스킬의 쿨다운. 사령관 성격과 스테이지 난이도가 같이 줄인다.
+  aiSkillCooldown(i) {
+    const base = C.SKILL_CD[i] || 30000;
+    const d = this.stageDiff();
+    return base * this.cmdSkillMul() / (d > 0 ? d : 1);
   }
 
   // 적 사령관. **결정론적이다.** 디렉터의 레버가 성향을 정한다.
@@ -522,6 +702,22 @@ export class Game {
         this.emit(EV.ERA_UP, this.aiEra, SIDE_R);
       }
     }
+
+    // ── 사령관의 개전 한 수 ────────────────────────────────────
+    // **온보딩이다.** 첫 전투의 첫 10초에 아무 일도 안 일어나면 심사자는 떠난다.
+    // 기병(가장 빠르다)을 한 기 먼저 보낸다 — 소환지점에서 내 기지까지 8.8초라
+    // 막든 못 막든 10초 안에 무언가가 부서지는 것을 보게 된다.
+    // 공짜다. 적 경제를 건드리지 않으려고 금에서 빼지 않는다.
+    if (this.aiIntro === 0 && this.simTime >= C.INTRO_POKE_MS) {
+      this.aiIntro = 1;
+      this.spawn(SIDE_R, C.U_CAV, this.aiEra, 0);
+    }
+
+    // ── 사령관도 짓고 쓴다 ─────────────────────────────────────
+    // 지금까지 적은 유닛만 뽑았다. 포탑과 스킬이 플레이어 전용이면
+    // 그건 게임의 절반을 적이 안 쓰는 것이고, 그만큼 판이 쉽다.
+    this.stepAiTowerBuy();
+    this.stepAiSkills();
 
     // 디렉터가 없으면 고정 웨이브를 돈다. 게임은 100% 돌아간다.
     if (!lv) {
@@ -558,12 +754,123 @@ export class Game {
       if (alt < 0) return;
       kind = alt;
     }
+    // 축재형 사령관은 **모았다가 쏟는다.** 문턱 아래에서는 사지 않는다.
+    // 다만 이미 사려던 것을 살 수 있으면 그냥 산다 — 안 그러면 영원히 안 나온다.
+    const hoard = this.cmdHoard();
+    if (hoard > 0 && this.aiGold < hoard && this.aiWait < 8) { this.aiWait++; return; }
+
     this.aiPick = -1;
     this.aiWait = 0;
     this.aiGold -= this.aiCost(kind);
     this.spawn(SIDE_R, kind, this.aiEra, 0);
     const tempo = +lv.tempo;
-    this.aiHold = tempo > 0 ? tempo : C.AI_THINK_MS;
+    // 사령관 성격과 스테이지가 템포를 당긴다. 하한은 디렉터와 같은 420ms.
+    let hold = (tempo > 0 ? tempo : C.AI_THINK_MS) * this.cmdTempoMul();
+    hold /= (1 + (this.stageDiff() - 1) * 0.6);
+    this.aiHold = hold > 420 ? hold : 420;
+  }
+
+  // ── 적 포탑 ─────────────────────────────────────────────────
+  // 사령관마다 지으려는 단계가 다르다 (C.CMD_TOWER). 농성형이 가장 많이 짓는다.
+  // **첫 전투에서는 아무도 짓지 않는다** — 가르치는 전투이기 때문이다.
+  stepAiTowerBuy() {
+    const want = this.stage < 1 ? 0 : this.cmdTowerWant();
+    if (this.aiTowerLv >= want || this.aiTowerLv >= C.TOWER_MAX) return;
+    const c = C.TOWER_COST[this.aiTowerLv];
+    // 병력을 살 여유까지 남을 때만 짓는다. 포탑 사느라 전선이 비면 그건 자살이다.
+    if (this.aiGold < c * C.AI_TOWER_BUY_MUL) return;
+    this.aiGold -= c;
+    this.aiTowerLv++;
+    this.aiTowerCd = C.TOWER_CD;
+    // EV.TOWER_UP 은 **내보내지 않는다.** 디렉터가 그 이벤트를 진영 구분 없이
+    // "플레이어가 기지에 쓴 금"으로 세고 있어 판정이 오염된다. 렌더는
+    // game.aiTowerLv 를 직접 보고 있으므로 화면에는 그대로 보인다.
+  }
+
+  // 사거리 안에서 **가장 앞선 플레이어 유닛**을 쏜다. 내 포탑의 거울이다.
+  stepAiTower() {
+    if (this.aiTowerLv <= 0) return;
+    if (this.aiTowerCd > 0) {
+      this.aiTowerCd -= C.SIM_DT;
+      if (this.aiTowerCd > 0) return;
+      this.aiTowerCd = 0;
+    }
+    const bx = C.BASE_R_X;
+    let best = -1, bestX = -1e9;
+    for (let i = 0; i < C.UNIT_MAX; i++) {
+      if (!this.uAlive[i] || this.uSide[i] !== SIDE_L) continue;
+      const x = this.uX[i];
+      if (bx - x > C.TOWER_RANGE) continue;
+      if (x > bestX) { bestX = x; best = i; }
+    }
+    if (best < 0) return;
+
+    this.aiTowerCd = C.TOWER_CD;
+    const dmg = C.TOWER_DMG[this.aiTowerLv - 1] * C.ERA_DMG_MUL[this.aiEra];
+    this.pushArrow(bx, C.GROUND_Y - C.BASE_H, bestX,
+                   groundAt(bestX) - C.U_H[this.uKind[best]] * 0.5, SIDE_R);
+    this.damage(best, dmg, SIDE_R, -1);
+    this.emit(EV.TOWER_FIRE, this.aiTowerLv, SIDE_R);
+  }
+
+  // ── 적 스킬 ─────────────────────────────────────────────────
+  // 조건은 전부 **플레이어의 실수**다. 시간이 아니라 상황이 방아쇠라
+  // 같은 실수를 반복하지 않으면 맞을 일이 없다 — 그게 배울 수 있는 난이도다.
+  //   해일   병력을 한곳에 너무 많이 모았다
+  //   화살비 전선에 뭉쳐 있다
+  //   증원   적 전선이 비었는데 플레이어가 밀고 들어온다
+  stepAiSkills() {
+    if (this.stage < 1) return;        // 첫 전투는 가르치는 전투다
+    if (this.aliveL <= 0) return;
+
+    if (this.aiSkillCd[C.SK_TIDE] <= 0 && this.aliveL >= C.AI_TIDE_MIN) {
+      this.aiSkillCd[C.SK_TIDE] = this.aiSkillCooldown(C.SK_TIDE);
+      this.aiSkillUsed[C.SK_TIDE]++;
+      this.emit(EV.SKILL, C.SK_TIDE, SIDE_R);
+      const dmg = C.SKILL_DMG[C.SK_TIDE];
+      for (let i = 0; i < C.UNIT_MAX; i++) {
+        if (!this.uAlive[i] || this.uSide[i] !== SIDE_L) continue;
+        this.damage(i, dmg, SIDE_R, -1);
+      }
+      return;
+    }
+
+    if (this.aiSkillCd[C.SK_VOLLEY] <= 0) {
+      const cx = this.frontlineX();
+      const r = C.VOLLEY_RADIUS;
+      let n = 0;
+      for (let i = 0; i < C.UNIT_MAX; i++) {
+        if (!this.uAlive[i] || this.uSide[i] !== SIDE_L) continue;
+        const d = this.uX[i] - cx;
+        if (d >= -r && d <= r) n++;
+      }
+      if (n >= C.AI_VOLLEY_MIN) {
+        this.aiSkillCd[C.SK_VOLLEY] = this.aiSkillCooldown(C.SK_VOLLEY);
+        this.aiSkillUsed[C.SK_VOLLEY]++;
+        this.emit(EV.SKILL, C.SK_VOLLEY, SIDE_R);
+        const dmg = C.SKILL_DMG[C.SK_VOLLEY];
+        for (let i = 0; i < C.UNIT_MAX; i++) {
+          if (!this.uAlive[i] || this.uSide[i] !== SIDE_L) continue;
+          const x = this.uX[i];
+          const d = x - cx;
+          if (d < -r || d > r) continue;
+          const gy = groundAt(x);
+          this.pushArrow(x, gy - 320, x, gy - C.U_H[this.uKind[i]] * 0.5, SIDE_R);
+          this.damage(i, dmg, SIDE_R, -1);
+        }
+        return;
+      }
+    }
+
+    if (this.aiSkillCd[C.SK_RALLY] <= 0
+        && this.aliveR <= C.AI_RALLY_MAX && this.aliveL >= C.AI_RALLY_MAX + 2) {
+      this.aiSkillCd[C.SK_RALLY] = this.aiSkillCooldown(C.SK_RALLY);
+      this.aiSkillUsed[C.SK_RALLY]++;
+      this.emit(EV.SKILL, C.SK_RALLY, SIDE_R);
+      for (let k = 0; k < C.RALLY_COUNT; k++) {
+        this.spawn(SIDE_R, C.U_SWORD, this.aiEra, k * C.UNIT_GAP);
+      }
+    }
   }
 
   // 레버의 mix 를 길이 6 가중치 버퍼로 옮긴다.
@@ -836,6 +1143,9 @@ export class Game {
     let rise = C.WATER_RISE;
     if (t > C.WATER_ACCEL_AT) rise *= C.WATER_ACCEL_MUL;
     if (this.has('drain')) rise *= 0.75;
+    // 스테이지 곡선 — **후반의 시간 압박은 여기서 온다.** 익사 피해(DROWN_DPS)가
+    // 아니다. 그건 병력이 전선에 닿기도 전에 죽여 교착을 굳혔던 값이다 (계약 §5.5).
+    rise *= this.stageWaterMul();
     if (this.supplier && this.supplier.levers) {
       const m = +this.supplier.levers.waterMul;
       if (m > 0) rise *= m;      // 깨진 값이면 무시한다. water 가 NaN 이 되면 판이 굳는다
@@ -899,6 +1209,21 @@ export class Game {
     } else this.losses++;
     this.setState(S.OVER);
     this.emit(outcome === C.WIN_PLAYER ? EV.WIN : EV.LOSE, outcome, 0);
+
+    // ── 원정의 마디 ────────────────────────────────────────────
+    // 이겼으면 이 전투가 끝난 것이고, 그 밖에는 **원정 자체가 끝난 것이다.**
+    // 무승부(둘 다 잠김)도 원정 종료다 — 다음 사령관을 만날 자격은 승리뿐이다.
+    if (outcome === C.WIN_PLAYER) {
+      this.stagesCleared++;
+      this.emit(EV.STAGE_CLEAR, this.stage, 0);
+      if (this.stage + 1 >= this.stageMax) {
+        this.campaignOver = true;
+        this.emit(EV.CAMPAIGN_END, this.stagesCleared, 1);
+      }
+    } else {
+      this.campaignOver = true;
+      this.emit(EV.CAMPAIGN_END, this.stagesCleared, 0);
+    }
   }
 
   // ── 특성 드래프트 ───────────────────────────────────────────

@@ -185,6 +185,62 @@ const BUILTIN_POLICY = {
   },
 };
 
+// ── 사령관 인격 — 그 전투의 **기본 성격** ────────────────────
+//
+// ★ 여기가 v3 의 핵심 구조다. 층이 둘이다.
+//   1층(인격) 사령관이 원래 어떤 군대를 굴리는가. 전투 내내 안 바뀐다.
+//   2층(판독) 디렉터가 플레이어를 읽고 그 위에 덧칠한다. 9초마다 바뀐다.
+//   **둘을 섞지 않는다.** 사령관이 디렉터를 대체하면 판독이 안 보이고,
+//   디렉터가 사령관을 덮으면 다섯 명이 전부 같은 얼굴이 된다.
+//
+// BUILTIN_POLICY 와 헷갈리지 마라. 저건 **플레이어 프로파일에 대한 대응책**이고
+// (키가 플레이어의 성향이다), 이건 **적 자신의 성격**이다 (키가 사령관이다).
+// 무리(SWARMER)가 궁수·거인을 뽑으면 안 된다 — 그건 물량형을 *잡는* 구성이지
+// 물량형 자신의 구성이 아니다. 이름과 화면이 어긋나면 사령관은 얼굴이 아니다.
+//
+// readW = 판독층의 지분. 0이면 플레이어를 무시하고 제 성격대로만 간다.
+//   **거울이 0.85 로 가장 높다.** 마지막 사령관은 플레이어를 따라오므로
+//   도배가 안 통해야 한다는 것이 계약(§3)이다.
+const PERSONA = [
+  // 0 무리 (SWARMER) — 싼 것을 빨리, 많이. 가장 읽기 쉬운 상대다 (가르치는 전투)
+  { mix: [8, 5, 2, 1, 0, 0], tempo: 980, readW: 0.25, cg: 3,
+    goldMul: 1.00, eraThresh: 1.05, waterMul: 0.95, tags: ['rush', 'mix'] },
+  // 1 쇄도 (RUSHER) — 빠른 것으로 계속 찌른다. 기병 중심, 템포가 가장 빠르다
+  { mix: [4, 2, 0, 8, 1, 0], tempo: 880, readW: 0.32, cg: 4,
+    goldMul: 1.05, eraThresh: 1.00, waterMul: 1.00, tags: ['rush', 'mix'] },
+  // 2 금고 (ECONOMIST) — 모아서 비싼 것을 낸다. 진화가 빠르다(문턱 0.75)
+  { mix: [1, 1, 3, 2, 5, 4], tempo: 1450, readW: 0.42, cg: 4,
+    goldMul: 1.10, eraThresh: 0.75, waterMul: 1.00, tags: ['heavy', 'mix'] },
+  // 3 성벽 (TURTLE) — 벽을 세우고 원거리로 갉는다. 물을 밀어 **시계**로 이긴다
+  { mix: [0, 5, 6, 0, 5, 3], tempo: 1550, readW: 0.42, cg: 4,
+    goldMul: 1.05, eraThresh: 0.95, waterMul: 1.30, tags: ['wall', 'ranged'] },
+  // 4 거울 (BALANCED) — **플레이어를 읽고 따라온다.** 판독 지분이 가장 크고
+  //   상성 대응이 가장 세다. 한 종류 도배는 여기서 반드시 벌을 받아야 한다
+  { mix: [3, 3, 3, 3, 2, 2], tempo: 1180, readW: 0.85, cg: 7,
+    goldMul: 1.05, eraThresh: 0.90, waterMul: 1.05, tags: ['mix'] },
+];
+
+// ── 도배 처벌 계수 — "읽히면 손해" ───────────────────────────
+//
+// ★ 이 프로젝트의 난이도 설계 전체가 이 네 줄에 있다.
+//   나쁜 난이도는 적 체력·수입을 그냥 올리는 것이다. 그러면 잘 하는 플레이어와
+//   못 하는 플레이어가 **똑같이** 느려질 뿐 아무도 배우지 못한다.
+//   좋은 난이도는 **실수를 처벌**한다. 이 게임에서 실수는 하나로 정의된다:
+//   **한 종류만 뽑는 것.** 상성 삼각형이 있는 게임에서 구성이 한 점에 몰리면
+//   그건 "나를 잡는 유닛 하나만 뽑으면 된다"고 적에게 알려주는 것과 같다.
+//
+//   focus = 플레이어 구성의 집중도(0=고르게, 1=한 종류). 정규화 허핀달이다.
+//   focus 가 0 이면 아래 계수는 **전부 1배** — 다양하게 쓰는 플레이어는
+//   난이도가 하나도 안 오른다. 이게 "곡선이지 상수가 아니다"의 실제 구현이다.
+const FOCUS_CG = 1.6;      // 상성 대응 가중치 ×(1+1.6·focus)
+const FOCUS_TEMPO = 0.30;  // 소환 간격 ×(1−0.30·focus)  — 도배 상대에겐 더 빨리 나온다
+const FOCUS_GOLD = 0.34;   // 적 수입 ×(1+0.34·focus)
+const FOCUS_ERA = 0.20;    // 적 진화 문턱 ×(1−0.20·focus)
+// 새 전투가 시작돼도 사령관은 **앞 전투에서 본 것을 기억한다.**
+// 원정이 여정이라면 정보도 이어져야 한다 — 2전투부터는 첫 9초부터 맞받는다.
+// 기억은 현재 창이 차면서 사라진다 (MEM_FADE 구간 뒤엔 지분 0).
+const MEM_FADE = 3;
+
 const FALLBACK_LINES = {
   death: ['기지가 무너졌다', '한 파도 늦었다', '아끼다 잠겼다'],
   record: ['적진을 넘었다'],
@@ -220,8 +276,28 @@ export class Director {
     this.reasonIdx = 0;
     this.draftReason = DRAFT_REASONS[0];
     this.switches = 0;
+    // 판정이 **바뀐 순간**을 밖에서 감지할 수 있어야 한다 — 사령관의 도발이
+    // 여기 걸린다 (계약 §3: "AI 가 나를 읽었다"가 문장으로 나타나는 순간).
+    // 한 스텝 동안만 true 다. game.js 는 profileIdx 변화로도 감지할 수 있지만,
+    // 그건 "같은 프로파일로 다시 판정" 을 못 잡는다. 이 플래그는 잡는다.
+    this.justSwitched = false;
+    this.switchAtMs = -1e9;
 
     this.difficulty = 0;
+
+    // 사령관 — game.js 가 setCommander() 로 알려준다.
+    // **안 알려줘도 돈다.** 원정이 아직 안 붙은 game.js 에서는 -1 로 남고
+    // 예전과 똑같이 동작한다 (인격층 없이 판독층만).
+    this.commanderIdx = -1;
+    this.commanderProfile = null;
+    this.stage = 0;
+    this.stageK = 1;
+
+    // 사령관의 기억 — 앞 전투에서 플레이어가 무엇을 뽑았는가.
+    // 원정 첫 전투(stage 0)에서는 비어 있다. 가르치는 전투는 백지로 시작한다.
+    this.memShare = new Float32Array(KINDS);
+    this.memWeight = 0;
+    this.effShare = new Float32Array(KINDS);
 
     this.chunks = FALLBACK_CHUNKS;
     this.policy = BUILTIN_POLICY;
@@ -304,7 +380,37 @@ export class Director {
     this.applyLevers();
   }
 
+  // ── 사령관 연결 — game.js 가 전투 시작마다 부른다 ────────────
+  // 서명은 계약이다: setCommander(사령관 인덱스, 전투 번호, 프로파일 이름).
+  // **셋 다 없어도 안 죽는다.** game.js 가 아직 원정을 안 붙였으면 아예 안 불린다.
+  setCommander(idx, stage, profileName) {
+    const n = PERSONA.length;
+    this.commanderIdx = Number.isInteger(idx) && idx >= 0 ? idx % n : -1;
+    this.stage = Number.isInteger(stage) && stage >= 0 ? stage : 0;
+    // 프로파일 이름은 game.js 가 주는 것을 그대로 믿지 않는다 — 오타 하나에
+    // 정책이 통째로 BALANCED 로 떨어지면 원인을 아무도 못 찾는다.
+    const p = typeof profileName === 'string' ? profileName : null;
+    this.commanderProfile = p && PROFILES.indexOf(p) >= 0
+      ? p : (this.commanderIdx >= 0 && C.COMMANDER_PROFILE
+        ? C.COMMANDER_PROFILE[this.commanderIdx] : null);
+
+    // 스테이지 곡선을 **처벌 강도**에 태운다. 수입·체력 곡선은 game.js 소관이라
+    // 여기서 또 곱하면 두 번 곱해진다 (계측에서 실제로 겪은 실패다).
+    // 여기서 쓰는 것은 "실수를 얼마나 아프게 처벌하는가" 하나뿐이다.
+    const sd = C.STAGE_DIFF && C.STAGE_DIFF.length
+      ? num(C.STAGE_DIFF[Math.min(this.stage, C.STAGE_DIFF.length - 1)], 1) : 1;
+    this.stageK = clamp(sd, 0.5, 2);
+
+    // 첫 전투는 가르치는 전투다 — 기억 없이 백지에서 시작한다.
+    if (this.stage <= 0) { this.memWeight = 0; this.memShare.fill(0); }
+    this.applyLevers();
+  }
+
   onRunStart() {
+    // 창을 비우기 **전에** 플레이어 구성을 기억으로 옮긴다.
+    // (game.js 는 전투마다 onRunStart() → setCommander() 순서로 부른다.
+    //  stage 0 이면 setCommander 가 이 기억을 곧바로 지운다)
+    this.rememberMix();
     this.wAggro.reset(); this.wHoard.reset(); this.wSwarm.reset();
     this.wTower.reset(); this.wFront.reset();
     this.wXpEarn.reset(); this.wXpEra.reset(); this.wSpawnN.reset();
@@ -318,7 +424,20 @@ export class Director {
     this.difficulty = 0;
     this.profile = 'BALANCED';
     this.profileIdx = 4;
+    this.justSwitched = false;
+    this.switchAtMs = -1e9;
     this.applyLevers();
+  }
+
+  // 이번 전투의 플레이어 구성을 기억으로 넘긴다. 표본이 없으면 손대지 않는다 —
+  // 빈 기억으로 덮으면 앞 전투에서 배운 것이 사라진다.
+  rememberMix() {
+    const tot = this.wSpawnN.mean();
+    if (!(tot > 0.5)) return;
+    for (let k = 0; k < KINDS; k++) {
+      this.memShare[k] = clamp(this.wKind[k].mean() / tot, 0, 1);
+    }
+    this.memWeight = 1;
   }
 
   // ── 이벤트 수신 — 지표 수집 ─────────────────────────────────
@@ -351,6 +470,10 @@ export class Director {
 
   // ── 매 스텝 — 구간 경계 감지와 표본 수집 ─────────────────────
   step(game) {
+    // 도발 플래그는 **딱 한 스텝** 살아 있다. 켜진 스텝에 game.js·렌더가
+    // 읽고, 다음 스텝에 꺼진다. 여기서 끄면 "켜진 채로 잊히는" 일이 없다.
+    if (this.justSwitched && game.simTime > this.switchAtMs) this.justSwitched = false;
+
     this.goldSum += game.gold;
     this.goldSamples++;
 
@@ -433,7 +556,13 @@ export class Director {
 
   onChunkBoundary(game, ci) {
     // 난이도는 경과 시간으로 오른다. 0~4.
-    this.difficulty = clamp((game.simTime / 22000) | 0, 0, 4);
+    // **원정에서는 스테이지가 바닥을 올린다** — 4전투에서 0초에 나오는 웨이브가
+    // 1전투 0초와 같으면 원정은 같은 판을 다섯 번 하는 것이다.
+    // 바닥은 stage−1 이다. stage 를 그대로 바닥으로 쓰면 마지막 전투가 시작
+    // 3초 만에 최고 난이도 웨이브로 시작해 "가르치는 구간"이 통째로 사라진다.
+    const byTime = clamp((game.simTime / 22000) | 0, 0, 4);
+    const floor = clamp(this.stage - 1, 0, 4);
+    this.difficulty = byTime > floor ? byTime : floor;
 
     if (ci < C.OBSERVE_CHUNKS) { this.observing = true; this.applyLevers(); return; }
     this.observing = false;
@@ -463,6 +592,9 @@ export class Director {
       this.profileIdx = PROFILES.indexOf(next);
       this.reasonIdx = this.profileIdx + 1;
       this.switches++;
+      // 도발이 걸리는 지점. 한 스텝만 켜져 있다 (step 이 다음 스텝에 끈다).
+      this.justSwitched = true;
+      this.switchAtMs = game ? num(game.simTime, 0) : 0;
     }
     this.applyLevers();
   }
@@ -470,29 +602,70 @@ export class Director {
   applyLevers() {
     const p = this.policy[this.profile] || this.policy.BALANCED || FALLBACK_POLICY.BALANCED;
     const d = this.difficulty;
+    // 사령관 인격. 원정이 안 붙었으면 null 이고, 그때는 예전과 똑같이 돈다.
+    const per = this.commanderIdx >= 0 ? PERSONA[this.commanderIdx] : null;
 
-    // 구운 웨이브가 있으면 구성비·템포를 거기서 가져온다 (계층2 산출물).
+    // 구운 웨이브가 있으면 판독층의 구성비를 거기서 가져온다 (계층2 산출물).
     // 없으면 정책의 기본 구성이다.
+    const tags = per ? per.tags : p.preferTags;
     const ch = this.selectChunk(p.preferTags);
-    const base = ch && Array.isArray(ch.mix) ? ch.mix : p.mix;
+    const read = ch && Array.isArray(ch.mix) ? ch.mix : p.mix;
     const m = this.mixBuf;
-    for (let k = 0; k < KINDS; k++) m[k] = num(base[k], 0);
-    this.applyCounter(m, p);
 
-    // 구운 웨이브의 tempo 에는 **난이도가 이미 들어 있다** (베이크가 난이도별로 굽고,
-    // 검수가 단조성을 확인한다). 여기서 또 깎으면 두 번 깎인다 —
-    // 계측에서 다섯 프로파일의 간격이 전부 하한 420ms 에 붙어 버렸다.
-    // 정책의 기본 템포를 쓸 때만 난이도를 곱한다.
-    const tempo = ch ? num(ch.tempo, p.tempo) : p.tempo * (1 - d * 0.11);
+    // ── 두 층을 섞는다 ────────────────────────────────────────
+    // 합이 다른 두 표를 그냥 더하면 **합이 큰 쪽이 조용히 이긴다.**
+    // (인격 합 16 · 청크 합 17 처럼 우연히 비슷할 때는 안 보이다가,
+    //  청크 하나가 합 24 로 구워지는 순간 인격이 사라진다)
+    // 그래서 둘 다 합 10 으로 정규화한 뒤 지분으로 섞는다.
+    const w = per ? clamp(num(per.readW, 0.5), 0, 1) : 1;
+    let sr = 0, sp = 0;
+    for (let k = 0; k < KINDS; k++) {
+      sr += num(read[k], 0) > 0 ? num(read[k], 0) : 0;
+      if (per) sp += num(per.mix[k], 0) > 0 ? num(per.mix[k], 0) : 0;
+    }
+    const kr = sr > 0 ? 10 / sr : 0;
+    const kp = sp > 0 ? 10 / sp : 0;
+    for (let k = 0; k < KINDS; k++) {
+      const rv = Math.max(0, num(read[k], 0)) * kr;
+      const pv = per ? Math.max(0, num(per.mix[k], 0)) * kp : 0;
+      m[k] = per ? pv * (1 - w) + rv * w : rv;
+    }
+
+    // ── 도배 처벌 — 이 판의 난이도는 여기서 결정된다 ───────────
+    // focus 는 플레이어가 **얼마나 읽히는가**다. 고르게 쓰면 0, 한 종류면 1.
+    // 아래 네 배수는 focus 가 0 이면 전부 1배다 — 다양하게 쓰는 플레이어에게는
+    // 난이도가 1g 도 오르지 않는다. 실수한 사람만 벌을 받는다.
+    const focus = this.metricFocus;
+    const sk = num(this.stageK, 1);          // 뒤 전투일수록 처벌이 날카롭다
+    const bite = clamp(focus * sk, 0, 1.6);
+
+    const cgBase = per ? num(per.cg, num(p.counterGain, 0)) : num(p.counterGain, 0);
+    this.applyCounter(m, cgBase * (1 + FOCUS_CG * bite));
+
+    // 템포 — 구운 웨이브의 tempo 에는 난이도가 이미 들어 있으므로 거기에
+    // **또** 난이도를 곱하지 않는다 (예전에 두 번 깎여 다섯 프로파일이 전부
+    // 하한 420ms 에 붙었다). 인격 템포와 섞고, 처벌만 곱한다.
+    const readTempo = ch ? num(ch.tempo, p.tempo) : p.tempo * (1 - d * 0.11);
+    const baseTempo = per ? num(per.tempo, readTempo) * (1 - w) + readTempo * w : readTempo;
+    const tempo = baseTempo * (1 - FOCUS_TEMPO * bite);
+
+    const goldMul = (per ? num(per.goldMul, 1) : 1) * p.goldMul * (1 + d * 0.1)
+      * (1 + FOCUS_GOLD * bite);
+    const eraThresh = (per ? num(per.eraThresh, 1) : 1) * p.eraThresh
+      * (1 - FOCUS_ERA * bite);
 
     this.levers = {
       mix: m,
       tempo: Math.max(420, tempo),
-      goldMul: p.goldMul * (1 + d * 0.1),
-      eraThresh: p.eraThresh,
-      waterMul: p.waterMul,
+      goldMul,
+      eraThresh: Math.max(0.4, eraThresh),
+      waterMul: (per ? num(per.waterMul, 1) : 1) * p.waterMul,
       draftSlant: p.draftSlant,
-      preferTags: p.preferTags,
+      preferTags: tags,
+      // ↓ game.js 가 아직 안 읽는다. 읽으면 사령관이 스킬·포탑까지 성격대로 쓴다.
+      //   (지금은 game.js 가 C.CMD_SKILL_MUL / C.CMD_TOWER 로 직접 정한다)
+      skillBias: 1 + 0.5 * bite,
+      towerWant: per && per.tags.indexOf('wall') >= 0 ? 2 : (this.stage > 1 ? 1 : 0),
     };
   }
 
@@ -500,14 +673,11 @@ export class Director {
   // 플레이어가 기병을 많이 뽑으면 창병이 늘고, 검사를 도배하면 궁수가 는다.
   // 프로파일(성향)이 판의 뼈대를 정하고, 여기서 **플레이어의 실제 구성**에
   // 반응해 살을 붙인다. 결정론적이다 — 같은 플레이면 같은 대응이 나온다.
-  applyCounter(m, p) {
-    const gain = num(p.counterGain, 0);
-    if (gain <= 0 || this.observing) return;
-    const tot = this.wSpawnN.mean();
-    if (tot < 0.5) return;      // 표본이 없으면 손대지 않는다
+  applyCounter(m, gain) {
+    if (!(gain > 0)) return;
+    if (!this.loadShare()) return;
     for (let u = 0; u < KINDS; u++) {
-      const share = clamp(this.wKind[u].mean() / tot, 0, 1);
-      this.mixShare[u] = share;
+      const share = this.effShare[u];
       if (share <= 0) continue;
       const list = COUNTERS_OF[u];
       // 한 유닛을 여러 종이 잡으면 나눠 준다. 총 가중치는 gain 을 넘지 않는다.
@@ -515,6 +685,26 @@ export class Director {
       for (let i = 0; i < list.length; i++) m[list[i]] += add;
     }
     for (let k = 0; k < KINDS; k++) m[k] = Math.round(m[k] * 100) / 100;
+  }
+
+  // 상성 대응과 도배 판정이 함께 쓰는 **유효 구성비**를 effShare 에 채운다.
+  // 이번 전투의 관측 + 앞 전투의 기억. 기억은 관측이 쌓이면서 사라진다.
+  // 돌려주는 값: 쓸 만한 표본이 있는가.
+  loadShare() {
+    const tot = this.wSpawnN.mean();
+    const have = tot > 0.5;
+    // 기억 지분 — 이번 전투에서 본 구간이 MEM_FADE 개를 넘으면 0 이다.
+    // 이게 없으면 사령관은 매 전투 백지에서 시작하고, 도배는 매번 처음
+    // 두세 구간을 공짜로 얻는다. 원정이 여정이라면 정보도 이어져야 한다.
+    const seen = this.wSpawnN.c;
+    const mw = this.memWeight > 0 ? clamp((MEM_FADE - seen) / MEM_FADE, 0, 1) : 0;
+    if (!have && mw <= 0) return false;
+    // 관측이 아직 없으면(전투 첫 구간) 기억만으로 대응한다.
+    for (let u = 0; u < KINDS; u++) {
+      const now = have ? clamp(this.wKind[u].mean() / tot, 0, 1) : 0;
+      this.effShare[u] = have ? now * (1 - mw) + this.memShare[u] * mw : this.memShare[u];
+    }
+    return true;
   }
 
   // ── 웨이브 선택 — 결정론적. Math.random() 없음 ───────────────
@@ -608,6 +798,22 @@ export class Director {
     const earn = this.wXpEarn.mean();
     if (earn < 1) return 0.5;
     return clamp(this.wXpEra.mean() / earn, 0, 1);
+  }
+  // 도배 지수 — **이 게임의 난이도가 걸려 있는 하나의 숫자다.**
+  // 정규화 허핀달: 여섯 종을 고르게 뽑으면 0, 한 종류만 뽑으면 1.
+  // (원식 H = Σs², 최소 1/6 최대 1 → (H−1/6)/(1−1/6) 로 0~1 에 편다)
+  // 기억이 살아 있으면 앞 전투의 구성도 같이 센다 — 사령관은 잊지 않는다.
+  get metricFocus() {
+    if (!this.loadShare()) return 0;
+    let h = 0;
+    for (let k = 0; k < KINDS; k++) h += this.effShare[k] * this.effShare[k];
+    const inv = 1 / KINDS;
+    return clamp((h - inv) / (1 - inv), 0, 1);
+  }
+  // 사령관 — 디렉터 뷰·렌더가 읽는다. 원정이 안 붙었으면 -1 / null 이다.
+  get commanderName() {
+    return this.commanderIdx >= 0 && C.COMMANDER_NAME
+      ? (C.COMMANDER_NAME[this.commanderIdx] || '') : '';
   }
   // 플레이어 구성비 — 디렉터 뷰·검수가 읽는다. 매번 새 배열을 만들지 않는다.
   get playerMix() {
