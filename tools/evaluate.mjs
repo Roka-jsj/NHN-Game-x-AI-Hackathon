@@ -488,7 +488,9 @@ async function run() {
     await p.addInitScript(CLOCK_INIT);
     await p.addInitScript(BOT);
     await p.goto(url, { waitUntil: 'load' });
-    await p.waitForFunction('!!window.__rising', null, { timeout: 15000, polling: 200 });
+    // 15초로 뒀더니 부하가 높을 때 페이지 부팅이 안 끝나 계측이 2판 날아갔다.
+    // **게임이 느린 게 아니라 이 기계가 붐빈 것이다.** 넉넉히 준다.
+    await p.waitForFunction('!!window.__rising', null, { timeout: 45000, polling: 200 });
     return p;
   }
 
@@ -998,7 +1000,7 @@ async function run() {
     let bots = CAMP_BOTS.slice();
     // 예산 안에 안 들어가면 표본을 줄인다. **줄인 사실을 출력에 남긴다.**
     for (const d of CAMP_DROP) {
-      const worst = bots.length * CAP_TOTAL;
+      const worst = bots.length * CAP_TOTAL_SEC * 60;
       if (estMs(worst, 0.40) < remainMs() * 0.50) break;
       bots = bots.filter((b) => b.name !== d);
       note('원정 표본 축소: ' + d + ' 봇을 뺐다 (남은 예산 ' + Math.round(remainMs() / 1000) + '초)');
@@ -1171,7 +1173,7 @@ async function run() {
     // 예산이 모자라면 **봇을 먼저 버리고 상대를 나중에 버린다.**
     // 상대(사령관 다섯)를 줄이면 난이도 곡선을 못 보게 되는데, 그게 지금 제일 궁금한 것이다.
     for (;;) {
-      const worst = foes.length * gbots.length * CAP_GAP;
+      const worst = foes.length * gbots.length * CAP_GAP_SEC * 60;
       // (estMs 에 계수를 안 넘겨 NaN 이 나오는 바람에 상대를 5→2 로 깎은 적이 있다.
       //  표본이 조용히 줄면 격차가 0 으로 뭉개진다 — 계측기가 자기 발등을 찍은 경우다)
       if (estMs(worst, 0.45) < remainMs() * 0.85) break;
@@ -1266,7 +1268,7 @@ async function run() {
       await p.close();
       return Object.assign({ foe: job.foe, bot: job.bot.name }, v);
     }, { foe: job.foe, bot: job.bot.name, outcome: -1, seconds: -1, broken: true }));
-    report.gap = { rows: rows.filter(Boolean), foes, bots: gbots.map((b) => b.name), cap: CAP_GAP / 60 };
+    report.gap = { rows: rows.filter(Boolean), foes, bots: gbots.map((b) => b.name), cap: CAP_GAP_SEC };
   }
 
   await browser.close();

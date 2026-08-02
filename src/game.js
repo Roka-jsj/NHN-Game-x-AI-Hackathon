@@ -63,6 +63,8 @@ export const EV = {
   STAGE_CLEAR: 21,  // a = 전투 번호
   TAUNT: 22,        // a = 사령관 인덱스, b = 디렉터가 판정한 플레이어 프로파일
   CAMPAIGN_END: 23, // a = 클리어한 전투 수, b = 1이면 완주
+  // ── 진화 보상. **0~23 은 건드리지 않는다. 추가는 24부터다** ──
+  SKILL_UP: 24,     // a = 스킬 번호, b = 새 등급 — 진화로 그 스킬이 바뀌었다
 };
 
 // 디렉터가 없을 때 적이 쓰는 고정 웨이브. 랜덤 0.
@@ -86,6 +88,10 @@ function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 // config 이 아직 이 상수를 안 줬으면 전부 0 이다 = 예전 그대로 동작한다.
 const U_MIN_RANGE = (C.U_MIN_RANGE && C.U_MIN_RANGE.length >= C.UNIT_KINDS)
   ? C.U_MIN_RANGE : new Float32Array(C.UNIT_KINDS);
+
+// 행군 — config 이 값을 안 주면 **행군이 없는 예전 게임**으로 조용히 돈다.
+const MARCH_SIGHT = (+C.MARCH_SIGHT > 0) ? +C.MARCH_SIGHT : 180;
+const MARCH_MUL = (+C.MARCH_MUL > 1) ? +C.MARCH_MUL : 1;
 
 // ── 원정 상수 — 방어적으로 읽는다 ─────────────────────────────
 // config 이 아직 v3 상수를 안 줬으면 **원정이 없는 예전 게임**으로 조용히 돈다.
@@ -135,6 +141,11 @@ export class Game {
     this.uCd = new Float32Array(N);       // 남은 공격 쿨다운 ms
     this.uHitFlash = new Uint8Array(N);   // 맞은 직후 프레임 수 (렌더용)
     this.uAttack = new Uint8Array(N);     // 공격 모션 프레임 (렌더용)
+    // 경직 프레임 — 재무장(진화)과 범람(해일 3등급)이 심는다.
+    // 0보다 크면 **움직이지도 때리지도 못한다.** 익사는 그대로 받는다.
+    this.uStun = new Uint8Array(N);
+    // 행군 중인가 (렌더용. 시뮬은 매 프레임 다시 판단한다)
+    this.uMarch = new Uint8Array(N);
 
     // 화살 풀 — 연출 전용. 판정은 쏘는 순간 끝나 있다.
     const A = C.ARROW_MAX;
@@ -161,6 +172,8 @@ export class Game {
     this.traits = new Uint8Array(C.TRAITS.length);
     this.draftIdx = new Int8Array(C.TRAIT_OFFER);
     this.spawnCd = new Float32Array(C.UNIT_KINDS);
+    // 증원 등급별 구성을 뿌릴 때 쓰는 버퍼. 루프 안에서 배열을 만들지 않는다.
+    this.rallyBuf = new Uint8Array(C.UNIT_KINDS);
     this.skillCd = new Float32Array(C.SKILL_COUNT);
     this.skillUsed = new Uint16Array(C.SKILL_COUNT);
     this.spawnedKind = new Uint16Array(C.UNIT_KINDS);
@@ -267,10 +280,18 @@ export class Game {
     this.stateTick = 0;
 
     this.uAlive.fill(0);
+    this.uStun.fill(0);
+    this.uMarch.fill(0);
     this.aLife.fill(0);
     this.uNext = 0;
     this.aliveL = 0;
     this.aliveR = 0;
+    // 재무장(진화)·총진군의 남은 시간. 전투마다 초기화된다.
+    this.rearmMs = 0;
+    this.aiRearmMs = 0;
+    this.surgeMs = 0;
+    this.aiSurgeMs = 0;
+    this.eraUps = 0;              // 이번 전투에서 진화한 횟수 (계측용)
 
     // 기지 체력은 **판 길이만** 정한다. 첫 전투가 0.45 인 이유는 그것뿐이다 —
     // 짧게 끝나야 가르치는 전투가 된다. 어려움은 여기가 아니라 STAGE_DIFF 가 만든다.
@@ -291,7 +312,7 @@ export class Game {
     this.spawnCd.fill(0);
 
     // 스킬 셋. 첫 판에도 한 번은 쓸 수 있게 절반만 채워 시작한다.
-    for (let i = 0; i < C.SKILL_COUNT; i++) this.skillCd[i] = C.SKILL_CD[i] * 0.45;
+    for (let i = 0; i < C.SKILL_COUNT; i++) this.skillCd[i] = this.skillCooldown(i, 0) * 0.45;
     this.skillUsed.fill(0);
 
     // 기지 포탑 — **원정에서 유지된다.** 여기서 0으로 만들지 않는다.
@@ -409,11 +430,14 @@ export class Game {
   statSpeed(kind, side) {
     let v = C.U_SPEED[kind];
     if (side === SIDE_L && this.has('swift')) v *= 1.25;
+    // 총진군 — 최대 시대의 스킬. 살아 있는 병력 전부가 잠깐 빨라진다.
+    if (side === SIDE_L ? this.surgeMs > 0 : this.aiSurgeMs > 0) v *= C.SURGE_SPEED;
     return v;
   }
   statCooldown(kind, side) {
     let v = C.U_COOLDOWN[kind];
     if (side === SIDE_L && kind === C.U_ARCHER && this.has('volley')) v *= 0.7;
+    if (side === SIDE_L ? this.surgeMs > 0 : this.aiSurgeMs > 0) v *= C.SURGE_CD_MUL;
     return v;
   }
   cost(kind) { return Math.round(C.U_COST[kind] * C.ERA_COST_MUL[this.era]); }
@@ -440,7 +464,53 @@ export class Game {
   // 다음 포탑 단계의 값. 최대면 -1.
   towerCost() { return this.towerLv >= C.TOWER_MAX ? -1 : C.TOWER_COST[this.towerLv]; }
   skillReady(i) {
-    return i >= 0 && i < C.SKILL_COUNT && this.skillCd[i] <= 0;
+    return i >= 0 && i < C.SKILL_COUNT && this.skillUnlocked(i) && this.skillCd[i] <= 0;
+  }
+
+  // ── 시대별 스킬 ─────────────────────────────────────────────
+  // **버튼은 늘리지 않는다.** 같은 버튼이 시대에 따라 다른 스킬이 된다.
+  // 아래 줄은 이미 10칸이 꽉 찼고 폰에서 한 손으로 되어야 하기 때문이다.
+  // 유일한 예외가 총진군인데, 그것도 새 칸이 아니라 **다 쓴 진화 칸**을 물려받는다.
+
+  // 그 시대에 이 스킬이 몇 등급인가. 0~SKILL_TIERS-1.
+  eraTier(i, era) {
+    const row = C.SKILL_TIER_ERA && C.SKILL_TIER_ERA[i];
+    if (!row) return 0;
+    let t = 0;
+    for (let k = 0; k < row.length; k++) if (era >= row[k]) t = k;
+    return t;
+  }
+  skillTier(i) { return this.eraTier(i, this.era); }
+  aiSkillTier(i) { return this.eraTier(i, this.aiEra); }
+  // 아트가 버튼에 쓸 이름. 시대가 오르면 **버튼의 글자가 바뀐다.**
+  skillName(i) {
+    const row = C.SKILL_TIER_NAME && C.SKILL_TIER_NAME[i];
+    if (!row) return C.SKILL_NAME[i] || '';
+    const t = this.skillTier(i);
+    return row[t < row.length ? t : row.length - 1] || C.SKILL_NAME[i];
+  }
+  // 총진군은 **최대 시대에만** 열린다. 그 전에는 그 자리가 진화 버튼이다.
+  skillUnlocked(i) {
+    if (i !== C.SK_SURGE) return true;
+    return this.era >= C.ERA_COUNT - 1;
+  }
+  aiSkillUnlocked(i) {
+    if (i !== C.SK_SURGE) return true;
+    return this.aiEra >= C.ERA_COUNT - 1;
+  }
+  // 스킬 피해 — 등급 배수 × 시대 배수. **양쪽이 같은 식을 쓴다.**
+  // 시대 배수가 없으면 스킬은 시대와 함께 죽는다 (config 주석 참조).
+  skillDmg(i, era) {
+    const tier = this.eraTier(i, era);
+    const tm = (C.SKILL_TIER_DMG_MUL && C.SKILL_TIER_DMG_MUL[tier]) || 1;
+    const em = (C.SKILL_ERA_MUL && C.SKILL_ERA_MUL[era]) || 1;
+    return C.SKILL_DMG[i] * tm * em;
+  }
+  // 등급이 오르면 세지는 대신 **자주 못 쓴다.**
+  skillCooldown(i, era) {
+    const tier = this.eraTier(i, era);
+    const cm = (C.SKILL_TIER_CD_MUL && C.SKILL_TIER_CD_MUL[tier]) || 1;
+    return (C.SKILL_CD[i] || 30000) * cm;
   }
 
   // 설명 화면을 닫는다. 입력이든 시간이든 여기로 들어온다.
@@ -475,7 +545,13 @@ export class Game {
     if (act >= 0 && act < C.UNIT_KINDS) { this.buy(act); return; }
 
     switch (act) {
-      case ACT.ERA: this.buyEra(); break;
+      // **진화 버튼은 다 쓰면 스킬이 된다.** 최대 시대에 도달하면 이 칸은
+      // 영원히 "최대"만 띄우는 죽은 칸이었다. 그 칸을 총진군이 물려받는다 —
+      // 버튼을 늘리지 않고 스킬을 늘리는 유일한 방법이다.
+      case ACT.ERA:
+        if (this.era >= C.ERA_COUNT - 1) this.useSkill(C.SK_SURGE);
+        else this.buyEra();
+        break;
       case ACT.TOWER: this.buyTower(); break;
       case ACT.TIDE: this.useSkill(C.SK_TIDE); break;
       case ACT.VOLLEY: this.useSkill(C.SK_VOLLEY); break;
@@ -508,8 +584,13 @@ export class Game {
     const need = this.eraNeed();      // era++ 전에 잡아 둔다. 뒤에 읽으면 다음 시대 값이다
     this.xp -= need;
     this.era++;
+    this.eraUps++;
     this.goldSpentEra += need;
     this.eraScaleBase(SIDE_L, this.era - 1, this.era);
+    // **판이 그 자리에서 바뀐다.** 나가 있는 병력이 통째로 새 시대가 되고,
+    // 그 대가로 잠시 굳는다. 무엇을 얻고 무엇을 잃는지가 화면에 동시에 보인다.
+    this.promoteArmy(SIDE_L, this.era);
+    this.upgradeSkills(SIDE_L, this.era - 1, this.era);
     this.gold += C.ERA_UP_GOLD;
     // **적이 따라온다.** 내가 올린 순간 적의 다음 시대가 그만큼 가까워진다.
     // 즉시 올려 주지는 않는다 — 적은 제 경제로 나머지를 채운 뒤에 올라온다.
@@ -539,58 +620,152 @@ export class Game {
     this.emit(EV.TOWER_UP, this.towerLv, SIDE_L);
   }
 
+  // ── 진화 = 사건 ─────────────────────────────────────────────
+  // 지금까지 진화는 배수만 바꿨다. 이미 나가 있는 병력은 **그대로**였고
+  // 그래서 화면에서는 아무 일도 안 일어났다 — 사용자가 "큰 변화가 없다"고
+  // 한 것이 정확히 이것이다.
+  //
+  // 재무장: 살아 있는 병력이 통째로 새 시대로 승격된다. 체력은 **비율을 유지**하며
+  // 최대치가 오른다(다 죽어 가던 병사가 진화로 되살아나면 그건 회복 버튼이다).
+  // 대가는 경직이다 — 그 사이 아무것도 못 한다.
+  // **이 대가가 진화를 결정으로 만든다.** 맞붙은 순간에 올리면 전열이 그 자리에서
+  // 녹고, 한숨 돌린 뒤에 올리면 통째로 강해진 병력을 얻는다.
+  promoteArmy(side, to) {
+    if (C.ERA_PROMOTE !== 1) return;
+    let stun = C.ERA_REARM_MS > 0 ? Math.round(C.ERA_REARM_MS / C.SIM_DT) : 0;
+    if (stun > 250) stun = 250;                    // Uint8Array 상한
+    if (side === SIDE_L) this.rearmMs = C.ERA_REARM_MS; else this.aiRearmMs = C.ERA_REARM_MS;
+    for (let i = 0; i < C.UNIT_MAX; i++) {
+      if (!this.uAlive[i] || this.uSide[i] !== side) continue;
+      if (this.uEra[i] >= to) continue;
+      const k = this.uHpMax[i] > 0 ? this.uHp[i] / this.uHpMax[i] : 1;
+      this.uEra[i] = to;
+      const hp = this.statHp(this.uKind[i], to, side);
+      this.uHpMax[i] = hp;
+      this.uHp[i] = hp * k;
+      if (stun > 0 && this.uStun[i] < stun) this.uStun[i] = stun;
+    }
+  }
+
+  // 진화로 스킬 등급이 오르면 **그 스킬은 그 자리에서 쓸 수 있게 된다.**
+  // 새로 생긴 것을 바로 못 쓰면 무엇이 달라졌는지 알 수가 없다.
+  upgradeSkills(side, from, to) {
+    for (let i = 0; i < C.SKILL_COUNT; i++) {
+      const before = this.eraTier(i, from), after = this.eraTier(i, to);
+      const opened = (i === C.SK_SURGE) && to >= C.ERA_COUNT - 1 && from < C.ERA_COUNT - 1;
+      if (after === before && !opened) continue;
+      if (side === SIDE_L) {
+        this.skillCd[i] = 0;
+        this.emit(EV.SKILL_UP, i, after);
+      } else {
+        this.aiSkillCd[i] = 0;
+      }
+    }
+  }
+
   // ── 스킬 ────────────────────────────────────────────────────
-  // 해일 · 화살비 · 증원. 셋 다 쿨다운이 독립이고 전부 결정론적이다.
+  // 해일 · 화살비 · 증원 · 총진군. 쿨다운이 전부 독립이고 결정론적이다.
+  // **효과는 진영과 시대를 인자로 받는 한 곳에만 있다** — 적이 쓰는 해일과
+  // 내가 쓰는 해일이 다른 코드였을 때 등급이 한쪽에만 붙는 사고가 난다.
   useSkill(i) {
     if (i < 0 || i >= C.SKILL_COUNT) return;
     if (this.state !== S.PLAY) return;
+    if (!this.skillUnlocked(i)) { this.emit(EV.COOLDOWN, -1, 0); return; }
     if (this.skillCd[i] > 0) { this.emit(EV.COOLDOWN, -1, 0); return; }
-    this.skillCd[i] = C.SKILL_CD[i];
+    this.skillCd[i] = this.skillCooldown(i, this.era);
     this.skillUsed[i]++;
     this.emit(EV.SKILL, i, SIDE_L);
-    if (i === C.SK_TIDE) this.doTide();
-    else if (i === C.SK_VOLLEY) this.doVolley();
-    else this.doRally();
+    this.applySkill(i, SIDE_L, this.era);
   }
 
   // 예전 이름 호환. 필살기는 해일이 되었다.
   fireNuke() { this.useSkill(C.SK_TIDE); }
 
-  // 해일 — 적 전체에 피해를 주고 물을 크게 민다.
+  applySkill(i, side, era) {
+    if (i === C.SK_TIDE) this.doTide(side, era);
+    else if (i === C.SK_VOLLEY) this.doVolley(side, era);
+    else if (i === C.SK_RALLY) this.doRally(side, era);
+    else this.doSurge(side);
+  }
+
+  // 해일 → 격류 → 범람. 적 전체에 피해를 주고 물을 크게 민다.
   // 기지는 건드리지 않는다. 그러면 이건 그냥 승리 버튼이 된다.
-  doTide() {
-    const dmg = C.SKILL_DMG[C.SK_TIDE];
+  // 2등급부터 **적을 뒤로 민다** — 전선이 실제로 움직이는 유일한 스킬이고,
+  // 3등급은 잠깐 넘어뜨린다. 숫자가 아니라 판이 바뀐다.
+  doTide(side, era) {
+    const foe = side === SIDE_L ? SIDE_R : SIDE_L;
+    const tier = this.eraTier(C.SK_TIDE, era);
+    const dmg = this.skillDmg(C.SK_TIDE, era);
+    const push = (C.TIDE_PUSH_PX && C.TIDE_PUSH_PX[tier]) || 0;
+    const stunMs = (C.TIDE_STUN_MS && C.TIDE_STUN_MS[tier]) || 0;
+    let stun = stunMs > 0 ? Math.round(stunMs / C.SIM_DT) : 0;
+    if (stun > 250) stun = 250;
+    const dir = side === SIDE_L ? 1 : -1;
     for (let i = 0; i < C.UNIT_MAX; i++) {
-      if (!this.uAlive[i] || this.uSide[i] !== SIDE_R) continue;
-      this.damage(i, dmg, SIDE_L, -1);
+      if (!this.uAlive[i] || this.uSide[i] !== foe) continue;
+      if (push > 0) {
+        let x = this.uX[i] + push * dir;
+        if (x < C.BASE_L_X) x = C.BASE_L_X;
+        if (x > C.BASE_R_X) x = C.BASE_R_X;
+        this.uX[i] = x;
+      }
+      if (stun > 0 && this.uStun[i] < stun) this.uStun[i] = stun;
+      this.damage(i, dmg, side, -1);
     }
-    this.water += C.NUKE_WATER_PUSH;
-    this.nukes++;
-    this.emit(EV.NUKE, 0, 0);     // feel·audio 의 기존 연출을 그대로 쓴다
+    // 물을 미는 것은 **플레이어의 해일만**이다. 적의 해일까지 물을 밀면
+    // 마감 시계가 적의 스킬로 꺼져 판이 다시 늘어진다 (예전 동작 그대로 유지).
+    if (side === SIDE_L) {
+      this.water += C.NUKE_WATER_PUSH;
+      this.nukes++;
+      this.emit(EV.NUKE, 0, 0);   // feel·audio 의 기존 연출을 그대로 쓴다
+    }
   }
 
-  // 화살비 — **전선 부근에만** 떨어진다. 아군은 한 대도 맞지 않는다.
-  // 해일과 다른 점은 "언제 쓰는가"다. 전선이 뭉쳐 있을 때만 값이 나온다.
-  doVolley() {
-    const cx = this.frontlineX();
-    const r = C.VOLLEY_RADIUS;
-    const dmg = C.SKILL_DMG[C.SK_VOLLEY];
+  // 화살비 → 쇠뇌비 → 융단폭격. **전선 부근에만** 떨어진다. 아군은 안 맞는다.
+  // 등급이 오르면 낙하 지점이 는다 — 전선 → 전선+적 후방 → 셋.
+  // 후방 낙하는 **아직 도착하지 않은 증원**을 때린다. 반경만 넓히는 것과 다르다.
+  doVolley(side, era) {
+    const foe = side === SIDE_L ? SIDE_R : SIDE_L;
+    const tier = this.eraTier(C.SK_VOLLEY, era);
+    const r = (C.VOLLEY_TIER_R && C.VOLLEY_TIER_R[tier]) || C.VOLLEY_RADIUS;
+    const zones = (C.VOLLEY_TIER_ZONES && C.VOLLEY_TIER_ZONES[tier]) || 1;
+    const dmg = this.skillDmg(C.SK_VOLLEY, era);
+    const c0 = this.frontlineX();
+    const c1 = side === SIDE_L ? C.SPAWN_R_X : C.SPAWN_L_X;   // 적 후방
+    const c2 = (c0 + c1) * 0.5;
     for (let i = 0; i < C.UNIT_MAX; i++) {
-      if (!this.uAlive[i] || this.uSide[i] !== SIDE_R) continue;
+      if (!this.uAlive[i] || this.uSide[i] !== foe) continue;
       const x = this.uX[i];
-      const d = x - cx;
-      if (d < -r || d > r) continue;
+      let hit = (x - c0 >= -r && x - c0 <= r);
+      if (!hit && zones > 1) { const d = x - c1; hit = (d >= -r * 0.75 && d <= r * 0.75); }
+      if (!hit && zones > 2) { const d = x - c2; hit = (d >= -r * 0.75 && d <= r * 0.75); }
+      if (!hit) continue;
       const gy = groundAt(x);
-      this.pushArrow(x, gy - 320, x, gy - C.U_H[this.uKind[i]] * 0.5, SIDE_L);
-      this.damage(i, dmg, SIDE_L, -1);
+      this.pushArrow(x, gy - 320, x, gy - C.U_H[this.uKind[i]] * 0.5, side);
+      this.damage(i, dmg, side, -1);
     }
   }
 
-  // 증원 — 현재 시대 검사를 공짜로 즉시 세운다. 한 점에 겹치지 않게 뒤로 벌린다.
-  doRally() {
-    for (let k = 0; k < C.RALLY_COUNT; k++) {
-      this.spawn(SIDE_L, C.U_SWORD, this.era, k * C.UNIT_GAP);
+  // 증원 → 원군 → 정예군. 공짜로 즉시 세운다. 한 점에 겹치지 않게 뒤로 벌린다.
+  // 등급이 오르면 **수가 아니라 구성**이 바뀐다. 정예군은 그 자체로 한 줄의 전열이다.
+  doRally(side, era) {
+    const tier = this.eraTier(C.SK_RALLY, era);
+    const row = C.RALLY_TIER_MIX && C.RALLY_TIER_MIX[tier];
+    let off = 0;
+    if (!row) {
+      for (let k = 0; k < C.RALLY_COUNT; k++) this.spawn(side, C.U_SWORD, era, k * C.UNIT_GAP);
+      return;
     }
+    for (let k = 0; k < C.UNIT_KINDS; k++) {
+      const n = row[k] | 0;
+      for (let j = 0; j < n; j++) { this.spawn(side, k, era, off * C.UNIT_GAP); off++; }
+    }
+  }
+
+  // 총진군 — 최대 시대에만 열린다. 살아 있는 병력 전부가 잠깐 빨라지고 자주 때린다.
+  // **병력이 없으면 아무 일도 안 일어난다.** 그래서 "언제 쓰는가"가 전부다.
+  doSurge(side) {
+    if (side === SIDE_L) this.surgeMs = C.SURGE_MS; else this.aiSurgeMs = C.SURGE_MS;
   }
 
   // ── 유닛 소환 ───────────────────────────────────────────────
@@ -618,6 +793,8 @@ export class Game {
     this.uCd[idx] = 0;
     this.uHitFlash[idx] = 0;
     this.uAttack[idx] = 0;
+    this.uStun[idx] = 0;
+    this.uMarch[idx] = 0;
 
     if (side === SIDE_L) { this.aliveL++; this.spawned++; this.spawnedKind[kind]++; }
     else this.aliveR++;
@@ -709,6 +886,12 @@ export class Game {
       }
     }
 
+    // 재무장·총진군의 남은 시간. 렌더가 이 값으로 진화의 순간을 그린다.
+    if (this.rearmMs > 0) { this.rearmMs -= C.SIM_DT; if (this.rearmMs < 0) this.rearmMs = 0; }
+    if (this.aiRearmMs > 0) { this.aiRearmMs -= C.SIM_DT; if (this.aiRearmMs < 0) this.aiRearmMs = 0; }
+    if (this.surgeMs > 0) { this.surgeMs -= C.SIM_DT; if (this.surgeMs < 0) this.surgeMs = 0; }
+    if (this.aiSurgeMs > 0) { this.aiSurgeMs -= C.SIM_DT; if (this.aiSurgeMs < 0) this.aiSurgeMs = 0; }
+
     // 적도 같은 규칙으로 번다. 레버가 배수를 준다.
     // 레버 값이 깨져 있으면 배수를 무시한다. aiGold 가 한 번 NaN 이 되면
     // "살 돈이 있는가" 비교가 전부 false 가 되어 적이 무한히 쏟아진다 —
@@ -733,8 +916,9 @@ export class Game {
   }
 
   // 적 스킬의 쿨다운. 사령관 성격과 스테이지 난이도가 같이 줄인다.
+  // 등급 배수는 **플레이어와 같은 식**을 쓴다 (skillCooldown).
   aiSkillCooldown(i) {
-    const base = C.SKILL_CD[i] || 30000;
+    const base = this.skillCooldown(i, this.aiEra);
     const d = this.stageDiff();
     return base * this.cmdSkillMul() / (d > 0 ? d : 1);
   }
@@ -761,6 +945,10 @@ export class Game {
         this.aiXp -= need;
         this.aiEra++;
         this.eraScaleBase(SIDE_R, this.aiEra - 1, this.aiEra);
+        // **적도 재무장한다.** 규칙이 한쪽에만 있으면 그건 규칙이 아니라 특혜다.
+        // 그리고 적이 굳어 있는 1.25초는 플레이어에게 **기회**로 보여야 한다.
+        this.promoteArmy(SIDE_R, this.aiEra);
+        this.upgradeSkills(SIDE_R, this.aiEra - 1, this.aiEra);
         this.emit(EV.ERA_UP, this.aiEra, SIDE_R);
       }
     }
@@ -886,53 +1074,44 @@ export class Game {
     if (this.aliveL <= 0) return;
 
     if (this.aiSkillCd[C.SK_TIDE] <= 0 && this.aliveL >= C.AI_TIDE_MIN) {
-      this.aiSkillCd[C.SK_TIDE] = this.aiSkillCooldown(C.SK_TIDE);
-      this.aiSkillUsed[C.SK_TIDE]++;
-      this.emit(EV.SKILL, C.SK_TIDE, SIDE_R);
-      const dmg = C.SKILL_DMG[C.SK_TIDE];
-      for (let i = 0; i < C.UNIT_MAX; i++) {
-        if (!this.uAlive[i] || this.uSide[i] !== SIDE_L) continue;
-        this.damage(i, dmg, SIDE_R, -1);
-      }
+      this.fireAiSkill(C.SK_TIDE);
       return;
     }
 
     if (this.aiSkillCd[C.SK_VOLLEY] <= 0) {
       const cx = this.frontlineX();
-      const r = C.VOLLEY_RADIUS;
+      const tier = this.aiSkillTier(C.SK_VOLLEY);
+      const r = (C.VOLLEY_TIER_R && C.VOLLEY_TIER_R[tier]) || C.VOLLEY_RADIUS;
       let n = 0;
       for (let i = 0; i < C.UNIT_MAX; i++) {
         if (!this.uAlive[i] || this.uSide[i] !== SIDE_L) continue;
         const d = this.uX[i] - cx;
         if (d >= -r && d <= r) n++;
       }
-      if (n >= C.AI_VOLLEY_MIN) {
-        this.aiSkillCd[C.SK_VOLLEY] = this.aiSkillCooldown(C.SK_VOLLEY);
-        this.aiSkillUsed[C.SK_VOLLEY]++;
-        this.emit(EV.SKILL, C.SK_VOLLEY, SIDE_R);
-        const dmg = C.SKILL_DMG[C.SK_VOLLEY];
-        for (let i = 0; i < C.UNIT_MAX; i++) {
-          if (!this.uAlive[i] || this.uSide[i] !== SIDE_L) continue;
-          const x = this.uX[i];
-          const d = x - cx;
-          if (d < -r || d > r) continue;
-          const gy = groundAt(x);
-          this.pushArrow(x, gy - 320, x, gy - C.U_H[this.uKind[i]] * 0.5, SIDE_R);
-          this.damage(i, dmg, SIDE_R, -1);
-        }
-        return;
-      }
+      if (n >= C.AI_VOLLEY_MIN) { this.fireAiSkill(C.SK_VOLLEY); return; }
+    }
+
+    // 총진군 — 적도 최대 시대에 도달하면 쓴다. **규칙이 한쪽에만 있으면 특혜다.**
+    // 병력이 모여 있을 때만 쓴다. 빈 전선에 쓰면 아무 일도 안 일어난다.
+    if (this.aiSkillUnlocked(C.SK_SURGE) && this.aiSkillCd[C.SK_SURGE] <= 0
+        && this.aiSurgeMs <= 0 && this.aliveR >= 4) {
+      this.fireAiSkill(C.SK_SURGE);
+      return;
     }
 
     if (this.aiSkillCd[C.SK_RALLY] <= 0
         && this.aliveR <= C.AI_RALLY_MAX && this.aliveL >= C.AI_RALLY_MAX + 2) {
-      this.aiSkillCd[C.SK_RALLY] = this.aiSkillCooldown(C.SK_RALLY);
-      this.aiSkillUsed[C.SK_RALLY]++;
-      this.emit(EV.SKILL, C.SK_RALLY, SIDE_R);
-      for (let k = 0; k < C.RALLY_COUNT; k++) {
-        this.spawn(SIDE_R, C.U_SWORD, this.aiEra, k * C.UNIT_GAP);
-      }
+      this.fireAiSkill(C.SK_RALLY);
     }
+  }
+
+  // 적이 스킬 하나를 쓴다. **효과는 플레이어와 같은 코드**(applySkill)를 탄다 —
+  // 등급이 한쪽에만 붙는 사고를 구조적으로 막는다.
+  fireAiSkill(i) {
+    this.aiSkillCd[i] = this.aiSkillCooldown(i);
+    this.aiSkillUsed[i]++;
+    this.emit(EV.SKILL, i, SIDE_R);
+    this.applySkill(i, SIDE_R, this.aiEra);
   }
 
   // 레버의 mix 를 길이 6 가중치 버퍼로 옮긴다.
@@ -1040,19 +1219,29 @@ export class Game {
       const dir = side === SIDE_L ? 1 : -1;
       const range = C.U_RANGE[kind];
 
+      // 경직 — 재무장(진화) 중이거나 범람에 휩쓸렸다. 서 있기만 한다.
+      // **익사는 그대로 받는다** (아래 물 루프). 무방비라는 말이 그런 뜻이다.
+      if (this.uStun[i] > 0) { this.uStun[i]--; this.uMarch[i] = 0; continue; }
+
       // ── 1) 유닛 표적이 먼저다 ──────────────────────────────────────
       // 기지를 먼저 보게 하는 안을 재봤다. 기병이 궁수 대열의 꼬리에 닿는 순간
       // 남은 궁수를 버리고 기지를 때리기 시작해 등 뒤에서 사살당했고,
       // 계약의 "기병>궁수" 변이 8:8 에서 1:0 → 0:3 으로 뒤집혔다. 그래서 되돌렸다.
       // 기지에 닿는 문제는 표적 순서가 아니라 물과 시대 경제의 문제였다.
+      // 앞쪽 시야 안 가장 가까운 적까지의 거리. **행군 판정에 쓴다.**
+      // 사거리가 아니라 시야(MARCH_SIGHT)까지 한 번에 훑으므로 훑는 횟수는 그대로다.
+      let nearFoe = 1e9;
       if (C.U_SIEGE[kind] !== 1) {
-        const target = this.findTarget(i, side, dir, range);
-        if (target >= 0) {
+        const sight = range > MARCH_SIGHT ? range : MARCH_SIGHT;
+        const target = this.findTarget(i, side, dir, sight);
+        const td = target >= 0 ? (this.uX[target] - this.uX[i]) * dir : 1e9;
+        if (target >= 0) nearFoe = td;
+        if (target >= 0 && td <= range) {
           // 너무 가까우면 공격도 전진도 못 한다. 서서 얻어맞는다 —
           // 이게 "궁수는 근접에 약하다"의 실체다. 더 먼 적으로 표적을 바꾸지도
           // 않는다. 코앞에 붙은 적을 두고 뒤를 쏘는 것이 오히려 이상하다.
           const minR = U_MIN_RANGE[kind];
-          if (minR > 0 && (this.uX[target] - this.uX[i]) * dir < minR) continue;
+          if (minR > 0 && td < minR) { this.uMarch[i] = 0; continue; }
           if (this.uCd[i] <= 0) {
             this.uCd[i] = this.statCooldown(kind, side);
             this.uAttack[i] = 8;
@@ -1066,6 +1255,11 @@ export class Game {
       }
       // 공성 병기(투석기)는 위 블록을 통째로 건너뛴다. 유닛을 표적으로 삼지 않고
       // 공성선까지 걸어가 기지만 친다 — 그 이유는 config 의 U_SIEGE 주석에 있다.
+      // 다만 **행군 판정에는 적을 본다.** 아니면 적 한복판을 뛰어 지나간다.
+      else {
+        const t2 = this.findTarget(i, side, dir, MARCH_SIGHT);
+        if (t2 >= 0) nearFoe = (this.uX[t2] - this.uX[i]) * dir;
+      }
 
       // ── 2) 적 기지 ────────────────────────────────────────────────
       // 사거리에 하한("앞마당")을 주는 안을 재봤지만 상성 삼각형이 깨졌다.
@@ -1088,8 +1282,19 @@ export class Game {
       }
 
       // 앞에 아군이 막고 있으면 밀지 않는다. 이게 없으면 전부 한 점에 뭉친다.
-      if (this.blockedAhead(i, side, dir)) continue;
-      this.uX[i] += this.statSpeed(kind, side) * dir * dt;
+      if (this.blockedAhead(i, side, dir)) { this.uMarch[i] = 0; continue; }
+
+      // ── 행군 ──────────────────────────────────────────────────────
+      // 시야에 적이 없고 적 기지도 멀면 뛴다. **전투 속도는 1px 도 안 바뀐다** —
+      // 빈 벌판을 건너는 시간만 줄어든다. 실측된 "답답하다"의 정체가 그것이었다
+      // (첫 전투에서 소환→첫 교전 중앙값 14.1초).
+      let sp = this.statSpeed(kind, side);
+      const baseGap = (baseX - this.uX[i]) * dir - C.BASE_W * 0.5 - range;
+      if (MARCH_MUL > 1 && nearFoe > MARCH_SIGHT && baseGap > MARCH_SIGHT) {
+        sp *= MARCH_MUL;
+        this.uMarch[i] = 1;
+      } else this.uMarch[i] = 0;
+      this.uX[i] += sp * dir * dt;
     }
 
     // 물에 잠긴 유닛은 익사한다. **가운데가 가장 낮으므로 전선이 먼저 잠긴다** —

@@ -85,7 +85,6 @@ const LBL_NEW_KEY = '아무 키나 눌러 새 원정';
 const LBL_BEATEN = '격파한 사령관';
 const LBL_FOE_ERA = '적 시대';
 const LBL_FOE_UP = '적이 진화했다';
-const LBL_MY_ERA = '내 시대';
 const LBL_CAMP_TIME = '원정 누적';
 const LBL_SLASH = '/';
 const BR_TITLE = '차오른다';
@@ -172,7 +171,7 @@ const STRIP_MAXH = 92 + 6;
 // ── 사령관 카드 — 오른쪽 위. AI 토글(904~) 앞에서 끝난다 ──
 const CMD_X = 706, CMD_Y = 8, CMD_W = 190, CMD_H = 116;
 const FX_FOE_ERA_F = 130;              // 적이 진화한 순간을 알리는 시간
-const CMD_PR = 20;                     // 초상 반지름
+const CMD_PR = 17;                     // 초상 반지름
 const FX_LINE_F = 250;                 // 전투 시작 대사가 떠 있는 렌더 프레임
 const FX_TAUNT_F = 200;                // 도발
 const BUB_W_MAX = 400;
@@ -2531,7 +2530,7 @@ export class Renderer {
     // 적 편성 막대 — **"적이 뭘 뽑고 있나"가 1초 안에 읽혀야 한다.**
     // 지금 살아 있는 적 구성이다. 아이콘 줄은 카드에 구워져 있고 여기서는 막대만 칠한다.
     const mx = CMD_X + 10, mw = CMD_W - 20, cw = mw / C.UNIT_KINDS;
-    const my = CMD_Y + 72, mh = 16;
+    const my = CMD_Y + 78, mh = 15;
     ctx.fillStyle = C.COL_STRUCT;
     ctx.beginPath();
     let anyF = 0;
@@ -2571,7 +2570,7 @@ export class Renderer {
     // 도발 중이면 초상에 금빛 고리가 돈다 — 놓치지 않게
     if (this.fxTaunt > 0) {
       const t = this.fxTaunt / FX_TAUNT_F;
-      const px = CMD_X + 7 + CMD_PR, py = CMD_Y + 6 + CMD_PR;
+      const px = CMD_X + 8 + CMD_PR, py = CMD_Y + 4 + CMD_PR;
       ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(0.35 + 0.65 * t)];
       ctx.lineWidth = 2.5;
       ctx.beginPath();
@@ -2655,39 +2654,39 @@ export class Renderer {
 
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    const tx = CMD_X + (cmd >= 0 ? CMD_PR * 2 + 16 : 10);
+    const tx = CMD_X + (cmd >= 0 ? CMD_PR * 2 + 18 : 10);
     if (cmd >= 0) {
-      this.drawEmblem(cmd, CMD_X + 7 + CMD_PR, CMD_Y + 6 + CMD_PR, CMD_PR);
+      this.drawEmblem(cmd, CMD_X + 8 + CMD_PR, CMD_Y + 4 + CMD_PR, CMD_PR);
       ctx.font = FONT_MID;
       ctx.fillStyle = C.COL_STRUCT;
-      ctx.fillText(CMD_NAME[cmd], tx, CMD_Y + 6);
+      ctx.fillText(CMD_NAME[cmd], tx, CMD_Y + 4);
       ctx.font = FONT_MICRO;
       ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.62)];
-      if (CMD_TITLE) ctx.fillText(CMD_TITLE[cmd], tx + CMD_NAME[cmd].length * 20 + 6, CMD_Y + 13);
+      if (CMD_TITLE) ctx.fillText(CMD_TITLE[cmd], tx + CMD_NAME[cmd].length * 20 + 6, CMD_Y + 11);
 
       // 원정 진행 — 몇 번째 전투인가. 지나온 칸은 금색이다
       ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.9)];
       ctx.beginPath();
-      for (let i = 0; i < stageMax; i++) if (i < stage) ctx.rect(tx + i * 12, CMD_Y + 30, 8, 6);
+      for (let i = 0; i < stageMax; i++) if (i < stage) ctx.rect(tx + i * 12, CMD_Y + 28, 8, 6);
       ctx.fill();
       ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.28)];
       ctx.beginPath();
-      for (let i = 0; i < stageMax; i++) if (i > stage) ctx.rect(tx + i * 12, CMD_Y + 30, 8, 6);
+      for (let i = 0; i < stageMax; i++) if (i > stage) ctx.rect(tx + i * 12, CMD_Y + 28, 8, 6);
       ctx.fill();
       ctx.fillStyle = C.COL_PLAYER;
-      ctx.fillRect(tx + stage * 12, CMD_Y + 29, 8, 8);
+      ctx.fillRect(tx + stage * 12, CMD_Y + 27, 8, 8);
       ctx.font = FONT_MICRO;
       ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
-      ctx.fillText(LBL_STAGE, tx + stageMax * 12 + 6, CMD_Y + 30);
-      this.drawLeft(stage + 1, tx + stageMax * 12 + 24, CMD_Y + 30, 7);
-      ctx.fillText(LBL_SLASH, tx + stageMax * 12 + 32, CMD_Y + 30);
-      this.drawLeft(stageMax, tx + stageMax * 12 + 38, CMD_Y + 30, 7);
+      ctx.fillText(LBL_STAGE, tx + stageMax * 12 + 6, CMD_Y + 28);
+      this.drawLeft(stage + 1, tx + stageMax * 12 + 24, CMD_Y + 28, 7);
+      ctx.fillText(LBL_SLASH, tx + stageMax * 12 + 32, CMD_Y + 28);
+      this.drawLeft(stageMax, tx + stageMax * 12 + 38, CMD_Y + 28, 7);
     }
 
     // ── 적 시대 사다리 — **한 줄에 두 진영의 시대가 같이 있다** ──
     // 채워진 칸이 적의 시대, 그 아래 흰 표식이 내 시대다. 누가 앞서는지가
     // 숫자를 읽지 않고 위치로 읽힌다.
-    const ey = CMD_Y + 44;
+    const ey = CMD_Y + 48;
     ctx.font = FONT_MICRO;
     ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.62)];
     ctx.fillText(LBL_FOE_ERA, CMD_X + 10, ey);
@@ -2717,10 +2716,10 @@ export class Renderer {
     const mx = CMD_X + 10, mw = CMD_W - 20, cw = mw / C.UNIT_KINDS;
     ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.16)];
     ctx.beginPath();
-    for (let k = 0; k < C.UNIT_KINDS; k++) ctx.rect(mx + cw * k + 2, CMD_Y + 72, cw - 4, 16);
+    for (let k = 0; k < C.UNIT_KINDS; k++) ctx.rect(mx + cw * k + 2, CMD_Y + 78, cw - 4, 15);
     ctx.fill();
     for (let k = 0; k < C.UNIT_KINDS; k++) {
-      this.drawMixIcon(k, mx + cw * (k + 0.5), CMD_Y + 101, C.RAMP_STRUCT[C.rampIndex(0.8)]);
+      this.drawMixIcon(k, mx + cw * (k + 0.5), CMD_Y + 104, C.RAMP_STRUCT[C.rampIndex(0.8)]);
     }
   }
 
