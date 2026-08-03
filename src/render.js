@@ -157,6 +157,13 @@ const DV_SEE = '보는 것 — 플레이어 구성';
 const DV_DO = '지시 — 다음 웨이브 구성';
 const DV_TEMPO = '간격';
 const DV_WATER = '수위 배수';
+// 판별값 — 「몰아 뽑았다」와 「맞게 몰아 뽑았다」를 가르는 값.
+// 위 넷과 성질이 다르다. 넷은 **너는 이런 사람이다**이고 이건 **지금 맞게
+// 뽑고 있는가**다. 그리고 이 값만이 처벌을 **깎는다**. 그래서 같은 막대 넷에
+// 다섯 번째로 끼워 넣지 않고 줄을 따로 준다.
+const DV_EDGE = '상성 우위';
+// 걸린 처벌의 상태를 한 낱말로. 매 프레임 문자열을 만들면 그게 GC 스파이크다.
+const DV_EDGE_VERDICT = ['처벌', '부분 면제', '면제'];
 
 const TOGGLE_SIZE = 40;
 
@@ -5353,7 +5360,7 @@ export class Renderer {
     const ctx = this.ctx;
     const x = C.UNIT * 2, y = 96, w = 250;
     const lv = d.levers;
-    const H = 268;
+    const H = 288;                    // 판별 줄이 들어오면서 268 → 288
 
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.97)];
     ctx.beginPath();
@@ -5406,18 +5413,44 @@ export class Renderer {
       ctx.fillRect(MET_X + MET_W * thr[i], my - 1, 1.5, 12);
     }
 
+    // ── 판별 줄 — 「지금 내가 맞게 뽑고 있는가」 ────────────────────
+    // 이 줄이 없으면 플레이어는 **벌을 왜 받는지 알 방법이 없다.** 적 수입과
+    // 템포가 이 값으로 깎이는데 화면에는 결과만 나타나기 때문이다.
+    // 막대는 실제로 적용되는 **지수평균**이고, 세로 눈금이 **순간값**이다.
+    // 둘을 같이 보여야 "지금 좋아지는 중"과 "이미 벌어 둔 것"이 구분된다.
+    {
+      const ey = y + 112;
+      const ea = d.edgeAvg > 0 ? (d.edgeAvg > 1 ? 1 : d.edgeAvg) : 0;
+      const ei = d.edge > 0 ? (d.edge > 1 ? 1 : d.edge) : 0;
+      ctx.font = FONT_MICRO;
+      ctx.textAlign = 'left';
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
+      ctx.fillText(DV_EDGE, x + 10, ey);
+      ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.24)];
+      ctx.fillRect(MET_X, ey + 1, MET_W, 8);
+      // 벌면 상금색, 못 벌면 위험색 — 색만으로 처벌 여부가 읽힌다
+      ctx.fillStyle = ea > 0.02 ? C.COL_BONUS : C.RAMP_DANGER[C.rampIndex(0.55)];
+      ctx.fillRect(MET_X, ey + 1, MET_W * (ea > 0.02 ? ea : 0.02), 8);
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.85)];   // 순간값 눈금
+      ctx.fillRect(MET_X + MET_W * ei, ey - 1, 1.5, 12);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = ea > 0.02 ? C.COL_BONUS : C.RAMP_PLAYER[C.rampIndex(0.45)];
+      ctx.fillText(DV_EDGE_VERDICT[ea >= 0.66 ? 2 : (ea >= 0.02 ? 1 : 0)], x + w - 10, ey + 13);
+      ctx.textAlign = 'left';
+    }
+
     // 보는 것 → 하는 것. 두 6칸을 위아래로 붙여 인과가 보이게 한다
     const pm = d.playerMix;
     const mix = lv && lv.mix ? lv.mix : null;
     let mixSum = 0;
     if (mix) for (let k = 0; k < C.UNIT_KINDS && k < mix.length; k++) mixSum += mix[k] > 0 ? mix[k] : 0;
 
-    this.drawMixRow(x, y + 118, w, DV_SEE, pm, 1, C.RAMP_PLAYER, d);
-    this.drawMixRow(x, y + 176, w, DV_DO, mix, mixSum > 0 ? mixSum : 1, C.RAMP_BONUS, d);
+    this.drawMixRow(x, y + 138, w, DV_SEE, pm, 1, C.RAMP_PLAYER, d);
+    this.drawMixRow(x, y + 196, w, DV_DO, mix, mixSum > 0 ? mixSum : 1, C.RAMP_BONUS, d);
 
     // 나머지 레버 두 개
     ctx.font = FONT_MICRO;
-    const by = y + 238;
+    const by = y + 258;
     ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.5)];
     ctx.fillText(DV_TEMPO, x + 10, by);
     ctx.fillStyle = C.COL_BONUS;
