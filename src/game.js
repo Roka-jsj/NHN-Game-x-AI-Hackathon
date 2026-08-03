@@ -94,6 +94,17 @@ const U_MIN_RANGE = (C.U_MIN_RANGE && C.U_MIN_RANGE.length >= C.UNIT_KINDS)
 const MARCH_SIGHT = (+C.MARCH_SIGHT > 0) ? +C.MARCH_SIGHT : 180;
 const MARCH_MUL = (+C.MARCH_MUL > 1) ? +C.MARCH_MUL : 1;
 
+// ── 대열 ──────────────────────────────────────────────────────
+// 사거리가 곧 서 있어야 할 자리다. 이 선(60) 위는 원거리(궁수 128·투석기 300),
+// 아래는 근접(검사 22·기병 24·거인 26·창병 38)이다. 유닛표가 바뀌어도 이
+// 분류는 사거리에서 다시 나온다 — 별도의 표를 두면 반드시 어긋난다.
+const RANGED_AT = 60;
+// 서로 밀어내기 시작하는 거리. UNIT_GAP(21)의 절반이라 **눈에 보이게 겹친다.**
+// 0 으로 두면 전부 한 점에 포개져 난전이 한 덩어리가 된다.
+const BLOCK_GAP = C.UNIT_GAP * 0.5;
+// 막혔을 때의 속도. 0 이 아니라서 대열이 굳지 않고 서서히 두꺼워진다.
+const CROWD_SLOW = 0.34;
+
 // ── 원정 상수 — 방어적으로 읽는다 ─────────────────────────────
 // config 이 아직 v3 상수를 안 줬으면 **원정이 없는 예전 게임**으로 조용히 돈다.
 // 게임이 죽는 것보다 기능 하나가 없는 편이 낫다.
@@ -480,7 +491,9 @@ export class Game {
     let v = C.U_DMG[kind] * C.ERA_DMG_MUL[era];
     if (side === SIDE_L && this.has('sharp')) v *= 1.2;
     // '중장' — 무거운 둘만. 값비싼 유닛을 고른 판에만 값어치가 있는 특성이다.
-    if (side === SIDE_L && this.has('heavy') && (kind === C.U_GIANT || kind === C.U_CATA)) v *= 1.35;
+    // 1.35 였다. 그 값에서 siege 원형(거인+투석기 도배)이 원정을 완주했다 —
+    // 이 빌드 전에는 8원형 전부 완주 0 이었다. 완주는 최대 1 까지가 계약이다.
+    if (side === SIDE_L && this.has('heavy') && (kind === C.U_GIANT || kind === C.U_CATA)) v *= 1.22;
     return v;
   }
   statSpeed(kind, side) {
@@ -1393,8 +1406,11 @@ export class Game {
         continue;
       }
 
-      // 앞에 아군이 막고 있으면 밀지 않는다. 이게 없으면 전부 한 점에 뭉친다.
-      if (this.blockedAhead(i, side, dir)) { this.uMarch[i] = 0; continue; }
+      // 앞이 막혀도 **완전히 서지는 않는다.** 예전에는 여기서 continue 해서
+      // 대열이 딱딱한 줄이 됐고, 뒤에 선 유닛은 앞이 죽을 때까지 아무것도 못
+      // 했다. 이제는 기어서라도 파고든다 — 그래서 유닛이 겹치고, 겹친 만큼
+      // 전선이 두꺼워진다. 서로 지나갈 수 있다는 뜻이기도 하다.
+      const jam = this.blockedAhead(i, side, dir);
 
       // ── 행군 ──────────────────────────────────────────────────────
       // 시야에 적이 없고 적 기지도 멀면 뛴다. **전투 속도는 1px 도 안 바뀐다** —
@@ -1404,8 +1420,9 @@ export class Game {
       // 속도 15 가 28.5 가 되어 공성 전략이 원정을 완주했다(완주율 0/8 → 1/8).
       // 투석기의 값어치는 이동이 아니라 사거리 300 이다 — 그것까지 주면 답이 하나가 된다.
       let sp = this.statSpeed(kind, side);
+      if (jam) sp *= CROWD_SLOW;      // 비집고 들어간다
       const baseGap = (baseX - this.uX[i]) * dir - C.BASE_W * 0.5 - range;
-      if (MARCH_MUL > 1 && C.U_SIEGE[kind] !== 1 && nearFoe > MARCH_SIGHT && baseGap > MARCH_SIGHT) {
+      if (!jam && MARCH_MUL > 1 && C.U_SIEGE[kind] !== 1 && nearFoe > MARCH_SIGHT && baseGap > MARCH_SIGHT) {
         sp *= this.zod(C.ZOD_CAPRICORN) ? (C.ZOD_CAPRI_MARCH > 1 ? C.ZOD_CAPRI_MARCH : MARCH_MUL) : MARCH_MUL;
         this.uMarch[i] = 1;
       } else this.uMarch[i] = 0;
@@ -1500,14 +1517,26 @@ export class Game {
   // 투석기는 가장 느려서 언제나 꼬리다. 표적 규칙을 고쳐도 이게 남아 있으면
   // 투석기는 여전히 없는 유닛이다. 그래서 공성 병기는 대열을 통과한다 —
   // 대신 아무도 자기를 막아주지 않으므로 전선보다 앞서면 그대로 죽는다.
+  //
+  // 그리고 **근접은 원거리를 지나간다.** 지금까지는 소환 순서가 곧 대열 순서라
+  // 궁수를 먼저 뽑으면 그 궁수가 뒤따라오는 검사를 평생 앞에 세워 두고 자기가
+  // 전선에 섰다 — 사용자 보고: "유닛 뒤에 유닛이 못 가는 상황". 사거리가 곧
+  // 서 있어야 할 자리다: 근접은 앞, 원거리는 뒤. 그러니 근접이 원거리를
+  // 앞지르는 것은 대열이 **제자리를 찾아가는 것**이지 새치기가 아니다.
+  // 반대(원거리가 근접을 앞지르는 것)는 여전히 막는다.
   blockedAhead(i, side, dir) {
-    if (C.U_SIEGE[this.uKind[i]] === 1) return false;
+    const kind = this.uKind[i];
+    if (C.U_SIEGE[kind] === 1) return false;
+    const myRanged = C.U_RANGE[kind] >= RANGED_AT;
     const x = this.uX[i];
     for (let j = 0; j < C.UNIT_MAX; j++) {
       if (j === i || !this.uAlive[j] || this.uSide[j] !== side) continue;
-      if (C.U_SIEGE[this.uKind[j]] === 1) continue;   // 공성 병기는 남을 막지도 않는다
+      const kj = this.uKind[j];
+      if (C.U_SIEGE[kj] === 1) continue;   // 공성 병기는 남을 막지도 않는다
+      // 근접이 원거리를 만나면 그냥 지나친다
+      if (!myRanged && C.U_RANGE[kj] >= RANGED_AT) continue;
       const d = (this.uX[j] - x) * dir;
-      if (d > 0 && d < C.UNIT_GAP) return true;
+      if (d > 0 && d < BLOCK_GAP) return true;
     }
     return false;
   }
@@ -1553,7 +1582,9 @@ export class Game {
       this.lost++;
       // '고철' 특성 — 내 유닛이 죽으면 값의 일부가 돌아온다. 비싼 유닛을 계속
       // 갈아 넣는 판을 지탱한다. 시대 배수는 안 붙인다 (판값이 아니라 원가다).
-      if (side === SIDE_L && this.has('salvage')) this.gold += C.U_COST[kind] * 0.25;
+      // 0.25 였다. 환급은 **비싼 유닛일수록 크다** — 중장과 같은 원형(siege)을
+      // 두 번 밀어 주고 있었다. 둘을 같이 내렸다.
+      if (side === SIDE_L && this.has('salvage')) this.gold += C.U_COST[kind] * 0.15;
       this.aiXp += xpGain;
       // 적의 현상금은 깎아서 준다. 안 그러면 밀리기 시작한 판이 스스로 굳는다 —
       // 적이 잡을수록 더 벌고, 더 벌어서 더 잡는다. config 주석 참조.

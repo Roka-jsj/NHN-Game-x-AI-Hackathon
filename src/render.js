@@ -587,9 +587,14 @@ export class Renderer {
 
   // ── 연출 상태 — 이벤트 배선 없이 game 상태의 변화만 보고 켠다 ──
   buildFx() {
-    this.fxSkill = new Int16Array(C.SKILL_COUNT);
-    this.fxSkillX = new Float32Array(C.SKILL_COUNT);
-    this.prevSkillCd = new Float32Array(C.SKILL_COUNT);
+    // **진영별로 따로 잡는다.** 예전에는 한 벌뿐이었고 game.skillCd(내 것)만
+    // 봤다. 그래서 적이 해일을 쏘면 화면에 아무 일도 안 일어나거나, 내 기지
+    // 앞(SPAWN_L_X)에서 내 색으로 터졌다 — 사용자 보고: "상대와 내가 쓰는
+    // 기술 이펙트가 구분이 안 된다". 색·위치·진행 방향 셋 다 갈라야 한다.
+    // 인덱스는 side * SKILL_COUNT + skill.
+    this.fxSkill = new Int16Array(2 * C.SKILL_COUNT);
+    this.fxSkillX = new Float32Array(2 * C.SKILL_COUNT);
+    this.prevSkillCd = new Float32Array(2 * C.SKILL_COUNT);
     this.fxTower = new Int16Array(2);
     this.fxTowerX = new Float32Array(2);
     this.prevTowerCd = new Float32Array(2);
@@ -845,16 +850,22 @@ export class Renderer {
     if (game.state === S.OVER) { if (this.overTime < 0) this.overTime = game.elapsed(); }
     else this.overTime = -1;
 
-    const cds = game.skillCd;
     const front = game.frontlineX ? game.frontlineX() : HALF_W;
-    for (let i = 0; i < C.SKILL_COUNT; i++) {
-      const cd = cds ? (cds[i] || 0) : (i === C.SK_TIDE ? (game.nukeCd || 0) : 0);
-      if (cd > this.prevSkillCd[i] + 1) {
-        this.fxSkill[i] = i === C.SK_TIDE ? FX_TIDE_F : (i === C.SK_VOLLEY ? FX_VOLLEY_F : FX_RALLY_F);
-        this.fxSkillX[i] = i === C.SK_VOLLEY ? front : C.SPAWN_L_X;
+    for (let s = 0; s < 2; s++) {
+      // 쿨다운이 **올라간** 프레임이 발동한 순간이다. 적 쪽은 aiSkillCd 다 —
+      // 그 배열이 없는 빌드에서는 조용히 아무 일도 안 일어난다.
+      const cds = s === SIDE_L ? game.skillCd : game.aiSkillCd;
+      for (let i = 0; i < C.SKILL_COUNT; i++) {
+        const k = s * C.SKILL_COUNT + i;
+        const cd = cds ? (cds[i] || 0) : (s === SIDE_L && i === C.SK_TIDE ? (game.nukeCd || 0) : 0);
+        if (cd > this.prevSkillCd[k] + 1) {
+          this.fxSkill[k] = i === C.SK_TIDE ? FX_TIDE_F : (i === C.SK_VOLLEY ? FX_VOLLEY_F : FX_RALLY_F);
+          // 증원은 **쏜 쪽 기지 앞**에서 솟는다. 화살비만 전선에 떨어진다.
+          this.fxSkillX[k] = i === C.SK_VOLLEY ? front : (s === SIDE_L ? C.SPAWN_L_X : C.SPAWN_R_X);
+        }
+        this.prevSkillCd[k] = cd;
+        if (this.fxSkill[k] > 0) this.fxSkill[k]--;
       }
-      this.prevSkillCd[i] = cd;
-      if (this.fxSkill[i] > 0) this.fxSkill[i]--;
     }
 
     for (let s = 0; s < 2; s++) {
@@ -2059,13 +2070,27 @@ export class Renderer {
   //   증원    내 기지에서 **위로 솟는다**. 금빛 기둥
   // 방향이 셋 다 달라야 한 프레임만 봐도 무엇이 터졌는지 안다.
   drawSkillFx(game) {
-    const ctx = this.ctx;
+    // 양쪽을 **같은 코드로** 그리되 색·위치·진행 방향만 진영에서 받는다.
+    // 코드를 두 벌로 복사하면 한쪽만 고쳐지는 날이 반드시 온다.
+    for (let s = 0; s < 2; s++) this.drawSkillFxSide(game, s);
+  }
 
-    // 해일 — 화면을 가로지르는 마루. 전장 전체를 훑는다
-    let f = this.fxSkill[C.SK_TIDE];
+  drawSkillFxSide(game, side) {
+    const ctx = this.ctx;
+    const mine = side === SIDE_L;
+    // 내 것은 흰색 계열(COL_PLAYER), 적 것은 회청색 계열(COL_STRUCT).
+    // 유닛에 이미 쓰고 있는 바로 그 두 색이다 — 새 색을 만들지 않는다.
+    const RB = mine ? C.RAMP_PLAYER : C.RAMP_STRUCT;      // 본체
+    const RA = mine ? C.RAMP_BONUS : C.RAMP_DANGER;       // 강조 (금색 / 붉은색)
+    const dir = mine ? 1 : -1;                            // 진행 방향
+    const base = side * C.SKILL_COUNT;
+
+    // 해일 — 화면을 가로지르는 마루. **쏜 쪽에서 상대 쪽으로** 훑는다.
+    let f = this.fxSkill[base + C.SK_TIDE];
     if (f > 0) {
       const t = 1 - f / FX_TIDE_F;
-      const cx = -220 + (C.VIEW_W + 440) * easeOutCubic(t);
+      const cx = mine ? -220 + (C.VIEW_W + 440) * easeOutCubic(t)
+                      : C.VIEW_W + 220 - (C.VIEW_W + 440) * easeOutCubic(t);
       const R = 210, HGT = 126;
       // 마루 — 뾰족한 산이 아니라 **물마루**여야 한다. 앞은 서고 뒤는 길게 끌린다
       ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.5 * (1 - t * 0.55))];
@@ -2080,7 +2105,7 @@ export class Renderer {
       ctx.closePath();
       ctx.fill();
       // 마루 위 흰 거품 — 물이라는 것을 이 선이 말한다
-      ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(0.75 * (1 - t))];
+      ctx.strokeStyle = RB[C.rampIndex(0.75 * (1 - t))];
       ctx.lineWidth = 3;
       ctx.beginPath();
       for (let d = -R; d <= R; d += 14) {
@@ -2091,12 +2116,12 @@ export class Renderer {
       }
       ctx.stroke();
       ctx.lineWidth = C.STROKE;
-      // 물보라 — 마루 꼭대기에서 앞으로 튄다
-      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.65 * (1 - t))];
+      // 물보라 — 마루 꼭대기에서 **가는 쪽으로** 튄다
+      ctx.fillStyle = RB[C.rampIndex(0.65 * (1 - t))];
       ctx.beginPath();
       for (let i = 0; i < 14; i++) {
-        const d = this.vOff[i] * 80;
-        const px = cx + d + i * 3;
+        const d = this.vOff[i] * 80 * dir;
+        const px = cx + d + i * 3 * dir;
         const k = 1 - (d / R) * (d / R);
         const py = groundAt(px) - HGT * Math.sqrt(k > 0 ? k : 0) - 6 - (i * 6) - t * 30;
         const sz = 5 - i * 0.2;
@@ -2106,12 +2131,12 @@ export class Renderer {
     }
 
     // 화살비 — **전선 부근**에만 쏟아진다. 어디에 떨어지는지가 보여야 한다
-    f = this.fxSkill[C.SK_VOLLEY];
+    f = this.fxSkill[base + C.SK_VOLLEY];
     if (f > 0) {
       const t = 1 - f / FX_VOLLEY_F;
-      const bx = this.fxSkillX[C.SK_VOLLEY];
+      const bx = this.fxSkillX[base + C.SK_VOLLEY];
       // 착탄 지대 — 지면에 그은 타원과 양 끝 기둥. 표적이 먼저 보여야 한다
-      ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(0.85 * (1 - t))];
+      ctx.strokeStyle = RA[C.rampIndex(0.85 * (1 - t))];
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.ellipse(bx, groundAt(bx) - 3, C.VOLLEY_RADIUS, 18, 0, 0, TAU);
@@ -2122,7 +2147,7 @@ export class Renderer {
       }
       ctx.stroke();
       // 화살 — 위에서 아래로. 촉이 아래를 향한다
-      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.95)];
+      ctx.fillStyle = RB[C.rampIndex(0.95)];
       ctx.beginPath();
       for (let i = 0; i < VOLLEY_N; i++) {
         const lt = (t - this.vDelay[i] * 0.45) / 0.5;
@@ -2130,12 +2155,13 @@ export class Renderer {
         const ax = bx + this.vOff[i] * C.VOLLEY_RADIUS;
         const g = groundAt(ax);
         const ay = g - 250 + 258 * lt * lt;
-        this.addBar(ax, ay, 0.22, 1, 18, 0, 1.2, 0.5);
-        this.addSpike(ax + 0.22 * 18, ay + 18, 0.22, 1, 6, 2.2);
+        const tilt = 0.22 * dir;
+        this.addBar(ax, ay, tilt, 1, 18, 0, 1.2, 0.5);
+        this.addSpike(ax + tilt * 18, ay + 18, tilt, 1, 6, 2.2);
       }
       ctx.fill();
       // 착탄 자국
-      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.85 * (1 - t))];
+      ctx.fillStyle = RA[C.rampIndex(0.85 * (1 - t))];
       ctx.beginPath();
       for (let i = 0; i < VOLLEY_N; i++) {
         const lt = (t - this.vDelay[i] * 0.45) / 0.5;
@@ -2151,12 +2177,12 @@ export class Renderer {
     }
 
     // 증원 — 내 기지 앞에서 솟는다. 금색 기둥과 퍼지는 고리
-    f = this.fxSkill[C.SK_RALLY];
+    f = this.fxSkill[base + C.SK_RALLY];
     if (f > 0) {
       const t = 1 - f / FX_RALLY_F;
-      const bx = this.fxSkillX[C.SK_RALLY];
+      const bx = this.fxSkillX[base + C.SK_RALLY];
       const g = groundAt(bx);
-      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.9 * (1 - t))];
+      ctx.fillStyle = RA[C.rampIndex(0.9 * (1 - t))];
       ctx.beginPath();
       for (let i = 0; i < C.RALLY_COUNT; i++) {
         const px = bx + (i - 1) * 24;
@@ -2170,7 +2196,7 @@ export class Renderer {
         }
       }
       ctx.fill();
-      ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(0.85 * (1 - t))];
+      ctx.strokeStyle = RA[C.rampIndex(0.85 * (1 - t))];
       ctx.lineWidth = 2.5;
       ctx.beginPath();
       const r = 12 + 62 * easeOutCubic(t);
