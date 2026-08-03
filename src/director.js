@@ -58,7 +58,8 @@ const EV_TOWER_UP = intOr(EV && EV.TOWER_UP, 18);
 
 // 유닛의 "싼 정도" — 0(가장 비쌈) ~ 1(가장 쌈).
 // 물량 지향을 "가장 싼 유닛의 개수 비율"로 재면 6종에서는 너무 거칠다.
-// 단가로 재면 창병·궁수를 섞어도 물량은 물량으로, 투석기를 섞으면 즉시 떨어진다.
+// 단가로 재면 싼 것 둘을 섞어도 물량은 물량으로, 비싼 것 하나를 섞으면 즉시 떨어진다.
+// 양 끝은 U_COST 에서 그때그때 뽑으므로 가격표를 고쳐도 이 척도는 따라온다.
 // 시대 배수(ERA_COST_MUL)는 여섯 종에 똑같이 곱해지므로 정규화하면 사라진다.
 const UNIT_CHEAP = (() => {
   let lo = Infinity, hi = -Infinity;
@@ -605,7 +606,8 @@ export class Director {
     this.wXpEarn.push(earned);
     this.wXpEra.push(this.eraXpSpent);
 
-    // 물량 지향 — 뽑은 유닛의 단가. 전부 검사면 1.0, 전부 투석기면 0.0.
+    // 물량 지향 — 뽑은 유닛의 단가. 전부 최저가면 1.0, 전부 최고가면 0.0.
+    // (현재 가격표 기준 최저가는 궁수 20금, 최고가는 거인 56금.)
     this.wSwarm.push(this.spawnCount > 0 ? clamp(this.cheapSum / this.spawnCount, 0, 1) : 0.5);
 
     // 지키는 성향 — 포탑은 전선에 나가지 않는 금이다. 0 / 0.5 / 1.

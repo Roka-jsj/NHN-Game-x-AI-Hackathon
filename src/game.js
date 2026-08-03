@@ -751,6 +751,11 @@ export class Game {
 
   // 진화로 스킬 등급이 오르면 **그 스킬은 그 자리에서 쓸 수 있게 된다.**
   // 새로 생긴 것을 바로 못 쓰면 무엇이 달라졌는지 알 수가 없다.
+  //
+  // **순서 계약**: 이 함수는 EV.ERA_UP 보다 **먼저** 불린다(693 → 704).
+  // 그래서 EV.SKILL_UP 이 EV.ERA_UP 앞에 나간다. audio.js 가 이 순서를
+  // 전제로 스킬업 종소리를 0.98초 지연시켜 진화 팡파르 뒤에 놓았다.
+  // 둘의 순서를 바꾸면 audio.js 의 그 지연도 같이 손봐야 한다.
   upgradeSkills(side, from, to) {
     for (let i = 0; i < C.SKILL_COUNT; i++) {
       const before = this.eraTier(i, from), after = this.eraTier(i, to);
@@ -1591,6 +1596,11 @@ export class Game {
       // 적이 잡을수록 더 벌고, 더 벌어서 더 잡는다. config 주석 참조.
       this.aiGold += C.U_BOUNTY[kind] * (C.AI_BOUNTY_MUL > 0 ? C.AI_BOUNTY_MUL : 1);
     }
+    // EV.KILL(a = 죽은 유닛의 종류, b = **죽인** 진영).
+    // b 가 죽은 쪽이 아니라 죽인 쪽인 것에 주의. 화면에서 이 사건이 일어난
+    // 자리는 죽은 유닛 쪽이므로, 좌우를 가르려면 `1 - b` 를 봐야 한다.
+    // (아군 오사가 없으므로 죽은 진영은 항상 `1 - byWhom` 이다. 바로 위
+    //  if/else 도 그 전제 위에 서 있다.)
     this.emit(EV.KILL, kind, byWhom);
   }
 
@@ -1610,6 +1620,9 @@ export class Game {
       this.baseHp[side] = 0;
       if (this.baseDownBy[side] === 0) this.baseDownBy[side] = 1;   // 병력
     }
+    // EV.BASE_HIT(a = 피해량, b = **맞은** 진영).
+    // EV.KILL 과 b 의 의미가 반대다(저쪽은 때린 진영). 화면 자리를 원한다면
+    // 여기서는 b 를 그대로 쓰면 되고, KILL 에서는 뒤집어야 한다.
     this.emit(EV.BASE_HIT, dmg, side);
   }
 
