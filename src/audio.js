@@ -78,6 +78,26 @@ const ERA_HARM = [0.0, 0.045, 0.095, 0.155, 0.215];
 // 조성 이동 — 음색과 **함께** 바뀐다. 이것만으로는 시대를 표현하지 않는다
 const ERA_KEY = [0, 2, 3, 5, 7];
 
+// ─── 공격 타격음 계열 (spec-v4 오디오) ───────────────────────
+// 아트가 무기 실루엣을 실제로 바꾼 세 종(검사·궁수·투석기)만 시대별로
+// 다른 "계열"을 탄다 — render.js 의 무기 분기와 정확히 같은 경계에서 갈린다.
+// 창병·기병·거인은 아트가 무기를 아직 안 바꿨다(범위 밖) — 그래서 attackVoice
+// 는 이 셋에 spawnVoice 의 br(밝기) 패턴만 적용하고, 다른 무기인 척 새 소리를
+// 지어내지 않는다. 인덱스는 ERA_STONE..ERA_MACHINE 순서.
+//   검사 — 돌도끼(둔탁) → 검+방패(쇠붙이, 기존 clang 유지) → 같은 계열(강철,
+//          장식만 바뀐다) → 총검(총성+찌르기) → 파워블레이드(전동 험)
+const ATK_SWORD_FAM = Int8Array.of(0, 1, 1, 2, 3);
+//   궁수 — 활시위(기존 소리 유지, 돌·청동) → 석궁(강철 — 다른 메커니즘,
+//          짧고 걸쇠 소리) → 총성(화약·기계 — 기계 저격수는 더 짧고 날카롭다)
+const ATK_ARCHER_FAM = Int8Array.of(0, 0, 1, 2, 2);
+//   투석기 — 나무+밧줄(돌·청동·강철, 도르래 계열과 어울린다) → 포성(화약·기계)
+const ATK_CATA_FAM = Int8Array.of(0, 0, 0, 1, 1);
+// 같은 사건이 이 간격 안에 겹치면 계열별 두 번째 층을 건너뛰고 밝기만
+// 있는 기존 한 노드짜리로 대체한다. COUNTER_HIT 의 밀도 제어와 같은 문제,
+// 같은 해법이다 — ATTACK 은 COUNTER_HIT 보다도 더 자주 난다(우위 타격만이
+// 아니라 모든 타격이다).
+const ATTACK_DENSE = 0.07;
+
 // ─── 화성 진행 ───────────────────────────────────────────────
 // 근음의 반음 오프셋. 시대마다 진행이 다르다 — 시대가 오르면 곡이 바뀐다.
 const PROG = [
@@ -214,6 +234,11 @@ export class Audio {
     this.bgm = null;
     this.cmd = null;        // 사령관 테마 층. 역시 지속 노드다
     this.tCounter = 0;      // 마지막 상성 타격음 시각. 난전에서 소리를 솎는다
+    // 마지막 일반 타격음 시각. -1e9 로 시작해 **첫 타격은 절대 밀도에 안 걸린다**
+    // (tCounter 처럼 0 으로 두면 ctx.currentTime 이 아직 작을 때 첫 이벤트가
+    // 항상 "촘촘함"으로 오판되어, 이벤트 하나만 재생하는 오프라인 검증에서
+    // 계열별 소리가 영영 안 들리는 문제가 생긴다)
+    this.tAttack = -1e9;
 
     // ── 원정 상태. game.js 가 아직 안 보내면 전부 기본값에 머문다 ──
     this.cmdSeen = false;   // STAGE_START 나 game.commander 를 한 번이라도 봤는가
@@ -933,6 +958,86 @@ export class Audio {
     if (e >= 3) this.blip('square', 1250 * p, 940 * p, 40, 0.014 * e * v, 0.02, 6000, d);
   }
 
+  // ── 공격 타격음 — 종류 × 시대 ──────────────────────────────────
+  // EV.ATTACK 은 매 공격마다 난다("아주 짧고 작아야 한다 — 안 그러면 귀가
+  // 아프다"). spawnVoice 가 이미 하는 것처럼 kind 의 switch 안에서 era 를
+  // 파라미터로 섞어 하나의 함수로 합성한다 — 30개 조합을 case 로 늘어놓지
+  // 않는다. 무기가 실제로 바뀐 셋(검사·궁수·투석기)만 위 ATK_*_FAM 을 타고
+  // 계열이 바뀐다. 나머지는 spawnVoice 의 br 과 같은 밝기 곡선만 얹는다.
+  //
+  // 기준 소리(base)는 **예전과 정확히 같은 모양**이다(28ms, 0.035 게인,
+  // 2600→1400 대역 bandpass) — br 로 밝기만 얹는다. 그래서 "검+방패"·
+  // "활시위"·"나무+밧줄"·창병/기병/거인 은 전부 이 한 함수를 그대로 쓴다.
+  // **새로 여는 것은 정말 무기가 달라진 자리(총성·전동 험·석궁 걸쇠·포성)
+  // 뿐이고, 거기서만 아주 작은 두 번째 층을 하나 더 붙인다.**
+  attackVoice(kind, side, era) {
+    if (!this.ready || this.failed) return;
+    const k = (kind >= 0 && kind < 6) ? kind : 0;
+    const e = clamp(era | 0, 0, 4);
+    const p = side === SIDE_L ? 1 : 0.80;    // 진영은 여전히 음높이로 갈린다
+    const br = 1 + 0.09 * e;                  // 시대가 오르면 밝아진다. spawnVoice 와 같은 크기의 곡선
+    const d = this.sideIn(side, false);       // 고정 정위 버스 — 기존과 같다
+
+    // 난전 밀도 제어 — E_COUNTER_HIT 과 똑같은 문제("난전에서는 초당
+    // 예닐곱 번 터진다. 그대로 다 내면 기관총이 된다")를 똑같은 해법으로
+    // 푼다. ATTACK 은 우위 타격만이 아니라 **모든** 타격이라 COUNTER_HIT
+    // 보다도 자주 난다 — 촘촘하면 계열 구분을 접고 기존 한 노드짜리로
+    // 돌아간다. 코드 비용이 늘지 않는 자리이지 소리가 커지는 자리가 아니다.
+    const now = this.ctx.currentTime;
+    const dense = now - this.tAttack < ATTACK_DENSE;
+    this.tAttack = now;
+    const base = () => this.nz(28, 0.035, 2600 * br, 1400 * br, 'bandpass', 0, 0, d);
+    if (dense) { base(); return; }
+
+    if (k === C.U_SWORD) {
+      const fam = ATK_SWORD_FAM[e];
+      if (fam === 0) {
+        // 돌도끼병 — 방패도 쇠붙이도 없다. 둔탁한 타격(club thud)
+        this.nz(28, 0.035, 950, 340, 'lowpass', 0, 0, d);
+      } else if (fam === 1) {
+        // 청동검사·강철기사 — 검+방패. **기존 clang 계열을 그대로 쓴다**
+        base();
+      } else if (fam === 2) {
+        // 총검병 — 총성 + 찌르기. 짧고 날카로운 크랙 + 작은 스침
+        this.nz(18, 0.030, 5600, 2200, 'bandpass', 0, 3, d);
+        this.blip('square', 1900 * p, 1100 * p, 10, 0.016, 0, 5200, d);
+      } else {
+        // 강습병 — 동력 블레이드. 전동 험 + 날의 스침
+        this.blip('square', 1500 * p, 1150 * p, 20, 0.022, 0, 4200, d);
+        this.nz(16, 0.016, 3600, 2600, 'bandpass', 0, 4, d);
+      }
+    } else if (k === C.U_ARCHER) {
+      const fam = ATK_ARCHER_FAM[e];
+      if (fam === 0) {
+        // 투석꾼·청동궁수 — 활시위. **기존 소리를 그대로 쓴다**
+        base();
+      } else if (fam === 1) {
+        // 석궁병 — 다른 메커니즘. 짧고 걸리는 걸쇠 소리
+        this.blip('square', 2600 * p, 1400 * p, 9, 0.026, 0, 0, d);
+        this.nz(10, 0.018, 4600, 3000, 'bandpass', 0.006, 5, d);
+      } else {
+        // 머스킷병·저격수 — 총성. 저격수(기계)는 더 짧고 날카롭다
+        const snap = e >= 4 ? 0.65 : 1;
+        this.nz(16 * snap, 0.032, 6200 * br, 2600, 'bandpass', 0, 2.4, d);
+        this.blip('square', 2400 * p, 900 * p, 8 * snap, 0.018, 0, 0, d);
+      }
+    } else if (k === C.U_CATA) {
+      const fam = ATK_CATA_FAM[e];
+      if (fam === 0) {
+        // 투석대·발리스타·트레뷰셋 — 나무+밧줄. 도르래 계열과 어울리는 대역
+        this.nz(28, 0.035, 2400 * br, 1300 * br, 'bandpass', 0, 2, d);
+      } else {
+        // 대포·곡사포 — 포성. 훨씬 크고 낮다 — 길이·게인은 그대로 두고
+        // 대역만 저역으로 내려 "크고 낮다"를 스펙트럼으로만 낸다
+        this.nz(28, 0.035, 480, 85, 'lowpass', 0, 0, d);
+        this.blip('sine', 68 * p, 34 * p, 18, 0.020, 0, 0, d);
+      }
+    } else {
+      // 창병·기병·거인 — 아트가 무기를 아직 안 바꿨다. 밝기만 시대를 따라간다
+      base();
+    }
+  }
+
   // ── 시대 진화 ───────────────────────────────────────────────
   // 사용자가 진화에 "큰 변화가 없다"고 **세 번** 말했다. 예전 진화음은
   // 0.24~0.43초짜리 3~6음 팡파르 하나였다 — 소환음(0.4초)과 같은 크기다.
@@ -1240,12 +1345,15 @@ export class Audio {
         break;
       }
 
-      case EV.ATTACK:
-        // 매 공격마다 난다. 아주 짧고 작아야 한다 — 안 그러면 귀가 아프다.
-        // b = 때린 진영. 진영 버스만 태운다 — 난타전에서 **누가 때리고 있는지**가
-        // 좌우로 갈린다. 소리 자체는 예전과 같다
-        this.noise(28, 0.035, 2600, 1400, 'bandpass', this.sideIn(b, false));
+      case EV.ATTACK: {
+        // a = 종류, b = 때린 진영. spawnVoice 와 같은 방식으로 시대를 읽는다 —
+        // 근사가 아니라 정확한 값이다: 재무장(ERA_REARM_MS) 동안은 얼어붙어
+        // 공격을 못 하므로(game.js 주석 참조) 공격이 나는 순간엔 그 진영의
+        // 모든 유닛이 이미 같은 시대다. 소리는 attackVoice() 가 종류×시대로 가른다.
+        const era = game ? (b === SIDE_L ? (game.era | 0) : (game.aiEra | 0)) : 0;
+        this.attackVoice(a, b, era);
         break;
+      }
 
       case E_COUNTER_HIT: {
         // **상성 우위.** 일반 타격(28ms 노이즈 한 장)과 확실히 달라야 한다.
