@@ -308,6 +308,14 @@ export class Director {
     this.wKind = [];
     for (let k = 0; k < KINDS; k++) this.wKind.push(new Ring(C.METRIC_WINDOW));
     this.wSpawnN = new Ring(C.METRIC_WINDOW);
+    // **적 구성도 같이 센다.** 지금까지 디렉터는 자기가 무엇을 주문했는지만 알고
+    // 화면에 무엇이 나갔는지는 몰랐다. edge(내 구성이 적 구성에 먹히는가)는
+    // 주문표가 아니라 **실제로 나간 병력**으로 재야 한다 — 주문표로 재면
+    // 자기가 쓴 답안을 자기가 채점하는 것이 된다 (금·템포에 막혀 못 나간 주문이
+    // 그대로 계산에 들어간다).
+    this.wFoeKind = [];
+    for (let k = 0; k < KINDS; k++) this.wFoeKind.push(new Ring(C.METRIC_WINDOW));
+    this.wFoeN = new Ring(C.METRIC_WINDOW);
 
     this.profile = 'BALANCED';
     this.profileIdx = 4;
@@ -356,6 +364,11 @@ export class Director {
     this.mixBuf = new Array(KINDS).fill(0);
     this.spawnKind = new Int32Array(KINDS);
     this.mixShare = new Float32Array(KINDS);
+    this.foeKind = new Int32Array(KINDS);
+    this.foeShare = new Float32Array(KINDS);
+    this.foeCount = 0;
+    this.edge = 0;            // 마지막으로 계산한 판별값. 디렉터 뷰가 읽을 수 있다
+    this.edgeAvg = 0;         // 그 지수 평균. 면제는 이쪽으로만 걸린다
 
     this.levers = null;
     this.resetCounters();
@@ -368,6 +381,8 @@ export class Director {
     this.spawnCount = 0;
     this.cheapSum = 0;
     this.spawnKind.fill(0);
+    this.foeCount = 0;
+    this.foeKind.fill(0);
     this.goldSum = 0;
     this.goldSamples = 0;
     this.spawnGold = 0;      // 이벤트로 직접 센 병력 지출 (game 이 안 세줄 때의 대비)
@@ -462,6 +477,14 @@ export class Director {
     this.wTower.reset(); this.wFront.reset();
     this.wXpEarn.reset(); this.wXpEra.reset(); this.wSpawnN.reset();
     for (let k = 0; k < KINDS; k++) this.wKind[k].reset();
+    // 적 구성 창은 **기억으로 안 옮긴다.** 이건 사령관이 플레이어를 읽은 것이
+    // 아니라 자기가 낸 것이라, 전투를 넘어가면 뜻이 없다.
+    this.wFoeN.reset();
+    for (let k = 0; k < KINDS; k++) this.wFoeKind[k].reset();
+    // 면제도 전투마다 0 으로 돌아간다. 앞 전투에서 잘 읽었다고 다음 전투를
+    // 공짜로 시작하면 그건 판별이 아니라 눈덩이다.
+    this.edge = 0;
+    this.edgeAvg = 0;
     this.beginChunk(this.game);
     this.lastChunk = -1;
     this.lastSub = -1;
@@ -498,6 +521,11 @@ export class Director {
           this.cheapSum += UNIT_CHEAP[a];
           this.spawnGold += game && typeof game.cost === 'function'
             ? num(game.cost(a), C.U_COST[a]) : C.U_COST[a];
+        } else if (a >= 0 && a < KINDS) {
+          // 적 쪽. 세기만 한다 — 판정(프로파일·도배)에는 절대 안 들어간다.
+          // 저기에 섞이면 디렉터가 자기 행동을 플레이어의 행동으로 오독한다.
+          this.foeCount++;
+          this.foeKind[a]++;
         }
         break;
       case EV.ERA_UP:
@@ -616,6 +644,8 @@ export class Director {
     // 플레이어 구성 — 상성 대응의 입력. 개수 그대로 담고 총합으로 나눈다.
     for (let k = 0; k < KINDS; k++) this.wKind[k].push(this.spawnKind[k]);
     this.wSpawnN.push(this.spawnCount);
+    for (let k = 0; k < KINDS; k++) this.wFoeKind[k].push(this.foeKind[k]);
+    this.wFoeN.push(this.foeCount);
 
     this.wFront.push(typeof game.frontline === 'function' ? game.frontline() : 0.5);
   }
@@ -705,6 +735,20 @@ export class Director {
     const sk = num(this.stageK, 1);          // 뒤 전투일수록 처벌이 날카롭다
     const bite = clamp(focus * sk, 0, 1.6);
 
+    // ── 처벌을 둘로 가른다 (config.js 의 FOCUS_EDGE 주석이 근거다) ──────
+    // bite     구성 대응용. **집중도 그대로.** 읽히면 답이 오는 것은 정당하고,
+    //          이것이 「정답이 계속 바뀐다」를 만드는 장치다. 여기는 안 깎는다
+    // econBite 경제 처벌용. 집중이 **틀렸을 때만** 걸린다
+    // edge 를 여기서 한 번만 읽는다 — metricEdge 는 창을 두 번 훑으므로
+    // 구간마다 한 번이 맞다 (applyLevers 는 3초에 한 번 돈다).
+    this.edge = this.metricEdge;
+    // 지수 평균. **0 에서 시작해 벌어야 오른다** — 순간값으로 걸면 적이 아직
+    // 답하지 않은 초반 구간에서 도배 봇이 면제를 챙긴다 (config 주석 참조).
+    const ea = clamp(num(C.FOCUS_EDGE_EMA, 0.14), 0, 1);
+    this.edgeAvg += (this.edge - this.edgeAvg) * ea;
+    const fe = clamp(num(C.FOCUS_EDGE, 0), 0, 1);
+    const econBite = clamp(bite * (1 - fe * this.edgeAvg), 0, 1.6);
+
     // 상성 대응의 크기. **상한이 있다.**
     // 상한이 없으면 도배 상대에게 가중치가 87 까지 올라가고(합 10짜리 표 위에),
     // 적이 한 종류만 뽑는 단일 군대가 된다 — 화면에서 "읽었다"가 아니라
@@ -717,11 +761,11 @@ export class Director {
     // **또** 난이도를 곱하지 않는다 (예전에 두 번 깎여 다섯 프로파일이 전부
     // 하한 420ms 에 붙었다). 인격 템포와 섞고, 처벌만 곱한다.
     const readTempo = ch ? num(ch.tempo, p.tempo) : p.tempo * (1 - d * 0.11);
-    const tempo = readTempo * (1 - FOCUS_TEMPO * bite);
+    const tempo = readTempo * (1 - FOCUS_TEMPO * econBite);
 
-    const goldMul = p.goldMul * (1 + d * 0.1) * (1 + FOCUS_GOLD * bite);
+    const goldMul = p.goldMul * (1 + d * 0.1) * (1 + FOCUS_GOLD * econBite);
     const eraThresh = (per ? num(per.eraThresh, 1) : 1) * p.eraThresh
-      * (1 - FOCUS_ERA * bite);
+      * (1 - FOCUS_ERA * econBite);
 
     // 레버 객체는 **한 번만 만들고 덮어쓴다.** 예전에는 여기서 매번 새로 만들었고
     // 구간 경계에서만 불렸으니 9초에 하나였다. 지금은 3초마다 되읽으므로
@@ -737,7 +781,9 @@ export class Director {
     // ↓ game.js 가 아직 안 읽는다. 읽으면 사령관이 스킬·포탑까지 **플레이어를 읽고**
     //   쓴다 (지금은 C.CMD_SKILL_MUL / C.CMD_TOWER 로 성격만 정한다).
     //   skillBias 는 "얼마나 자주" 가 아니라 "얼마나 읽혔는가"다 — 1.0~1.8.
-    lv.skillBias = 1 + 0.5 * bite;
+    //   경제 처벌과 같은 줄에 세운다 — 스킬은 상성으로 못 답하는 채널이라
+    //   제대로 읽은 사람에게 쏟으면 그건 판별이 아니라 그냥 난이도다.
+    lv.skillBias = 1 + 0.5 * econBite;
     lv.towerWant = per && per.tags.indexOf('wall') >= 0 ? 2 : (this.stage > 1 ? 1 : 0);
   }
 
@@ -757,6 +803,49 @@ export class Director {
       for (let i = 0; i < list.length; i++) m[list[i]] += add;
     }
     for (let k = 0; k < KINDS; k++) m[k] = Math.round(m[k] * 100) / 100;
+  }
+
+  // 적 구성비를 foeShare 에 채운다. 기억도 보정도 없다 — 이번 전투에서
+  // **실제로 화면에 나간 적 병력**의 지분이다. 쓸 만한 표본이 있는가를 돌려준다.
+  loadFoeShare() {
+    const n = this.wFoeN.c;
+    const tot = this.wFoeN.mean() * n + this.foeCount;
+    if (!(tot > 0.5)) return false;
+    for (let u = 0; u < KINDS; u++) {
+      this.foeShare[u] = clamp((this.wFoeKind[u].mean() * n + this.foeKind[u]) / tot, 0, 1);
+    }
+    return true;
+  }
+
+  // ── 판별값 edge — 「몰아 뽑았다」와 「맞게 몰아 뽑았다」를 가른다 ──────
+  //
+  // 이 게임의 처벌은 지금까지 focus(집중도) 하나로 걸렸다. 그 값은 **왜**
+  // 몰렸는지를 안 본다. 그래서 상성을 읽고 몰아 뽑는 사람이 아무 생각 없이
+  // 도배하는 사람과 똑같은 벌을 받았고, 상성 봇(46%)이 궁수 도배(44%)와
+  // 구분되지 않았다 (config.js 의 FOCUS_EDGE 주석에 표가 있다).
+  //
+  //   adv = 내 구성이 적 구성을 때릴 때의 평균 상성 배수  (1 ~ COUNTER_STRONG)
+  //   dis = 적 구성이 내 구성을 때릴 때의 평균 상성 배수
+  //   edge = clamp((adv − dis) / FOCUS_EDGE_SPAN, 0, 1)
+  //
+  // 대칭식이다 — 한쪽만 보면 "서로 상성인" 대치(창병 vs 기병 vs 창병)에서
+  // 우위가 없는데도 면제가 나간다. 차이를 봐야 실제 우위다.
+  // 표본이 없으면 0 이다. **면제는 증명해야 받는 것**이고, 기본값은 처벌이다.
+  get metricEdge() {
+    if (!this.loadShare() || !this.loadFoeShare()) return 0;
+    let adv = 0, dis = 0;
+    for (let a = 0; a < KINDS; a++) {
+      const pa = this.effShare[a];
+      if (pa <= 0) continue;
+      for (let d = 0; d < KINDS; d++) {
+        const fd = this.foeShare[d];
+        if (fd <= 0) continue;
+        adv += pa * fd * num(C.COUNTER[a * KINDS + d], 1);
+        dis += fd * pa * num(C.COUNTER[d * KINDS + a], 1);
+      }
+    }
+    const span = num(C.FOCUS_EDGE_SPAN, 0.3);
+    return clamp((adv - dis) / (span > 0 ? span : 0.3), 0, 1);
   }
 
   // 상성 대응과 도배 판정이 함께 쓰는 **유효 구성비**를 effShare 에 채운다.
