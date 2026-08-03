@@ -1378,12 +1378,9 @@ export class Renderer {
       // 진화는 **세계가 바뀌는 것**이다 — 빛기둥이 하늘까지 서고, 지면을 따라
       // 충격이 판을 건너가고, 잠깐 화면 전체가 밝아진다.
 
-      // (1) 화면 전체가 한 번 밝아진다 — 내 진화만. 드로우 콜 하나로 사는 사건감
-      if (mine && t < 0.34) {
-        const ft = 1 - t / 0.34;
-        ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.20 * ft * ft)];
-        ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
-      }
+      // (1) 전면 섬광도 같은 이유로 뺐다 (위 drawSkillFx 의 장막과 같은 비용).
+      //     진화는 드물어서 3분 평균에는 거의 안 잡히지만, 터지는 그 순간에
+      //     프레임을 버리면 **가장 큰 사건이 끊겨 보인다.** WebGL 에서 되살린다.
 
       // (2) 빛기둥 — 기지에서 하늘 끝까지. 사다리꼴이라 위로 갈수록 벌어진다
       if (t < 0.62) {
@@ -2175,27 +2172,13 @@ export class Renderer {
   }
 
   drawSkillFx(game) {
-    // **화면을 가리는 것과 화면에 겹치는 것은 다르다.**
-    // 큰 기술이 도는 동안 판 전체를 배경색 한 겹으로 눌러 둔다. 그러면 같은 밝기의
-    // 도형이 두 배로 밝게 읽힌다 — 새 색을 안 만들고 대비를 버는 유일한 방법이고,
-    // 값은 드로우 콜 **하나**다. 양쪽이 동시에 쏴도 한 번만 깐다(제일 센 것 기준).
-    // 예고에서 차오르고 여파에서 빠진다. 갑자기 어두워지면 그건 깜빡임으로 읽힌다.
-    let veil = 0;
-    for (let k = 0; k < 2 * C.SKILL_COUNT; k++) {
-      const f = this.fxSkill[k];
-      if (f <= 0) continue;
-      const i = k % C.SKILL_COUNT;
-      const L = i === C.SK_TIDE ? FX_TIDE_F : (i === C.SK_VOLLEY ? FX_VOLLEY_F : FX_RALLY_F);
-      const t = 1 - f / L;
-      const peak = i === C.SK_TIDE ? 0.36 : (i === C.SK_VOLLEY ? 0.26 : 0.20);
-      const w = t < 0.22 ? t / 0.22 : (t > 0.82 ? (1 - t) / 0.18 : 1);
-      const v = peak * (w < 0 ? 0 : (w > 1 ? 1 : w));
-      if (v > veil) veil = v;
-    }
-    if (veil > 0.015) {
-      this.ctx.fillStyle = C.RAMP_BG[C.rampIndex(veil)];
-      this.ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
-    }
+    // **여기에 전면 장막(fillRect 한 장)이 있었다. 재서 걷어냈다.**
+    // 스킬이 도는 동안 판 전체를 한 겹 눌러 두면 도형이 두 배로 밝게 읽힌다 —
+    // 그림은 실제로 좋아졌는데, 3분 실측에서 **버려진 프레임이 1000프레임당
+    // 1.5개에서 4.1개로 늘었다.** JS 드로우 시간은 그대로였다(p95 1.6→1.8ms).
+    // 즉 비용이 JS 가 아니라 **래스터 면적**이었다 — 이 파일이 이미 한 번 배운 교훈이다.
+    // 전면 합성은 Canvas 2D 에서 제일 비싸고 GPU 에서 제일 싸다. WebGL 로 옮길 때
+    // 되살릴 것 1순위이지, 2D 폴백에 남길 것이 아니다.
     // 양쪽을 **같은 코드로** 그리되 색·위치·진행 방향만 진영에서 받는다.
     // 코드를 두 벌로 복사하면 한쪽만 고쳐지는 날이 반드시 온다.
     for (let s = 0; s < 2; s++) this.drawSkillFxSide(game, s);

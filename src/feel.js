@@ -107,6 +107,13 @@ const BASE_RING_GAP   = num(C.BASE_RING_GAP, 34);
 // 여기서 끊으면 같은 세기의 타격이 **더 짧고 더 또렷하게** 끝난다.
 const SHAKE_FLOOR     = num(C.SHAKE_FLOOR, 0.25);
 
+// 스킬 번호. config 이 아직 이름을 안 줬으면 계약의 번호를 쓴다 —
+// 이 파일의 다른 상수들과 같은 방어 규칙이다. 스킬이 늘어도 마지막 가지(총진군)로
+// 흐를 뿐 깨지지 않는다.
+const SK_TIDE   = num(C.SK_TIDE, 0);
+const SK_VOLLEY = num(C.SK_VOLLEY, 1);
+const SK_RALLY  = num(C.SK_RALLY, 2);
+
 // ── 셰이크의 모양 ────────────────────────────────────────────
 // 축. 등방은 예전 그대로다 — 인자를 안 주면 아무것도 안 달라진다.
 const AX_ISO = 0, AX_X = 1, AX_Y = 2;
@@ -122,7 +129,9 @@ const PUSH_D     = num(C.PUSH_DAMP, 0.72);
 // 셰이크 바닥(0.25px)과 같은 이유로 자른다. |x|+|y|+|vx|+|vy| 합이라
 // 0.45 는 실제 변위 0.2px 언저리다 — DPR 2 에서도 안 보인다.
 const PUSH_FLOOR = num(C.PUSH_FLOOR, 0.45);
-const PUSH_MAX   = num(C.PUSH_MAX, 6);        // 임펄스 상한. 겹쳐 쏴도 화면이 날아가지 않는다
+// 임펄스 상한. 겹쳐 쏴도 화면이 날아가지 않는다. 6 이었는데 3등급 해일(범람)이
+// 정확히 6.0 으로 계산되어 상한에 눌렸다 — 그러면 2등급과 지문이 안 갈린다.
+const PUSH_MAX   = num(C.PUSH_MAX, 8);
 
 // ── 시간에 걸쳐 쏟아지는 것 ──────────────────────────────────
 const POUR_FRAMES  = num(C.POUR_FRAMES, 26);  // 화살비가 내리꽂히는 시간 (0.43초)
@@ -206,6 +215,13 @@ export class Feel {
     this.pourDir = 1;
     this.pourKind = 1;
     this.pourMag = 0;
+    // 화살비의 낙하 구역. 등급이 오르면 전선 → +적 후방 → +중간 셋이 된다.
+    // game.js doVolley 와 **같은 값을 같은 식으로** 읽으므로 비가 실제 피해
+    // 구역 위에 내린다 — 반경만 넓히는 것과 다르다는 계약이 화면에도 지켜진다.
+    this.pourZones = 1;
+    this.pourXB = 0; this.pourXC = 0;
+    this.pourSpanB = 0;
+    this.pourSeq = 0;
 
     // 진화의 재무장 — game 의 시계를 따라간다.
     this.rearmPrevL = 0; this.rearmPrevR = 0;
@@ -294,7 +310,7 @@ export class Feel {
     this.shakeAxis = AX_ISO; this.shakeGrain = 1; this.grainCd = 0;
     this.vibX = 0; this.vibY = 0;
     this.pushX = 0; this.pushY = 0; this.pushVX = 0; this.pushVY = 0;
-    this.pourMode = -1; this.pourFrames = 0;
+    this.pourMode = -1; this.pourFrames = 0; this.pourZones = 1; this.pourSeq = 0;
     // 재무장은 **비운다.** 탭에서 돌아왔을 때 게임의 rearmMs 는 그대로 돌고 있지만
     // 그 사이 경과를 못 봤으므로 여기서 해방 연출을 터뜨리면 이유 없는 폭발이 된다.
     this.rearmPrevL = 0; this.rearmPrevR = 0;
@@ -380,7 +396,13 @@ export class Feel {
     if (mode === 0) {
       // 화살비 — 하늘에서 내리꽂힌다. 착탄점이 매번 다른 x 라 선이 아니라 비가 된다.
       if ((f % POUR_EVERY) === 0) {
-        const x = this.pourX + (Math.random() * 2 - 1) * this.pourSpan;
+        // 등급이 준 자리를 **번갈아** 때린다. 한 구역을 다 채우고 다음으로 가면
+        // 세 번의 화살비로 보이고, 번갈아 내리면 한 번의 융단폭격으로 보인다.
+        this.pourSeq++;
+        const z = this.pourZones > 1 ? (this.pourSeq % this.pourZones) : 0;
+        const cx = z === 0 ? this.pourX : (z === 1 ? this.pourXB : this.pourXC);
+        const sp = z === 0 ? this.pourSpan : this.pourSpanB;
+        const x = cx + (Math.random() * 2 - 1) * sp;
         const g = gy(x);
         this.push1(x, g - 190 - Math.random() * 90, (Math.random() * 2 - 1) * 0.5,
                    6.2 + Math.random() * 2.4, 2.4 + Math.random() * 1.4, 14, this.pourKind);
@@ -852,7 +874,10 @@ export class Feel {
         const mine = b !== 1;
         const bx = mine ? C.BASE_L_X : C.BASE_R_X;
         this.freeze(C.HITSTOP_ERA, mine ? PR_ALWAYS : PR_HI);
-        this.addShake(C.SHAKE_ERA * (mine ? 1 : 0.5), 0);
+        // 포탑은 **올라가는** 것이다. 세로에 밀림도 위로 — 진화의 해방과 같은
+        // 언어를 쓴다(둘 다 "내 것이 커졌다"이므로 그래야 맞다).
+        this.addShake(C.SHAKE_ERA * (mine ? 1 : 0.5), 0, AX_Y, 3);
+        if (mine) this.kick(0, -2.6);
         this.ring(bx, gy(bx) - C.BASE_H);
         this.spray(bx, gy(bx) - C.BASE_H,
                    (C.PART_ERA * 0.7) | 0, mine ? 1 : 2, 2.8, 2.4, C.PART_LIFE, 3.6);
@@ -917,36 +942,65 @@ export class Feel {
         // 그리고 **내가 쓴 것과 적이 쓴 것이 같으면 안 된다** — 같은 해일도
         // 내 것이면 성과이고 적 것이면 재난이다. 방향이 그걸 가른다:
         // 내 것은 적 쪽으로, 적 것은 나에게로 밀린다.
+        // 그리고 **같은 스킬도 등급이 오르면 다른 것이 되어야 한다.** 해일과
+        // 범람은 게임 안에서 다른 일을 한다(0px 미는 것 vs 68px 밀고 넘어뜨리는 것).
+        // 등급은 게임에게 묻는다 — 이벤트 인자를 늘리지 않는다(tierOf 주석 참조).
         const mine = b === SIDE_L;
         const dir = mine ? 1 : -1;
-        if (a === C.SK_TIDE) {
+        if (a === SK_TIDE) {
           // 해일. 플레이어 경로는 EV.SKILL 과 EV.NUKE 를 **둘 다** 낸다.
           // 예전에는 그래서 링 2개·파티클 80개가 겹쳐 풀을 통째로 갈아엎었다.
-          this.tide(mine);
-        } else if (a === C.SK_VOLLEY) {
+          this.tide(mine, this.tierOf(game, SK_TIDE, mine));
+        } else if (a === SK_VOLLEY) {
           // 화살비 — 하늘에서 쏟아지는 것을 한 프레임에 터뜨리면 그냥 폭발이다.
           // 히트스톱을 4 → 2 로 줄이고(정지가 아니라 지속이다) 대신 26프레임
           // 동안 세로로 지지직거리며 화살이 계속 떨어진다.
-          this.freeze(2, mine ? PR_HI : PR_LOW);
-          const fx = this.frontline(game);
+          //
+          // **낙하 지점을 game 과 같은 식으로 뽑는다**(doVolley, game.js:829).
+          // 등급이 오르면 반경이 아니라 **자리가 는다** — 전선 → +적 후방 → +중간.
+          // 후방 낙하는 아직 도착 안 한 증원을 때리는 것이므로, 비가 거기 안 내리면
+          // 화면과 판정이 어긋난다.
+          const tier = this.tierOf(game, SK_VOLLEY, mine);
+          const zones = num(C.VOLLEY_TIER_ZONES && C.VOLLEY_TIER_ZONES[tier], 1);
+          const r = num(C.VOLLEY_TIER_R && C.VOLLEY_TIER_R[tier], num(C.VOLLEY_RADIUS, 190));
+          const c0 = this.frontline(game);
+          const c1 = mine ? C.SPAWN_R_X : C.SPAWN_L_X;    // 적 후방
+          const c2 = (c0 + c1) * 0.5;
+          this.freeze(2 + tier, mine ? PR_HI : PR_LOW);
           this.pourMode = 0;
-          this.pourFrames = POUR_FRAMES;
-          this.pourX = fx;
-          this.pourSpan = num(C.VOLLEY_TIER_R && C.VOLLEY_TIER_R[0], 190) * 0.8;
+          // 자리가 늘면 더 오래 내린다. 융단폭격이 화살비와 같은 길이면 안 된다.
+          this.pourFrames = POUR_FRAMES + tier * 9;
+          this.pourZones = zones;
+          this.pourX = c0; this.pourXB = c1; this.pourXC = c2;
+          this.pourSpan = r;              // 첫 구역은 r
+          this.pourSpanB = r * 0.75;      // 나머지 둘은 0.75r — game 과 같은 비율
+          this.pourSeq = 0;
           this.pourKind = mine ? 1 : 2;
-          this.pourMag = POUR_SHAKE * (mine ? 1 : 0.75);
+          this.pourMag = POUR_SHAKE * (0.78 + tier * 0.3) * (mine ? 1 : 0.75);
           this.addShake(this.pourMag * 1.5, 0, AX_Y, 1);
-          this.spray(fx, gy(fx) - 50, C.PART_KILL, mine ? 1 : 2, 2.6, 3.4, 22, 3.4);
-        } else if (a === C.SK_RALLY) {
+          this.spray(c0, gy(c0) - 50, C.PART_KILL, mine ? 1 : 2, 2.6, 3.4, 22, 3.4);
+        } else if (a === SK_RALLY) {
           // 증원 — **진동을 한 톨도 안 쓴다.** 셋 중 유일하게 안 흔들리는 것이
           // 이 스킬의 성격이다. 화면이 위로 들렸다 내려앉고, 소환지점에서
           // 기둥이 솟는다. 적 것은 반대로 **내려앉는다** — 저쪽 땅이 무거워진 것.
+          //
+          // 등급이 오르면 **수가 아니라 구성**이 바뀐다(검사3 → 검사2창2 →
+          // 다섯 종). 그러니 세기가 아니라 **폭**을 키운다 — 정예군은
+          // 한 기가 아니라 한 줄의 전열이고, 그 줄만큼 넓게 솟아야 한다.
+          const tier = this.tierOf(game, SK_RALLY, mine);
+          const row = C.RALLY_TIER_MIX && C.RALLY_TIER_MIX[tier];
+          let n = 0;
+          if (row) for (let k = 0; k < row.length; k++) n += row[k] | 0;
+          if (!(n > 0)) n = num(C.RALLY_COUNT, 3);
+          const gap = num(C.UNIT_GAP, 21);
           const sx = mine ? C.SPAWN_L_X : C.SPAWN_R_X;
-          this.kick(0, mine ? -4.2 : 2.2);
+          // game 은 소환지점에서 **뒤로** 벌려 세운다(spawn 의 xoff 부호).
+          const back = mine ? -1 : 1;
+          this.kick(0, mine ? -(3.4 + tier * 0.9) : (1.8 + tier * 0.5));
           this.pourMode = 1;
-          this.pourFrames = RISE_FRAMES;
-          this.pourX = sx;
-          this.pourSpan = 30;
+          this.pourFrames = RISE_FRAMES + tier * 6;
+          this.pourX = sx + back * n * gap * 0.5;
+          this.pourSpan = n * gap * 0.5 + 10;
           this.pourKind = mine ? 1 : 2;
           this.ring(sx, gy(sx) - 24);
           this.spray(sx, gy(sx) - 16, (C.PART_ERA * 0.5) | 0, mine ? 0 : 2,
@@ -970,7 +1024,8 @@ export class Feel {
 
       case EV.NUKE:
         // 해일의 예전 이름. 같은 프레임에 EV.SKILL(0) 이 이미 지나갔으면 중복이다.
-        this.tide(true);
+        // **플레이어 전용 경로**다(game.js:822 는 side === SIDE_L 안에서만 쏜다).
+        this.tide(true, this.tierOf(game, SK_TIDE, true));
         break;
 
       case EV.WATER_WARN:
@@ -1105,16 +1160,42 @@ export class Feel {
   // 결을 4프레임으로 묶어(다른 어떤 연출보다 굵다) 가로로만 쓸리게 하고,
   // 밀림 임펄스를 물이 가는 쪽으로 준다 — 화면이 파도에 떠밀렸다 돌아온다.
   // 화살비의 잔 세로 지지직과 정확히 반대 축·반대 결이라 손에서 안 헷갈린다.
-  tide(mine) {
+  //
+  // 등급(해일 → 격류 → 범람)은 **게임이 실제로 미는 픽셀에서 나온다.**
+  // C.TIDE_PUSH_PX = [0, 34, 68] 이라 1등급은 아무도 안 밀린다 — 그러면 화면도
+  // 안 밀어야 맞다. 상수를 새로 만들지 않고 같은 배열을 같은 tier 로 읽으므로
+  // 밸런스가 저 숫자를 고치면 감촉이 저절로 따라간다.
+  tide(mine, tier) {
     if (this.t - this.tideAt < 8) return;
     this.tideAt = this.t;
+    const t = tier > 0 ? (tier | 0) : 0;
     const dir = mine ? 1 : -1;
     const x = mine ? C.VIEW_W * 0.62 : C.VIEW_W * 0.38;
     const y = gy(x) - 40;
+    const pushPx = num(C.TIDE_PUSH_PX && C.TIDE_PUSH_PX[t], 0);
+    const stunMs = num(C.TIDE_STUN_MS && C.TIDE_STUN_MS[t], 0);
+    const s = mine ? 1 : 0.72;
     // 적의 해일도 무겁다 — 재난이니까. 다만 예산은 따로 쓴다.
-    this.freeze(mine ? C.HITSTOP_NUKE : ((C.HITSTOP_NUKE * 0.65) | 0), PR_ALWAYS);
-    this.addShake(C.SHAKE_NUKE * (mine ? 1 : 0.8), 0.01, AX_X, 4);
-    this.kick(dir * 5.0, 0);
+    // 1등급을 예전(14)보다 짧게 잡아, 등급이 올라야 예전 무게가 나오게 했다.
+    // 그래야 총량이 안 늘면서 "세졌다"가 손에 온다.
+    const fz = 11 + t * 3;
+    this.freeze(mine ? fz : ((fz * 0.65) | 0), PR_ALWAYS);
+    this.addShake(C.SHAKE_NUKE * (0.78 + t * 0.11) * s, 0.01, AX_X, 4);
+    // 밀린 픽셀에 비례한다: 0px → 2.2 · 34px → 4.1 · 68px → 6.0
+    this.kick(dir * (2.2 + pushPx * 0.056) * s, 0);
+    if (stunMs > 0) {
+      // 범람 — 휩쓸어 **넘어뜨린다.** 여기서만 밀림에 세로 성분이 생긴다.
+      // 회전은 안 쓴다: 회전은 승패·원정 종료·도발의 언어이고, 스킬이
+      // 그 셋의 어휘를 빌려 쓰기 시작하면 판의 결말이 값을 잃는다.
+      this.kick(0, 2.4 * s);
+      const nf = 10;
+      for (let k = 0; k < nf; k++) {
+        const fx2 = x + (Math.random() * 2 - 1) * 110;
+        this.push1(fx2, gy(fx2) - 60 - Math.random() * 40,
+                   dir * (0.8 + Math.random()), 2.6 + Math.random() * 1.8,
+                   3.0 + Math.random() * 1.6, 20, mine ? 1 : 2);
+      }
+    }
     this.ring(x, y);
     // 절반은 터지고 절반은 **간다.** 물은 한자리에서 터지지 않는다 —
     // 지면을 따라 낮게 밀려가는 띠가 있어야 파도로 읽힌다.
@@ -1133,6 +1214,20 @@ export class Feel {
       this.flash(C.FLASH_FRAMES);
       this.banner(C.BAN_NUKE);
     }
+  }
+
+  // ── 등급 ────────────────────────────────────────────────────
+  // **이벤트에 실려 오지 않는다. 실을 이유도 없다.**
+  // emit() 은 큐가 아니라 동기 팬아웃이라(game.js:454 → main.js:28) onEvent 의
+  // 넷째 인자 game 은 **발동 그 순간의 게임**이다. 시대가 그 사이에 바뀔 틈이
+  // 없으므로 여기서 물어보는 것이 정본이고, EV.SKILL 의 인자를 늘리면
+  // director·audio 까지 같은 시그니처를 물고 있어 3파일 동시 수정이 된다.
+  tierOf(game, i, mine) {
+    if (!game) return 0;
+    const f = mine ? game.skillTier : game.aiSkillTier;
+    if (typeof f !== 'function') return 0;
+    const t = f.call(game, i);
+    return (t === t && t > 0) ? (t | 0) : 0;      // NaN·undefined 방어
   }
 
   // 전선 — 싸움이 실제로 일어나는 x. 없으면 화면 한가운데로 떨어진다.

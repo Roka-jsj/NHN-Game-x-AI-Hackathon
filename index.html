@@ -26,6 +26,14 @@
 <meta name="twitter:title" content="차오른다 (RISING)">
 <meta name="twitter:description" content="물이 차오르는 협곡에서 벌어지는 한 화면 레인 전투. 버티는 쪽이 먼저 잠긴다.">
 
+<!-- 파비콘은 **파일이 아니라 data URI** 다. 외부 에셋 0개 규칙을 지키면서
+     404 를 없애는 유일한 방법이다 — 이 링크가 없으면 브라우저가 제멋대로
+     /favicon.ico 를 찾아가고, 배포된 사이트를 여는 사람마다 콘솔에 404 가
+     하나씩 남는다. 실제로 헤드리스 검증에서 "콘솔 에러 0" 을 깨던 유일한
+     항목이 이것이었다. og:image 와 달리 data URI 파비콘은 브라우저가 그대로 쓴다.
+     그림은 팔레트 그대로 — 차오르는 물(붉은 띠) 위에 선 기둥(금색). -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2312242e'/%3E%3Crect x='13' y='5' width='6' height='17' fill='%23f2b441'/%3E%3Crect y='21' width='32' height='11' fill='%23c4463a'/%3E%3C/svg%3E">
+
 <style>
   /* 팔레트는 src/config.js 의 COL_* 여섯 색이 전부다. 대비는 알파로 번다.
      BG #12242E · GRID #1B3341 · STRUCT #7E9AA6 · PLAYER #F4F7F5 · DANGER #C4463A · BONUS #F2B441 */
