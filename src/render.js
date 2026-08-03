@@ -61,8 +61,15 @@ const BTN_NAME = ['검사', '창병', '궁수', '기병', '거인', '투석기',
 // **이 게임에서 가장 큰 변화가 화면에 안 보인다.**
 // 그리고 마지막 시대에서는 다 쓴 진화 칸이 총진군(4번째 스킬)이 된다.
 // game 이 아직 skillName 을 안 주면 조용히 예전 이름으로 떨어진다.
+// **유닛 버튼(0..UNIT_KINDS-1)도 같은 규칙이다** — spec-v4 §1 이 30개 이름을
+// ERA_UNIT_NAME[era][kind] 로 확정했다. 이 버튼은 항상 **내(SIDE_L) 시대**를
+// 읽는다 — 적 진영용 버튼 줄은 없다(있다면 game.aiEra 를 읽어야 한다).
 function btnLabel(game, i) {
   if (!game || typeof game.skillName !== 'function') return BTN_NAME[i];
+  if (i < C.UNIT_KINDS) {
+    const row = C.ERA_UNIT_NAME && C.ERA_UNIT_NAME[game.era];
+    return (row && row[i]) || BTN_NAME[i];
+  }
   if (i === C.B_TIDE) return game.skillName(C.SK_TIDE) || BTN_NAME[i];
   if (i === C.B_VOLLEY) return game.skillName(C.SK_VOLLEY) || BTN_NAME[i];
   if (i === C.B_ERA && !game.eraReady() && game.era >= C.ERA_COUNT - 1) {
@@ -2126,7 +2133,10 @@ export class Renderer {
     const lunge = atk > 0 ? dir * 4 : 0;
 
     // ── 투석기 — 사람이 아니라 기계다. 사람 골격을 쓰지 않는다 ──
-    // 바퀴 둘을 멀리 떼고 그 사이에 삼각 프레임을 세운다. 팔은 평형추를 달고 돈다.
+    // 바퀴 둘을 멀리 떼고 그 사이에 삼각 프레임을 세운다. 돌·청동·강철은
+    // 팔이 평형추를 달고 돈다(던진다) — 화약·기계는 **던지지 않고 쏜다**,
+    // 팔 대신 포신 하나가 가대 위에 얹힌다. 던지는 병기와 쏘는 병기는
+    // 사거리·소리도 다르지만 여기서는 실루엣만 가른다.
     if (kind === C.U_CATA) {
       const wr = h * 0.25;
       const axY = gy - wr;
@@ -2139,6 +2149,21 @@ export class Renderer {
       this.addCircle(x - dir * w * 0.14, axY - 13, 3.4);
       const mx = x - dir * w * 0.02;
       const mastY = axY - h * 0.68;
+      if (era >= 3) {
+        // 대포·곡사포 — 가대 위에 얹힌 포신. 곡사포(기계)는 더 가파르게 쳐든다
+        this.addBar(mx, axY - 5, dir * 0.60, -0.80, h * 0.34, 0, 5.4, 4.6); // 가대
+        const ba = era >= 4 ? 0.60 : 0.26;   // 양수 = 위로 쳐든다((ux,uy)=(cos,-sin) 규칙)
+        const bc = Math.cos(ba), bs = Math.sin(ba);
+        const blen = h * (era >= 4 ? 0.92 : 0.82);
+        const brX = mx - dir * bc * 5, brY = axY - 5 - bs * 5;
+        this.addBar(brX, brY, dir * bc, -bs, blen, 9, 6.6, 4.4);        // 포신
+        this.addBar(brX, brY, dir * bc, -bs, 7, 9, 8, 8);               // 약실(포미)
+        const tipX = brX + dir * bc * blen, tipY = brY - bs * blen;
+        this.smY[i] = brY - 12; this.smR[i] = w * 0.22;
+        this.wtX[i] = tipX; this.wtY[i] = tipY;
+        this.addEraBanner(mx, mastY, w, era, dir);
+        return;
+      }
       this.addBar(mx, axY, 0, -1, h * 0.68, 0, 4.6, 3);                 // 기둥
       this.addBar(bx, axY - 3, dir * 0.62, -0.78, h * 0.64, 0, 2.8, 2); // 뒤 버팀대
       this.addBar(fx, axY - 3, -dir * 0.52, -0.85, h * 0.52, 0, 2.6, 1.9); // 앞 버팀대
@@ -2254,15 +2279,43 @@ export class Renderer {
     const hx0 = shX + dir * bwT * 0.46;
 
     if (kind === C.U_SWORD) {
-      // 커다란 둥근 방패 — 검사의 첫 번째 표식. 몸 앞에 원이 하나 있다
-      this.addCircle(bx0 + dir * w * 0.44, hipY - torsoH * 0.44, w * 0.36);
-      // 칼 — 높이 들었다가 내려친다. 짧고 두껍다
-      const a = atk > 0 ? -0.62 : 1.18;
-      const c = Math.cos(a), s = Math.sin(a);
-      this.addBar(hx0, handY - 3, dir * c, -s, h * 0.50 * ew, 8, 2.9 * ew, 1.4);
-      this.addBar(hx0, handY - 3, s, dir * c, 7, 7, 2, 2);        // 손잡이 가드
-      this.addCircle(hx0 - dir * c * 8, handY - 3 + s * 8, 2.4);  // 손잡이 끝
-      this.wtX[i] = hx0 + dir * c * h * 0.50 * ew; this.wtY[i] = handY - 3 - s * h * 0.50 * ew;
+      // 무기 자체가 시대마다 다르다 — spec-v4 §1: 돌도끼 → 검+방패 → 검+방패
+      // (판금은 addEraGear 가 뿔·견갑·망토로 판다) → 총검 라이플 → 각진 동력 블레이드.
+      // 방패는 청동·강철에만 있다 — 총 든 손엔 방패가 없고, 파워아머는 방패가 없어도 된다.
+      if (era === 0) {
+        // 돌도끼병 — 방패 없이 짧고 두꺼운 돌도끼. 내려찍는다
+        const a = atk > 0 ? -0.70 : 0.95;
+        const c = Math.cos(a), s = Math.sin(a);
+        const cl = h * 0.40 * ew;
+        this.addBar(hx0, handY, dir * c, -s, cl, 6, 3.4, 2.6);
+        this.addSpike(hx0 + dir * c * cl, handY - s * cl, dir * c, -s, 11, 6);  // 돌도끼날(쐐기)
+        this.wtX[i] = hx0 + dir * c * (cl + 11); this.wtY[i] = handY - s * (cl + 11);
+      } else if (era === 3) {
+        // 총검병 — 방패 없이 총검 라이플. 겨눈 자세라 거의 수평이다
+        const a = atk > 0 ? -0.08 : 0.06;
+        const c = Math.cos(a), s = Math.sin(a);
+        const len = h * 0.82 * ew + (atk > 0 ? 8 : 0);
+        const px = bx0 + dir * w * 0.08;
+        this.addBar(px, handY, dir * c, -s, len, w * 0.30, 2.1, 1.7);
+        this.addSpike(px + dir * c * len, handY - s * len, dir * c, -s, 9, 2.5);  // 총검 날
+        this.wtX[i] = px + dir * c * (len + 9); this.wtY[i] = handY - s * (len + 9);
+      } else if (era === 4) {
+        // 강습병 — 방패 없이 두껍고 각진 동력 블레이드. 파워아머다운 짧고 굵은 실루엣
+        const a = atk > 0 ? -0.62 : 1.18;
+        const c = Math.cos(a), s = Math.sin(a);
+        const cl = h * 0.44 * ew;
+        this.addBar(hx0, handY - 3, dir * c, -s, cl, 6, 5.4, 3.8);
+        this.wtX[i] = hx0 + dir * c * cl; this.wtY[i] = handY - 3 - s * cl;
+      } else {
+        // 청동·강철 — 검 + 원형 방패
+        this.addCircle(bx0 + dir * w * 0.44, hipY - torsoH * 0.44, w * 0.36);
+        const a = atk > 0 ? -0.62 : 1.18;
+        const c = Math.cos(a), s = Math.sin(a);
+        this.addBar(hx0, handY - 3, dir * c, -s, h * 0.50 * ew, 8, 2.9 * ew, 1.4);
+        this.addBar(hx0, handY - 3, s, dir * c, 7, 7, 2, 2);        // 손잡이 가드
+        this.addCircle(hx0 - dir * c * 8, handY - 3 + s * 8, 2.4);  // 손잡이 끝
+        this.wtX[i] = hx0 + dir * c * h * 0.50 * ew; this.wtY[i] = handY - 3 - s * h * 0.50 * ew;
+      }
     } else if (kind === C.U_SPEAR) {
       // 창 — **몸 길이보다 앞으로 훨씬 더 나간다.** 이게 사거리다
       const a = atk > 0 ? 0.02 : 0.15;
@@ -2276,18 +2329,40 @@ export class Renderer {
       this.addBar(shX - dir * bwT * 0.55, shY + 2, ux, uy, torsoH * 0.86, 0, bwT * 0.20, bwT * 0.16);
       this.wtX[i] = px + dir * c * (len + 15); this.wtY[i] = handY - s * (len + 15);
     } else if (kind === C.U_ARCHER) {
-      // 등에 멘 화살통과 **위로 삐죽한 화살깃** — 뒤로 젖힌 몸과 함께 궁수를 만든다
-      const qx = shX - dir * bwT * 0.42, qy = shY + torsoH * 0.06;
-      this.addBar(qx, qy, -dir * 0.30, -0.95, h * 0.34, h * 0.06, 3.4, 2.8);
-      const qtX = qx - dir * 0.30 * h * 0.34, qtY = qy - 0.95 * h * 0.34;
-      for (let f = -1; f <= 1; f++) {
-        this.addSpike(qtX + f * 3.2, qtY, -dir * 0.24 + f * 0.10, -0.97, h * 0.15, 1.7);
+      // 사거리 무기의 **구조**가 시대마다 다르다 — 활(선으로, addUnitLines) →
+      // 석궁(짧고 단단한 틀) → 총(어깨에 견착한 장총, 화살통이 없다).
+      if (era === 2) {
+        // 석궁병 — 몸 앞에 짧은 총열대 + 가로 활틀. 화살통 대신 이 틀이 표식이다
+        const bxx = shX + dir * w * 0.30, byy = handY - torsoH * 0.10;
+        this.addBar(bxx, byy, dir, 0, h * 0.46 * ew, h * 0.10, 2.2, 1.8);
+        this.addBar(bxx + dir * h * 0.30 * ew, byy, -uy, ux, h * 0.26 * ew, h * 0.13, 2.4, 1.6);
+        this.wtX[i] = bxx + dir * h * 0.46 * ew; this.wtY[i] = byy;
+      } else if (era >= 3) {
+        // 머스킷병·저격수 — 어깨에 견착한 장총. 화살통이 없다.
+        // 저격수(기계)는 조준경이 붙고 총열을 더 곧게 편다
+        const a = era >= 4 ? -0.16 : -0.04;
+        const c = Math.cos(a), s = Math.sin(a);
+        const bxx = shX + dir * w * 0.16, byy = handY - torsoH * 0.06;
+        const len = h * 0.60 * ew;
+        this.addBar(bxx, byy, dir * c, -s, len, h * 0.16, 2.4, 1.7);
+        if (era >= 4) {
+          this.addBar(bxx + dir * c * len * 0.5, byy - s * len * 0.5, -s, -dir * c, 5, 2, 1.6, 1.6); // 조준경
+        }
+        this.wtX[i] = bxx + dir * c * len; this.wtY[i] = byy - s * len;
+      } else {
+        // 투석꾼·청동궁수 — 등에 멘 화살통과 **위로 삐죽한 화살깃**
+        const qx = shX - dir * bwT * 0.42, qy = shY + torsoH * 0.06;
+        this.addBar(qx, qy, -dir * 0.30, -0.95, h * 0.34, h * 0.06, 3.4, 2.8);
+        const qtX = qx - dir * 0.30 * h * 0.34, qtY = qy - 0.95 * h * 0.34;
+        for (let f = -1; f <= 1; f++) {
+          this.addSpike(qtX + f * 3.2, qtY, -dir * 0.24 + f * 0.10, -0.97, h * 0.15, 1.7);
+        }
+        // 시위에 걸린 화살 — 활 중심에서 뺨까지
+        const bxx = shX + dir * w * 0.52, byy = handY - torsoH * 0.16;
+        const pull = atk > 0 ? 1 : 0.72;
+        this.addBar(bxx + dir * 3, byy, -dir, 0, h * 0.30 * pull, 4, 1.3, 1.3);
+        this.wtX[i] = bxx + dir * h * 0.30; this.wtY[i] = byy;
       }
-      // 시위에 걸린 화살 — 활 중심에서 뺨까지
-      const bxx = shX + dir * w * 0.52, byy = handY - torsoH * 0.16;
-      const pull = atk > 0 ? 1 : 0.72;
-      this.addBar(bxx + dir * 3, byy, -dir, 0, h * 0.30 * pull, 4, 1.3, 1.3);
-      this.wtX[i] = bxx + dir * h * 0.30; this.wtY[i] = byy;
     } else {
       // 거인 — 어깨판 · 등의 혹 · 끝이 부푼 몽둥이. 목이 없다
       const sx2 = shX, sy2 = shY;
@@ -2398,8 +2473,9 @@ export class Renderer {
     const hx = shX + ux * hgap + dir * w * 0.03;
     const hy = shY + uy * hgap;
 
-    if (kind === C.U_SWORD) {
-      this.addCircle(bx0 + dir * w * 0.44, hipY - torsoH * 0.44, w * 0.13);   // 방패 보스
+    if (kind === C.U_SWORD && (era === 1 || era === 2)) {
+      // 방패 보스 — 방패가 있는 시대(청동·강철)에만. 돌·화약·기계는 방패가 없다
+      this.addCircle(bx0 + dir * w * 0.44, hipY - torsoH * 0.44, w * 0.13);
     } else if (giant) {
       ctx.rect(hx - headR * 0.7, hy - 1, headR * 1.4, 2.4);                   // 눈 그늘
     }
@@ -2450,7 +2526,7 @@ export class Renderer {
     ctx.lineTo(shX + nx * bwT * 0.5, shY + ny * bwT * 0.5);
     ctx.lineTo(bx0 + nx * bwH * 0.5, hipY + ny * bwH * 0.5);
     ctx.closePath();
-    if (kind === C.U_SWORD) {
+    if (kind === C.U_SWORD && (game.uEra[i] === 1 || game.uEra[i] === 2)) {
       this.addCircle(bx0 + dir * w * 0.44, hipY - torsoH * 0.44, w * 0.36);
     }
     // 머리 — 시대마다 모양이 다르므로 윤곽에도 넣는다. 밀집했을 때
@@ -2474,9 +2550,12 @@ export class Renderer {
   }
 
   // 선으로만 읽히는 것 — 활과 시위. 채우면 활이 안 보인다
+  // 석궁(강철)·총(화약·기계)은 activeUnitFill 이 이미 채운 도형으로 그린다 —
+  // 활대가 없으니 여기서는 그릴 게 없다.
   addUnitLines(game, i, dir) {
     const ctx = this.ctx;
     if (game.uKind[i] !== C.U_ARCHER) return;
+    if (game.uEra[i] >= 2) return;
     const x = this.sx[i], gy = this.sgy[i], w = this.sw[i], h = this.sh[i];
     const atk = game.uAttack[i];
     const lunge = atk > 0 ? dir * 4 : 0;
