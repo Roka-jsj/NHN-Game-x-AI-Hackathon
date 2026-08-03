@@ -324,6 +324,21 @@ const ERA_LEG = Float32Array.from([0.80, 1.0, 1.14, 1.06, 1.38]);
 const ERA_WEAP = Float32Array.from([0.84, 1.0, 1.10, 1.18, 1.34]);
 const eraIdx = (e) => (e > 0 ? (e < 4 ? e : 4) : 0);
 
+// 겹친 아군을 세려면 **불투명한** 중간톤이 있어야 한다.
+// 알파 램프로는 안 된다: 어두운 톤이 밝은 몸 **위에** 얹히면 다시 밝아져서,
+// 정작 뭉치는 자리에서만 효과가 사라진다. (실측으로 확인했다 — 램프를
+// 0.78 → 0.62 로 내려도 전선의 흰 반죽은 조금도 안 갈렸다. 배경 위에서만
+// 어두워졌을 뿐이다.) 그래서 배경과 미리 섞어 색 하나를 굽는다.
+// 전장은 6색 제약에서 풀렸다 — HUD 는 계속 램프만 쓴다.
+function mixOver(hex, bg, a) {
+  const h = (t, i) => parseInt(t.slice(i, i + 2), 16);
+  const r = Math.round(h(hex, 1) * a + h(bg, 1) * (1 - a));
+  const g = Math.round(h(hex, 3) * a + h(bg, 3) * (1 - a));
+  const b = Math.round(h(hex, 5) * a + h(bg, 5) * (1 - a));
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+const MINE_DIM = mixOver(C.COL_PLAYER, C.COL_BG, 0.60);
+
 export class Renderer {
   constructor(canvas, ctx) {
     this.canvas = canvas;
@@ -1614,13 +1629,14 @@ export class Renderer {
       const dir = s === SIDE_L ? 1 : -1;
       const mine = s === SIDE_L;
       const ramp = mine ? C.RAMP_PLAYER : C.RAMP_STRUCT;
-      // 같은 편끼리 갈리는 두 단계. **아군의 두 단계가 1.0 과 0.78 이었는데
-      // 그건 흰색 두 개다** — 20기가 겹치면 눈이 못 가른다 (실측: 전선의
-      // 아군 뭉치가 실루엣 하나로 읽혔다). 적군(0.55/0.36)만큼 벌린다.
-      const aHi = mine ? 1 : 0.55, aLo = mine ? 0.62 : 0.36;
+      // 같은 편끼리 갈리는 두 단계. **아군의 두 단계가 1.0 과 0.78 이었고
+      // 그건 알파가 다른 흰색 두 개다** — 겹치면 위의 것이 아래를 다시 밝혀
+      // 20기가 실루엣 하나가 된다. 아군의 어두운 톤만 불투명한 색으로 바꾼다.
+      const cHi = mine ? C.COL_PLAYER : C.RAMP_STRUCT[C.rampIndex(0.55)];
+      const cLo = mine ? MINE_DIM : C.RAMP_STRUCT[C.rampIndex(0.36)];
 
       for (let tone = 0; tone < 2; tone++) {
-        ctx.fillStyle = ramp[C.rampIndex(tone ? aLo : aHi)];
+        ctx.fillStyle = tone ? cLo : cHi;
         ctx.beginPath();
         let any = 0;
         for (let j = 0; j < n; j++) {
@@ -1664,7 +1680,7 @@ export class Renderer {
       // 공성 병기 — 대열을 통과하는 유닛이라 남의 몸에 묻힌다.
       // 그래서 **몸 패스가 다 끝난 뒤 맨 위에 다시 올린다.**
       // 혼자 앞서 나가다 죽는 그림이 이 유닛의 성격이고, 그게 보여야 한다.
-      ctx.fillStyle = ramp[C.rampIndex(aHi)];
+      ctx.fillStyle = cHi;
       ctx.beginPath();
       let anyS = 0;
       for (let j = 0; j < n; j++) {
@@ -2869,7 +2885,7 @@ export class Renderer {
         const dir = s === SIDE_L ? 1 : -1;
         const mine = s === SIDE_L;
         if (mine) {                          // 아군 — 몸을 다시 밝힌다
-          ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.62)];
+          ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.50)];
           ctx.beginPath();
           let anyF = 0;
           for (let j = 0; j < n; j++) {
