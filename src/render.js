@@ -2896,9 +2896,12 @@ export class Renderer {
           }
           if (anyF) ctx.fill();
         }
-        // 아군은 어두운 분리선, 적군은 밝은 테. 물 밖과 같은 규칙이다
-        ctx.strokeStyle = mine ? C.RAMP_BG[C.rampIndex(0.92)] : C.RAMP_STRUCT[C.rampIndex(0.70)];
-        ctx.lineWidth = mine ? 2.6 : 2.0;
+        // 적군은 밝은 테만 되살린다. **아군 쪽 분리선은 여기서 다시 긋지 않는다** —
+        // 유닛 경로를 한 번 더 짓는 값이 비싸고(128기 잠긴 프레임에서 실측 +1.7ms),
+        // 물속에서 갈려야 하는 것은 몇 기인가보다 **어느 편인가**다.
+        if (mine) continue;
+        ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.70)];
+        ctx.lineWidth = 2.0;
         ctx.beginPath();
         let anyO = 0;
         for (let j = 0; j < n; j++) {
