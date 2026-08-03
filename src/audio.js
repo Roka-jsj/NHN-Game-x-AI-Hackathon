@@ -31,6 +31,13 @@ const E_STAGE_START  = EV.STAGE_START  !== undefined ? EV.STAGE_START  : 20;
 const E_STAGE_CLEAR  = EV.STAGE_CLEAR  !== undefined ? EV.STAGE_CLEAR  : 21;
 const E_TAUNT        = EV.TAUNT        !== undefined ? EV.TAUNT        : 22;
 const E_CAMPAIGN_END = EV.CAMPAIGN_END !== undefined ? EV.CAMPAIGN_END : 23;
+const E_SKILL_UP     = EV.SKILL_UP     !== undefined ? EV.SKILL_UP     : 24;
+
+// 스킬 번호. config 가 아직 총진군을 모를 수도 있다 — 없으면 3 으로 둔다.
+const SK_TIDE   = (typeof C.SK_TIDE   === 'number') ? C.SK_TIDE   : 0;
+const SK_VOLLEY = (typeof C.SK_VOLLEY === 'number') ? C.SK_VOLLEY : 1;
+const SK_RALLY  = (typeof C.SK_RALLY  === 'number') ? C.SK_RALLY  : 2;
+const SK_SURGE  = (typeof C.SK_SURGE  === 'number') ? C.SK_SURGE  : 3;
 
 // ─── 음정표 ──────────────────────────────────────────────────
 // 반음 비율을 미리 굽는다. 루프 안에서 Math.pow 를 부르지 않기 위해서다.
@@ -100,8 +107,19 @@ const MEL = [
 // 8마디마다 한 번, 마지막 마디에 채움 악구가 들어간다
 const MEL_FILL = Int8Array.of(4, 3, 4, 3, 2, 1, 2, 0);
 const ARPP = Int8Array.of(0, 2, 4, 2, 1, 3, 4, 3);
-// 기계 시대 진화 팡파르. 이벤트마다 배열을 새로 만들지 않는다
+// 시대 진화 팡파르. 이벤트마다 배열을 새로 만들지 않는다
+const ERA1_SEQ = Float32Array.of(523.25, 659.25, 783.99);
+const ERA2_SEQ = Float32Array.of(587.33, 739.99, 880.00, 1174.7);
+const ERA3_SEQ = Float32Array.of(392.00, 587.33, 783.99, 1174.7);
 const ERA4_SEQ = Float32Array.of(523.25, 698.46, 880, 1046.5, 1396.9, 1760);
+// 화살비의 착탄. **불규칙해야 "비"로 들린다** — 등간격이면 기계음이다
+const VOLLEY_HIT = Float32Array.of(0.44, 0.487, 0.516, 0.567, 0.601, 0.658, 0.702, 0.778);
+// 증원의 북. 간격이 줄어든다 = 모여드는 소리
+const RALLY_DRUM = Float32Array.of(0, 0.235, 0.415, 0.545, 0.635, 0.695);
+// 증원의 뿔피리. **올라간다.** 넷 중 유일하게 음정으로 해결되는 스킬이다
+const RALLY_HORN = Float32Array.of(196.00, 261.63, 392.00, 523.25);
+// 스킬 등급이 오를 때의 종. 스킬마다 다른 음이다
+const SKILLUP_SEMI = Int8Array.of(0, 3, 7, 10);
 // 거울의 등장 악구. 같은 줄을 두 번 쓴다 — 두 번째가 어긋난 복사본이다
 const MIRROR_SEQ = Int8Array.of(0, 7, 3, 10);
 // 원정 완주. E3 → G#4(장3도) → E5. **이 게임에서 장조는 여기 한 번뿐이다**
@@ -187,6 +205,11 @@ export class Audio {
     this.runOsc = null;
     this.runGain = null;
 
+    // 진영 버스. unlock() 에서 네 개를 만들고 이후로는 파라미터만 만진다
+    this.sideFix = null;   // 고정 정위 — 소환·타격·포탑처럼 자주 나는 것
+    this.sideSwp = null;   // 이동 정위 — 스킬·진화처럼 화면을 가로지르는 것
+    this.sideGains = null; // hush() 가 훑을 게인 목록
+
     // BGM 층. 전부 지속 노드다 — 만들고 나면 게인·주파수만 만진다.
     this.bgm = null;
     this.cmd = null;        // 사령관 테마 층. 역시 지속 노드다
@@ -217,6 +240,7 @@ export class Audio {
         this.master.gain.value = this.muted ? 0 : MASTER_CAP;
         this.master.connect(this.ctx.destination);
         this.buildNoise();
+        this.buildSideBuses();
         this.buildWaterLoop();
         this.buildRunDrone();
         this.buildMusic();
@@ -244,6 +268,81 @@ export class Audio {
     const d = buf.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
     this.noiseBuf = buf;
+  }
+
+  // ── 진영의 소리 공간 ────────────────────────────────────────
+  // 사용자가 짚은 것: "상대와 내가 쓰는 기술이나 그런거에 대한 이펙트가 구분이 안된다".
+  // 아트는 이걸 **위치와 색**으로 갈랐다 — 내 스킬은 흰금색이 왼→오른쪽,
+  // 적 스킬은 회청+붉은색이 오른→왼쪽. 소리도 **같은 축**을 써야 한 사건으로 붙는다.
+  //
+  // 축을 셋 쓴다. 하나로는 못 가른다:
+  //   1) 정위(pan)   내 것 왼→오른쪽, 적 것 오른→왼쪽. 아트의 진행 방향과 같다
+  //   2) 음색(filter) 내 것은 위가 열려 맑고(highshelf), 적 것은 위가 닫혀 탁하다(lowpass)
+  //   3) 음높이       적이 낮다 (호출부의 p 배수)
+  //
+  // **정위 하나에 걸면 안 된다.** 폰 스피커 한 개, 모노 출력, 한쪽 이어폰에서는
+  // 팬이 통째로 사라진다. 2·3번은 모노로 합쳐도 살아남는다 — 팬은 그 위의 보너스다.
+  // StereoPanner 가 없는 기기(구형 사파리)에서는 팬만 빠지고 나머지는 그대로다.
+  buildSideBuses() {
+    const ctx = this.ctx;
+    const gains = [];
+    const mk = (mine, sweep) => {
+      const inp = ctx.createGain();
+      inp.gain.value = 1;
+      gains.push(inp);
+      const tone = ctx.createBiquadFilter();
+      if (mine) {
+        // 내 것 — 위를 연다. 금속 광택이 남는다.
+        // 문턱을 2400 에 뒀더니 증원·총진군(전부 200~500Hz대)이 선반 아래로
+        // 통째로 빠져 적 것과 중심주파수가 1.3배밖에 안 벌어졌다. 1900 으로 내린다
+        tone.type = 'highshelf';
+        tone.frequency.value = sweep ? 1900 : 2800;
+        tone.gain.value = sweep ? 7.0 : 3.5;
+      } else {
+        // 적 것 — 위를 닫는다. 물 건너에서 오는 소리처럼 둔해진다.
+        // Q 를 1 쯤 남겨 문턱에 약간의 날을 둔다. 완전히 뭉개면 폰에서 사라진다
+        tone.type = 'lowpass';
+        tone.frequency.value = sweep ? 1400 : 2400;
+        tone.Q.value = sweep ? 1.1 : 0.8;
+      }
+      inp.connect(tone);
+      let tail = tone;
+      let pan = null;
+      if (typeof ctx.createStereoPanner === 'function') {
+        pan = ctx.createStereoPanner();
+        pan.pan.value = mine ? -0.42 : 0.42;
+        tone.connect(pan);
+        tail = pan;
+      }
+      tail.connect(this.master);
+      return { in: inp, tone, pan };
+    };
+    this.sideFix = [mk(true, false), mk(false, false)];
+    this.sideSwp = [mk(true, true),  mk(false, true)];
+    this.sideGains = gains;
+  }
+
+  // 이 진영의 소리가 들어갈 입구. 버스가 없으면 예전처럼 master 로 간다
+  sideIn(side, sweep) {
+    const arr = sweep ? this.sideSwp : this.sideFix;
+    if (!arr) return this.master;
+    const b = arr[side === SIDE_L ? 0 : 1];
+    return b ? b.in : this.master;
+  }
+
+  // 화면을 가로지르는 소리의 정위를 움직인다. **아트의 진행 방향과 같다.**
+  // 내 스킬은 내 기지(왼쪽)에서 출발해 적 쪽으로 가고, 적 스킬은 그 반대다.
+  // 노드를 만들지 않는다 — 이미 있는 팬 파라미터에 램프를 건다.
+  sweepPan(side, dur) {
+    if (!this.ctx || !this.sideSwp) return;
+    const b = this.sideSwp[side === SIDE_L ? 0 : 1];
+    if (!b || !b.pan) return;
+    const t = this.ctx.currentTime;
+    const from = side === SIDE_L ? -0.88 : 0.88;
+    const to   = side === SIDE_L ?  0.44 : -0.44;
+    b.pan.pan.cancelScheduledValues(t);
+    b.pan.pan.setValueAtTime(from, t);
+    b.pan.pan.linearRampToValueAtTime(to, t + (dur > 0.15 ? dur : 0.15));
   }
 
   // 물 근접 저역 노이즈. 한 번 만들어 계속 돌리고 게인만 연속 제어한다.
@@ -688,6 +787,9 @@ export class Audio {
       const o = this.bgm.outs;
       for (let i = 0; i < o.length; i++) o[i].gain.setTargetAtTime(0, t, 0.02);
     }
+    // 진영 버스도 같이 닫는다. update() 가 돌아오면 다시 연다
+    const s = this.sideGains;
+    if (s) for (let i = 0; i < s.length; i++) s[i].gain.setTargetAtTime(0, t, 0.02);
   }
 
   // 같은 소리를 연속 재생할 때 ±3% 피치 변화. 안 하면 기계처럼 들린다.
@@ -696,8 +798,10 @@ export class Audio {
 
   // 일회용 오실레이터. ended 에서 disconnect 해 노드가 쌓이지 않게 한다.
   // cut 을 주면 로우패스를 한 장 물린다 — 같은 파형도 다른 악기가 된다.
-  blip(type, f0, f1, ms, gain, delay, cut) {
+  // dest 를 주면 그 버스로 간다(진영 버스). 안 주면 예전처럼 master 로 간다.
+  blip(type, f0, f1, ms, gain, delay, cut, dest) {
     if (!this.ready || this.failed) return;
+    const out = dest || this.master;
     const t = this.ctx.currentTime + (delay || 0);
     const o = this.ctx.createOscillator();
     const g = this.ctx.createGain();
@@ -710,10 +814,10 @@ export class Audio {
       const f = this.ctx.createBiquadFilter();
       f.type = 'lowpass';
       f.frequency.setValueAtTime(cut, t);
-      o.connect(g); g.connect(f); f.connect(this.master);
+      o.connect(g); g.connect(f); f.connect(out);
       o.onended = () => { o.disconnect(); g.disconnect(); f.disconnect(); };
     } else {
-      o.connect(g); g.connect(this.master);
+      o.connect(g); g.connect(out);
       o.onended = () => { o.disconnect(); g.disconnect(); };
     }
     o.start(t);
@@ -721,9 +825,10 @@ export class Audio {
   }
 
   // 노이즈 단발. delay·Q 까지 받는다 — 이게 타격음의 절반을 만든다.
-  nz(ms, gain, cutFrom, cutTo, type, delay, q) {
+  nz(ms, gain, cutFrom, cutTo, type, delay, q, dest) {
     if (!this.ready || this.failed) return;
     const dur = Math.min(ms, 1900) / 1000;   // 노이즈 버퍼가 2초다
+    const out = dest || this.master;
     const t = this.ctx.currentTime + (delay || 0);
     const src = this.ctx.createBufferSource();
     src.buffer = this.noiseBuf;
@@ -735,15 +840,15 @@ export class Audio {
     const g = this.ctx.createGain();
     g.gain.setValueAtTime(Math.max(0.0002, gain), t);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    src.connect(f); f.connect(g); g.connect(this.master);
+    src.connect(f); f.connect(g); g.connect(out);
     src.onended = () => { src.disconnect(); f.disconnect(); g.disconnect(); };
     src.start(t);
     src.stop(t + dur);
   }
 
   // 예전 이름 유지 — 지연 없는 노이즈
-  noise(ms, gain, cutFrom, cutTo, type) {
-    this.nz(ms, gain, cutFrom, cutTo, type, 0, 0);
+  noise(ms, gain, cutFrom, cutTo, type, dest) {
+    this.nz(ms, gain, cutFrom, cutTo, type, 0, 0, dest);
   }
 
   // ── 매 프레임 — 연속 파라미터만 만진다. 노드를 만들지 않는다 ──
@@ -760,6 +865,11 @@ export class Audio {
     // 물 근접 — 0 → 0.16 을 근접도에 비례해 연속 제어
     const near = game.waterNear();
     this.waterGain.gain.setTargetAtTime(near * near * 0.16, t, 0.08);
+
+    // hush() 로 닫힌 진영 버스를 다시 연다. 탭이 숨어 있는 동안에는
+    // rAF 가 안 도니까 여기도 안 불린다 — 돌아온 뒤에만 열린다
+    const sg = this.sideGains;
+    if (sg) for (let i = 0; i < sg.length; i++) sg[i].gain.setTargetAtTime(1, t, 0.05);
 
     this.updateMusic(game, t);
   }
@@ -778,108 +888,219 @@ export class Audio {
     const v = side === SIDE_L ? 1 : 0.85;   // 적 소환은 조금 작게 — 내 것이 앞에 온다
     const e = clamp(era | 0, 0, 4);
     const br = 1 + 0.10 * e;                // 시대가 오르면 밝아진다
+    // 고정 정위 버스. 소환은 자주 나므로 스윕이 아니라 제자리에 선다 —
+    // **내 병력은 왼쪽에서, 적 병력은 오른쪽에서 나온다.** 화면과 같다
+    const d = this.sideIn(side, false);
 
     switch (k) {
       case 0:  // 검사 — 가볍고 짧다
-        this.blip('square', 520 * p, 700 * p, 70, 0.060 * v, 0, 3000 * br);
-        this.nz(45, 0.045 * v, 4200 * br, 2200, 'bandpass', 0, 3);
+        this.blip('square', 520 * p, 700 * p, 70, 0.060 * v, 0, 3000 * br, d);
+        this.nz(45, 0.045 * v, 4200 * br, 2200, 'bandpass', 0, 3, d);
         break;
 
       case 1:  // 창병 — 중간 무게. 나무 '툭'
-        this.blip('triangle', 300 * p, 386 * p, 115, 0.070 * v, 0, 1800 * br);
-        this.nz(70, 0.048 * v, 900, 400, 'lowpass', 0, 0);
+        this.blip('triangle', 300 * p, 386 * p, 115, 0.070 * v, 0, 1800 * br, d);
+        this.nz(70, 0.048 * v, 900, 400, 'lowpass', 0, 0, d);
         break;
 
       case 2:  // 궁수 — 가장 높고 가장 짧다. 활시위
-        this.nz(55, 0.065 * v, 6000 * br, 1500, 'bandpass', 0, 2);
-        this.blip('sine', 1000 * p, 1520 * p, 55, 0.042 * v, 0.01);
+        this.nz(55, 0.065 * v, 6000 * br, 1500, 'bandpass', 0, 2, d);
+        this.blip('sine', 1000 * p, 1520 * p, 55, 0.042 * v, 0.01, 0, d);
         break;
 
       case 3:  // 기병 — 3연타. 다른 다섯과 리듬으로 갈린다
-        this.blip('triangle', 236 * p, 300 * p, 45, 0.050 * v, 0);
-        this.blip('triangle', 252 * p, 320 * p, 45, 0.050 * v, 0.055);
-        this.blip('triangle', 268 * p, 350 * p, 70, 0.058 * v, 0.110);
-        this.nz(70, 0.040 * v, 2600, 800, 'bandpass', 0.02, 1.2);
+        this.blip('triangle', 236 * p, 300 * p, 45, 0.050 * v, 0, 0, d);
+        this.blip('triangle', 252 * p, 320 * p, 45, 0.050 * v, 0.055, 0, d);
+        this.blip('triangle', 268 * p, 350 * p, 70, 0.058 * v, 0.110, 0, d);
+        this.nz(70, 0.040 * v, 2600, 800, 'bandpass', 0.02, 1.2, d);
         break;
 
       case 4:  // 거인 — 낮고 길다
-        this.blip('sine', 96 * p, 58 * p, 420, 0.105 * v, 0);
-        this.blip('triangle', 192 * p, 116 * p, 300, 0.038 * v, 0, 700 * br);
-        this.nz(280, 0.085 * v, 500, 110, 'lowpass', 0, 0);
+        this.blip('sine', 96 * p, 58 * p, 420, 0.105 * v, 0, 0, d);
+        this.blip('triangle', 192 * p, 116 * p, 300, 0.038 * v, 0, 700 * br, d);
+        this.nz(280, 0.085 * v, 500, 110, 'lowpass', 0, 0, d);
         break;
 
       default: // 5 투석기 — 가장 길다. 도르래가 감기고 나무가 삐걱인다
-        this.blip('sawtooth', 78 * p, 50 * p, 520, 0.095 * v, 0, 700 * br);
-        this.nz(30, 0.045 * v, 3000, 1800, 'bandpass', 0.00, 4);
-        this.nz(30, 0.045 * v, 3000, 1800, 'bandpass', 0.09, 4);
-        this.nz(30, 0.045 * v, 3000, 1800, 'bandpass', 0.18, 4);
-        this.nz(240, 0.070 * v, 320, 90, 'lowpass', 0.26, 0);
+        this.blip('sawtooth', 78 * p, 50 * p, 520, 0.095 * v, 0, 700 * br, d);
+        this.nz(30, 0.045 * v, 3000, 1800, 'bandpass', 0.00, 4, d);
+        this.nz(30, 0.045 * v, 3000, 1800, 'bandpass', 0.09, 4, d);
+        this.nz(30, 0.045 * v, 3000, 1800, 'bandpass', 0.18, 4, d);
+        this.nz(240, 0.070 * v, 320, 90, 'lowpass', 0.26, 0, d);
         break;
     }
     // 기계 시대의 금속 광택 — 같은 유닛도 시대가 오르면 다르게 들린다
-    if (e >= 3) this.blip('square', 1250 * p, 940 * p, 40, 0.014 * e * v, 0.02, 6000);
+    if (e >= 3) this.blip('square', 1250 * p, 940 * p, 40, 0.014 * e * v, 0.02, 6000, d);
   }
 
-  // ── 시대 진화 5단계 ─────────────────────────────────────────
-  // 음높이만 올리지 않는다. 파형과 배음 구조가 통째로 바뀐다.
-  eraVoice(era) {
+  // ── 시대 진화 ───────────────────────────────────────────────
+  // 사용자가 진화에 "큰 변화가 없다"고 **세 번** 말했다. 예전 진화음은
+  // 0.24~0.43초짜리 3~6음 팡파르 하나였다 — 소환음(0.4초)과 같은 크기다.
+  // 크기가 같으면 사건이 아니다. 그래서 셋을 더한다:
+  //   앞머리  0.38초의 리저 + 문턱을 넘는 타격. **오는 것이 먼저 들린다**
+  //   본체    시대별 팡파르 (음색이 시대다 — 사인 → 삼각 → 톱니 → 사각)
+  //   꼬리    1.5초의 여운. 여기서 판이 바뀐 것이 앉는다
+  // 그리고 곡을 1초 눌러 앉힌다(duck) — 도발과 같은 장치다. 진화가 곡을 이긴다.
+  //
+  // **내 진화와 적 진화는 반대로 간다.** 재료는 같고 방향이 다르다:
+  //   내 것  올라간다 · 왼→오른쪽 · 꼬리에서 필터가 열린다(밝아진다)
+  //   적 것  내려온다 · 오른→왼쪽 · 꼬리에서 필터가 닫힌다(어두워진다) · 낮다
+  eraVoice(era, side) {
+    const mine = side !== undefined ? side === SIDE_L : true;
     const e = clamp(era | 0, 1, 4);
-    if (e === 1) {          // 청동 — 순한 사인 3화음. 아직 부드럽다
-      this.blip('sine', 523.25, 523.25, 120, 0.10, 0);
-      this.blip('sine', 659.25, 659.25, 120, 0.10, 0.09);
-      this.blip('sine', 783.99, 783.99, 240, 0.11, 0.18);
-    } else if (e === 2) {   // 강철 — 삼각파 + 금속 링. 단단해진다
-      this.blip('triangle', 587.33, 587.33, 130, 0.10, 0);
-      this.blip('triangle', 739.99, 739.99, 130, 0.10, 0.08);
-      this.blip('triangle', 880.00, 880.00, 300, 0.11, 0.16);
-      this.nz(320, 0.055, 3400, 2600, 'bandpass', 0.16, 14);
-    } else if (e === 3) {   // 화약 — 톱니 팡파르 + 폭발. 시대 이름이 그대로 들린다
-      this.nz(90, 0.16, 900, 4000, 'lowpass', 0);
-      this.nz(520, 0.15, 2600, 120, 'lowpass', 0.06);
-      this.blip('sawtooth', 130, 44, 500, 0.13, 0.05, 900);
-      this.blip('sawtooth', 392, 392, 150, 0.085, 0.20, 2200);
-      this.blip('sawtooth', 587.33, 587.33, 150, 0.085, 0.30, 2600);
-      this.blip('sawtooth', 783.99, 783.99, 340, 0.095, 0.40, 3200);
-    } else {                // 기계 — 사각파 급속 아르페지오 + 래칫. 차갑다
-      const seq = ERA4_SEQ;
-      for (let i = 0; i < seq.length; i++) {
-        this.blip('square', seq[i], seq[i], 90, 0.070, i * 0.055, 5200);
-        this.nz(26, 0.030, 5000, 3200, 'bandpass', i * 0.055, 8);
-      }
-      this.blip('square', 130.81, 130.81, 420, 0.090, 0.33, 1200);
-      this.nz(360, 0.060, 260, 80, 'lowpass', 0.33, 0);
+    const p = mine ? 1 : 0.62;
+    const v = mine ? 1 : 0.90;
+    const d = this.sideIn(mine ? SIDE_L : 1, true);
+    this.sweepPan(mine ? SIDE_L : 1, 1.8);
+    if (this.ctx) this.duckUntil = this.ctx.currentTime + (mine ? 1.05 : 0.80);
+
+    // ── 앞머리 — 시대가 오는 소리. 내 것은 빨려 올라가고 적 것은 내려앉는다 ──
+    if (mine) {
+      this.nz(380, 0.085, 260, 6200, 'bandpass', 0, 0.8, d);
+      this.blip('sawtooth', 90, 300, 380, 0.070, 0, 2200, d);
+    } else {
+      this.nz(380, 0.085 * v, 5200 * p, 200, 'bandpass', 0, 0.8, d);
+      this.blip('sawtooth', 300 * p, 78 * p, 380, 0.070 * v, 0, 2200, d);
     }
+    this.nz(300, 0.150 * v, 3800 * p, 160, 'lowpass', 0.38, 0, d);
+    this.blip('sine', 132 * p, 34, 640, 0.150 * v, 0.38, 0, d);
+
+    // ── 본체 — 시대는 음높이가 아니라 **음색**이다 ──
+    const seq = e === 1 ? ERA1_SEQ : (e === 2 ? ERA2_SEQ : (e === 3 ? ERA3_SEQ : ERA4_SEQ));
+    const wave = e === 1 ? 'sine' : (e === 2 ? 'triangle' : (e === 3 ? 'sawtooth' : 'square'));
+    const cut  = e === 1 ? 3000 : (e === 2 ? 3600 : (e === 3 ? 3000 : 5200));
+    const step = e === 4 ? 0.062 : 0.115;
+    const T0 = 0.50;
+    const n = seq.length;
+    for (let i = 0; i < n; i++) {
+      const f = seq[mine ? i : n - 1 - i] * p;    // 적은 거꾸로 내려온다
+      const t0 = T0 + i * step;
+      const last = i === n - 1;
+      this.blip(wave, f, f, last ? 620 : 155, (last ? 0.115 : 0.095) * v, t0, cut * p, d);
+      if (e >= 2) this.nz(30, 0.034 * v, 4200 * p, 2600 * p, 'bandpass', t0, 7, d);
+    }
+    // 시대의 성격이 남는 한 겹
+    if (e === 3) {                     // 화약 — 폭발이 시대 이름이다
+      this.nz(560, 0.130 * v, 2600 * p, 120, 'lowpass', T0, 0, d);
+      this.blip('sawtooth', 130 * p, 42, 540, 0.115 * v, T0, 900, d);
+    } else if (e === 4) {              // 기계 — 래칫이 물려 돌아간다
+      for (let i = 0; i < 5; i++) this.nz(24, 0.032 * v, 5200 * p, 3200 * p, 'bandpass', T0 + 0.40 + i * 0.048, 9, d);
+      this.blip('square', 130.81 * p, 130.81 * p, 460, 0.090 * v, T0 + 0.36, 1200, d);
+    }
+
+    // ── 꼬리 — 여기가 없으면 팡파르가 "삑"으로 끝난다 ──
+    // 내 것은 필터가 열리며 밝아지고, 적 것은 닫히며 어두워진다.
+    const tail = T0 + n * step + 0.02;
+    const base = mine ? 82.41 : 51.91;          // E2 대 G#1 — 적은 한참 아래다
+    this.blip(mine ? 'triangle' : 'sawtooth', base * 2, base * 2, 1500, 0.070 * v, tail, 900, d);
+    this.blip('sine', base, base, 1650, 0.085 * v, tail, 0, d);
+    this.nz(1300, 0.055 * v, mine ? 300 : 900, mine ? 2600 : 110, 'lowpass', tail, 0, d);
+    if (mine) this.blip('sine', base * 6, base * 6, 1400, 0.030, tail + 0.10, 5000, d);
+    else this.blip('sine', base * 3 * 1.012, base * 3, 1400, 0.038 * v, tail + 0.10, 800, d);
   }
 
-  // ── 스킬 3종 — 셋이 완전히 달라야 한다 ──────────────────────
-  // 적이 쓰면 낮고 둔하게 들린다. 누가 썼는지 화면을 안 봐도 안다.
-  skillVoice(idx, side) {
-    const p = side === SIDE_L ? 1 : 0.78;
-    const v = side === SIDE_L ? 1 : 0.80;
-    if (idx === C.SK_VOLLEY) {
-      // 화살비 — 위에서 쏟아진다. 높은 휘파람 여러 개 + 빗소리 + 착탄
-      for (let i = 0; i < 6; i++) {
-        this.blip('sine', (1900 - i * 110) * p, (460 - i * 20) * p, 190, 0.042 * v, i * 0.055);
+  // ── 스킬 4종 — 넷이 완전히 달라야 한다 ──────────────────────
+  // 사용자가 짚은 것 둘을 여기서 같이 푼다:
+  //   "스킬을 썼을때 임팩트도 너무 간단하다"  → 셋이 다 1초 미만에 끝났다.
+  //      3단 구조(예비동작 → 본체 → 여운)를 넣어 길이와 무게를 준다
+  //   "상대와 내가 쓰는 기술이 구분이 안된다" → 진영 버스로 가른다
+  //
+  // 넷의 정체성은 **서로 다른 축**에 걸린다. 같은 축에 넷을 늘어놓으면
+  // 결국 "높은 삑 / 낮은 삑"이 된다:
+  //   해일   무게   — 사건이 적고(2~3), 낮고, 가장 길다. 음정이 없다
+  //   화살비 쏟아짐 — 사건이 가장 많다(20+). 높다. 불규칙한 착탄이 정체성이다
+  //   증원   솟아오름 — 유일하게 **음정이 올라가며 해결된다**. 북이 빨라진다
+  //   총진군 행군   — 등간격의 낮은 발소리. 밀도가 일정하다
+  //
+  // tier 는 진화로 오른 스킬 등급이다(0~2). **진화하면 스킬 소리도 바뀐다** —
+  // 버튼의 글자가 바뀌는데 소리가 그대로면 바뀐 걸 귀로 알 수가 없다.
+  skillVoice(idx, side, tier) {
+    if (!this.ready || this.failed) return;
+    const mine = side === SIDE_L;
+    const p = mine ? 1 : 0.72;    // 적이 낮다 — **모노에서도 살아남는 축**
+    const v = mine ? 1 : 0.86;    // 내 것이 앞에 온다. 다만 위협은 남긴다
+    const q = clamp(tier | 0, 0, 2);
+    const d = this.sideIn(side, true);
+
+    if (idx === SK_VOLLEY) {
+      // ── 화살비 — 쏟아진다. **개수가 정체성이다** ──
+      this.sweepPan(side, 1.15);
+      // 1) 시위가 한꺼번에 놓인다
+      this.nz(95, 0.100 * v, 2400 * p, 7400 * p, 'bandpass', 0, 1.2, d);
+      this.blip('square', 900 * p, 1700 * p, 60, 0.045 * v, 0, 8000, d);
+      // 2) 내려온다. 등급이 오르면 화살이 늘어난다
+      const n = 10 + q * 2;
+      for (let i = 0; i < n; i++) {
+        this.blip('sine', (2050 - i * 92) * p, (400 - i * 12) * p,
+                  205, 0.036 * v, 0.05 + i * 0.037, 9000, d);
       }
-      this.nz(760, 0.085 * v, 7200 * p, 1100, 'bandpass', 0.04, 0.8);
-      this.nz(240, 0.075 * v, 1600, 260, 'lowpass', 0.42, 0);
-      this.blip('triangle', 300 * p, 120 * p, 220, 0.055 * v, 0.42, 1400);
-    } else if (idx === C.SK_RALLY) {
-      // 증원 — 뿔피리. **음정이 있다.** 셋 중 유일하게 화성으로 들린다
-      this.nz(180, 0.075 * v, 480, 130, 'lowpass', 0, 0);       // 북
-      this.blip('sawtooth', 196.00 * p, 196.00 * p, 280, 0.080 * v, 0.00, 900);
-      this.blip('sawtooth', 197.6 * p,  197.6 * p,  280, 0.055 * v, 0.00, 900);  // 살짝 어긋나 두꺼워진다
-      this.blip('sawtooth', 261.63 * p, 261.63 * p, 300, 0.080 * v, 0.17, 1000);
-      this.blip('sawtooth', 263.6 * p,  263.6 * p,  300, 0.055 * v, 0.17, 1000);
-      this.nz(180, 0.070 * v, 480, 130, 'lowpass', 0.34, 0);
-      this.blip('sawtooth', 392.00 * p, 392.00 * p, 420, 0.085 * v, 0.34, 1300);
-      this.blip('sawtooth', 394.9 * p,  394.9 * p,  420, 0.060 * v, 0.34, 1300);
+      this.nz(720, 0.072 * v, 7600 * p, 1300, 'bandpass', 0.05, 0.8, d);
+      // 3) 꽂힌다 — **불규칙한 착탄이 "비"를 만든다.** 등간격이면 기계음이다
+      for (let i = 0; i < VOLLEY_HIT.length; i++) {
+        this.nz(34, 0.060 * v, 3400 * p, 1100, 'bandpass', VOLLEY_HIT[i], 2.2, d);
+      }
+      this.nz(300, 0.095 * v, 1700, 240, 'lowpass', 0.46, 0, d);
+      this.blip('triangle', 300 * p, 104 * p, 300, 0.072 * v, 0.46, 1300, d);
+      if (q >= 2) {   // 융단폭격 — 두 번째 파도가 뒤에 떨어진다
+        for (let i = 0; i < 6; i++) {
+          this.nz(30, 0.050 * v, 3000 * p, 950, 'bandpass', 0.90 + i * 0.052, 2.2, d);
+        }
+        this.nz(340, 0.078 * v, 1500, 200, 'lowpass', 0.95, 0, d);
+        this.blip('sine', 92 * p, 46 * p, 380, 0.062 * v, 0.95, 0, d);
+      }
+
+    } else if (idx === SK_RALLY) {
+      // ── 증원 — 솟아오른다. **넷 중 유일하게 음정으로 해결된다** ──
+      this.sweepPan(side, 1.7);
+      // 1) 북이 빨라진다. 간격이 줄어드는 것이 곧 "모여든다"
+      for (let i = 0; i < RALLY_DRUM.length; i++) {
+        this.nz(155, (0.058 + 0.010 * i) * v, 520, 120, 'lowpass', RALLY_DRUM[i], 0, d);
+        this.blip('sine', 84 * p, 52 * p, 135, 0.052 * v, RALLY_DRUM[i], 0, d);
+      }
+      // 2) 뿔피리가 올라간다. 살짝 어긋난 짝이 붙어 여럿으로 들린다
+      for (let i = 0; i < RALLY_HORN.length; i++) {
+        const f = RALLY_HORN[i] * p;
+        const t0 = 0.72 + i * 0.185;
+        const ln = i === RALLY_HORN.length - 1 ? 780 : 265;
+        this.blip('sawtooth', f, f, ln, 0.082 * v, t0, 1000 + 300 * i, d);
+        this.blip('sawtooth', f * 1.008, f * 1.008, ln, 0.058 * v, t0, 1000 + 300 * i, d);
+        if (q >= 1) this.blip('triangle', f * 2, f * 2, ln, 0.030 * v, t0, 4200, d);
+      }
+      // 3) 마지막에 위로 쓸어 올린다 — 여기서 소리가 해결된다
+      this.nz(560, 0.055 * v, 400, 5400 * p, 'bandpass', 1.20, 0.9, d);
+      if (q >= 2) this.blip('square', 523.25 * p, 1046.5 * p, 560, 0.045 * v, 1.30, 6000, d);
+
+    } else if (idx === SK_SURGE) {
+      // ── 총진군 — 행군. **밀도가 일정하다.** 다른 셋과 여기서 갈린다 ──
+      // 예전에는 이 스킬이 해일과 **똑같은 소리**를 냈다(else 로 흘렀다).
+      this.sweepPan(side, 1.9);
+      for (let i = 0; i < 8; i++) {
+        const t0 = i * 0.115;
+        this.nz(95, 0.072 * v, 260, 90, 'lowpass', t0, 0, d);
+        this.blip('triangle', 62 * p, 44 * p, 115, 0.055 * v, t0, 300, d);
+      }
+      // 전군이 한 소리로 합쳐진다
+      this.blip('sawtooth', 98 * p, 147 * p, 950, 0.105 * v, 0.90, 800, d);
+      this.blip('sawtooth', 98.7 * p, 148 * p, 950, 0.075 * v, 0.90, 800, d);
+      this.nz(950, 0.085 * v, 700, 3400 * p, 'lowpass', 0.90, 0, d);
+      this.blip('square', 196 * p, 294 * p, 760, 0.058 * v, 1.12, 2400, d);
+
     } else {
-      // 해일 — 물이 차올랐다가 무너진다. 음정이 거의 없다. 전부 필터 스윕이다
-      this.nz(900, 0.150 * v, 110, 1700 * p, 'lowpass', 0, 0);  // 차오름
-      this.blip('sawtooth', 220 * p, 38, 900, 0.120 * v, 0, 600);
-      this.nz(760, 0.145 * v, 1000, 90, 'lowpass', 0.86, 0);    // 무너짐
-      this.blip('sine', 62 * p, 38, 720, 0.100 * v, 0.86);
+      // ── 해일 — 무게. **사건이 적고 가장 길다** ──
+      this.sweepPan(side, 2.2);
+      // 1) 빨아들인다. 무너지기 전에 물이 뒤로 빠진다 — 이 0.6초가 무게를 만든다
+      this.nz(620, 0.085 * v, 90, 1500 * p, 'lowpass', 0, 0, d);
+      this.blip('sine', 38 * p, 96 * p, 620, 0.075 * v, 0, 0, d);
+      if (q >= 1) this.nz(560, 0.045 * v, 200, 2600 * p, 'bandpass', 0.05, 0.7, d);
+      // 2) 무너진다 — 이 게임에서 가장 무거운 한 방
+      this.nz(1150, 0.185 * v, 2600 * p, 70, 'lowpass', 0.62, 0, d);
+      this.blip('sawtooth', 210 * p, 27, 1050, 0.145 * v, 0.62, 520, d);
+      this.blip('sine', 74 * p, 24, 980, 0.130 * v, 0.64, 0, d);
+      this.blip('triangle', 148 * p, 48, 700, 0.068 * v, 0.62, 400, d);
+      if (q >= 2) this.nz(430, 0.075 * v, 1200, 180, 'lowpass', 0.88, 0, d);  // 범람은 두 번 친다
+      // 3) 물러난다. 꼬리가 길다 — **무게는 길이에서 온다**
+      this.nz(1250, 0.078 * v, 620, 105, 'lowpass', 1.55, 0, d);
+      this.blip('sine', 46 * p, 30, 1200, 0.058 * v, 1.55, 0, d);
     }
   }
 
@@ -1011,8 +1232,10 @@ export class Audio {
       }
 
       case EV.ATTACK:
-        // 매 공격마다 난다. 아주 짧고 작아야 한다 — 안 그러면 귀가 아프다
-        this.noise(28, 0.035, 2600, 1400, 'bandpass');
+        // 매 공격마다 난다. 아주 짧고 작아야 한다 — 안 그러면 귀가 아프다.
+        // b = 때린 진영. 진영 버스만 태운다 — 난타전에서 **누가 때리고 있는지**가
+        // 좌우로 갈린다. 소리 자체는 예전과 같다
+        this.noise(28, 0.035, 2600, 1400, 'bandpass', this.sideIn(b, false));
         break;
 
       case E_COUNTER_HIT: {
@@ -1023,21 +1246,22 @@ export class Audio {
         const mine = b === SIDE_L;
         const p = mine ? 1 : 0.62;
         const v = mine ? 1 : 0.8;
+        const d = this.sideIn(b, false);
         // 난전에서는 초당 예닐곱 번 터진다. 그대로 다 내면 기관총이 된다.
         const now = this.ctx.currentTime;
         const dense = now - this.tCounter < COUNTER_DENSE;
         this.tCounter = now;
         if (dense) {
-          this.nz(55, 0.075 * v, 5200 * p, 1000, 'bandpass', 0, 1.6);
-          this.blip('square', 1050 * p, 320 * p, 55, 0.055 * v, 0);
+          this.nz(55, 0.075 * v, 5200 * p, 1000, 'bandpass', 0, 1.6, d);
+          this.blip('square', 1050 * p, 320 * p, 55, 0.055 * v, 0, 0, d);
           break;
         }
-        this.nz(95, 0.125 * v, 5400 * p, 800, 'bandpass', 0, 1.6);
-        this.blip('square', 1150 * p, 260 * p, 95, 0.095 * v, 0);
+        this.nz(95, 0.125 * v, 5400 * p, 800, 'bandpass', 0, 1.6, d);
+        this.blip('square', 1150 * p, 260 * p, 95, 0.095 * v, 0, 0, d);
         // 울림은 내가 먹였을 때만. 이게 "제대로 먹혔다"의 정체다
-        if (mine) this.blip('sine', 1318.5, 1318.5, 230, 0.050, 0.03);
-        this.blip('sine', 92, 58, 170, 0.085 * v, 0);
-        this.nz(170, 0.045 * v, 900, 200, 'lowpass', 0.05, 0);
+        if (mine) this.blip('sine', 1318.5, 1318.5, 230, 0.050, 0.03, 0, d);
+        this.blip('sine', 92, 58, 170, 0.085 * v, 0, 0, d);
+        this.nz(170, 0.045 * v, 900, 200, 'lowpass', 0.05, 0, d);
         break;
       }
 
@@ -1051,23 +1275,40 @@ export class Audio {
         break;
 
       case EV.ERA_UP:
-        if (b === SIDE_L) this.eraVoice(a);
-        else {
-          // 적의 진화는 아래로 떨어진다. 좋은 소식이 아니다
-          this.blip('sine', 196, 147, 260, 0.085, 0);
-          this.blip('triangle', 98, 74, 320, 0.060, 0.06, 700);
-        }
+        // b = 진영. **둘 다 사건급이다.** 예전에는 적의 진화가 0.32초짜리
+        // 블립 두 개였고 시대가 몇이든 똑같은 소리였다 — 적이 기계 시대로
+        // 올라간 것과 청동으로 올라간 것을 구분할 방법이 없었다
+        if (this.ready) this.eraVoice(a, b);
         break;
 
+      case E_SKILL_UP: {
+        // a = 스킬 번호, b = 새 등급. **진화가 무기를 바꾼 순간이다.**
+        // 진화 팡파르 뒤에 놓는다(0.95초~) — 앞에 겹치면 둘 다 안 들린다.
+        // 여러 스킬이 한 번에 오를 수 있어 스킬 번호로 어긋나게 둔다.
+        if (!this.ready) break;
+        const k = clamp(a | 0, 0, 3);
+        const tq = clamp(b | 0, 0, 2);
+        const d = this.sideIn(SIDE_L, false);
+        const f = 660 * SEMI[SEMI_ZERO + SKILLUP_SEMI[k]] * (1 + 0.06 * tq);
+        const t0 = 0.98 + k * 0.085;
+        this.blip('triangle', f, f * 1.5, 270, 0.055, t0, 6000, d);
+        this.nz(40, 0.030, 5200, 3400, 'bandpass', t0, 8, d);
+        break;
+      }
+
       case E_TOWER_FIRE:
-        // a = 포탑 단계(1 또는 2). 1단계는 쇠뇌, 2단계는 대포다
-        if ((a | 0) >= 2) {
-          this.blip('sawtooth', 360, 58, 175, 0.095, 0, 1200);
-          this.nz(210, 0.100, 2200, 170, 'lowpass', 0, 0);
-          this.blip('sine', 120, 48, 230, 0.055, 0.02);
-        } else {
-          this.blip('square', 700, 180, 80, 0.070, 0, 2600);
-          this.nz(70, 0.065, 3200, 700, 'bandpass', 0, 1.2);
+        // a = 포탑 단계(1 또는 2). 1단계는 쇠뇌, 2단계는 대포다.
+        // b = 진영 — 내 포탑과 적 포탑이 좌우로 갈린다
+        {
+          const d = this.sideIn(b, false);
+          if ((a | 0) >= 2) {
+            this.blip('sawtooth', 360, 58, 175, 0.095, 0, 1200, d);
+            this.nz(210, 0.100, 2200, 170, 'lowpass', 0, 0, d);
+            this.blip('sine', 120, 48, 230, 0.055, 0.02, 0, d);
+          } else {
+            this.blip('square', 700, 180, 80, 0.070, 0, 2600, d);
+            this.nz(70, 0.065, 3200, 700, 'bandpass', 0, 1.2, d);
+          }
         }
         break;
 
@@ -1081,9 +1322,18 @@ export class Audio {
         this.nz(260, 0.070, 400, 100, 'lowpass', 0.21, 0);
         break;
 
-      case E_SKILL:
-        this.skillVoice(a | 0, b);
+      case E_SKILL: {
+        // a = 스킬 번호, b = 진영. **등급은 game 에서 읽기만 한다** —
+        // 없으면 0 등급 소리가 나고 게임은 그대로 돈다
+        let tier = 0;
+        if (game && typeof game.eraTier === 'function') {
+          const era = b === SIDE_L ? (game.era | 0) : (game.aiEra | 0);
+          const t = game.eraTier(a | 0, era);
+          if (typeof t === 'number' && t >= 0) tier = t;
+        }
+        this.skillVoice(a | 0, b, tier);
         break;
+      }
 
       // EV.NUKE 는 **일부러 듣지 않는다.**
       // 해일이 EV.SKILL(a=0) 과 EV.NUKE 를 둘 다 낸다 — feel.js 가 아직

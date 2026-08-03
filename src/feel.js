@@ -26,6 +26,27 @@
 //    초당 2.8회 = 사실상 상시 진동). 평범한 공격은 이미 render 가 피격 플래시와
 //    공격 모션으로, audio 가 타격음으로 말하고 있다. 여기서 화면까지 흔들면
 //    **정작 큰 타격이 왔을 때 구분이 안 된다.** 그래서 평타 셰이크는 뺐다.
+//
+// ─── 그리고 이번 판: 세기 말고 **모양** ──────────────────────────
+// 24.41% 로 내려온 뒤에도 남은 문제가 있었다. 실측(5판×150초):
+//   스킬 3종이 전부 addShake 한 채널만 썼다 — 등방 난수 진동이라 **방향이 없고**,
+//   해일 16px · 화살비 5px · 증원 4.2px 로 **크기만 달랐다.** 크기가 다른 같은
+//   진동은 손으로 구분이 안 된다. 그래서 채널을 셋으로 쪼갰다.
+//
+//   축(axis)   가로만 / 세로만 / 등방. 해일은 가로로 쓸리고 화살비는 세로로 튄다.
+//   결(grain)  방향을 새로 뽑는 주기. 1 = 지지직(화살비), 4~5 = 묵직(해일·재무장).
+//   밀림(push) 진동이 아니라 **이동**이다. 용수철로 밀렸다가 되돌아온다.
+//              증원은 진동이 0 이고 화면이 위로 솟았다 내려앉는 것만 있다.
+//
+// 그리고 시간축. 지금까지 모든 연출이 **한 프레임에 다 쏟아졌다.** 화살비는
+// 하늘에서 쏟아지는 것인데 한 순간에 터지면 그냥 폭발이다. 그래서 pour 타이머로
+// 26프레임에 걸쳐 내리꽂고, 진화의 재무장 1.25초에는 아무것도 없던 자리에
+// 굳음(저주파 웅웅거림) → 해방(섬광·솟구침)의 활을 얹었다.
+//
+// 늘린 만큼 뺐다 — 자주 오는 것에서 정확히 회수했다:
+//   내 기지가 맞을 때의 히트스톱 제거 (손해에 구두점을 찍지 않는다)
+//   적의 상성 타격 셰이크 축소 + 세로 전용
+//   화살비 히트스톱 4 → 2 (쏟아짐은 정지가 아니라 지속이다)
 
 import * as C from './config.js';
 import { EV, S, SIDE_L, groundAt } from './game.js';
@@ -59,6 +80,7 @@ const HITSTOP_COUNTER = num(C.HITSTOP_COUNTER, 3);
 const SHAKE_COUNTER   = num(C.SHAKE_COUNTER, 2.6);
 const STREAK_HOLD     = num(C.STREAK_HOLD, 45);       // 연쇄가 끊기는 시간
 const FOE_HIT_GAP     = num(C.FOE_HIT_GAP, 20);       // 적에게 당한 상성 타격의 최소 간격
+const SELF_HIT_GAP    = num(C.SELF_HIT_GAP, 26);      // 내 성이 맞은 충격의 최소 간격
 
 // 도발 — 멈추지 않고 느려진다
 const SLOW_TAUNT      = num(C.SLOW_TAUNT, 16);
@@ -84,6 +106,47 @@ const BASE_RING_GAP   = num(C.BASE_RING_GAP, 34);
 // 소수점 좌표로 다시 래스터했다. 0.25px 이하는 DPR 2 에서도 반 픽셀이라 안 보인다.
 // 여기서 끊으면 같은 세기의 타격이 **더 짧고 더 또렷하게** 끝난다.
 const SHAKE_FLOOR     = num(C.SHAKE_FLOOR, 0.25);
+
+// ── 셰이크의 모양 ────────────────────────────────────────────
+// 축. 등방은 예전 그대로다 — 인자를 안 주면 아무것도 안 달라진다.
+const AX_ISO = 0, AX_X = 1, AX_Y = 2;
+// 억눌리는 쪽의 잔량. 0 으로 죽이면 축이 너무 기계적이라 오히려 어색하다.
+const AX_MINOR = num(C.SHAKE_AXIS_MINOR, 0.16);
+
+// ── 밀림 ─────────────────────────────────────────────────────
+// 용수철. 임펄스를 주면 밀렸다가 되돌아온다. 실측으로 잡은 값이다 —
+// K 0.20 · D 0.72 에서 임펄스 3 이 약 3.8px 까지 밀렸다가 28프레임에 잦아든다.
+// 더 무르게(K 0.075) 두면 13px 까지 밀려서 화면이 미끄러지는 것처럼 보인다.
+const PUSH_K     = num(C.PUSH_K, 0.20);
+const PUSH_D     = num(C.PUSH_DAMP, 0.72);
+// 셰이크 바닥(0.25px)과 같은 이유로 자른다. |x|+|y|+|vx|+|vy| 합이라
+// 0.45 는 실제 변위 0.2px 언저리다 — DPR 2 에서도 안 보인다.
+const PUSH_FLOOR = num(C.PUSH_FLOOR, 0.45);
+const PUSH_MAX   = num(C.PUSH_MAX, 6);        // 임펄스 상한. 겹쳐 쏴도 화면이 날아가지 않는다
+
+// ── 시간에 걸쳐 쏟아지는 것 ──────────────────────────────────
+const POUR_FRAMES  = num(C.POUR_FRAMES, 26);  // 화살비가 내리꽂히는 시간 (0.43초)
+const POUR_EVERY   = num(C.POUR_EVERY, 2);
+const POUR_SHAKE   = num(C.POUR_SHAKE, 2.1);  // 매번 다시 채워져 지속 진동이 된다
+const RISE_FRAMES  = num(C.RISE_FRAMES, 20);  // 증원이 솟는 시간
+const SWEEP_FRAMES = num(C.SWEEP_FRAMES, 22); // 총진군이 훑는 시간
+
+// ── 진화의 1.25초 ────────────────────────────────────────────
+// game.rearmMs 가 도는 동안이다. 여기서 세지 않고 **그 시계를 읽는다** —
+// 사자자리처럼 경직이 없는 판에서는 이 구간이 저절로 사라진다.
+const REARM_HUM   = num(C.REARM_HUM, 1.7);    // 굳어 있는 동안의 망치질 한 번
+const REARM_BEAT  = num(C.REARM_BEAT, 24);    // 망치질 간격(프레임). 1.25초에 세 번
+const REARM_EVERY = num(C.REARM_EVERY, 4);    // 몇 프레임마다 빛이 하나 오르는가
+
+// 접근성 — 흔들림과 번쩍임을 줄인다. DOM 이 없는 헤드리스에서는 항상 false 다.
+// **끄는 것이 아니라 줄이는 것이다.** 셰이크가 0 이 되면 큰 사건이 아예 안 읽힌다.
+const REDUCED = (() => {
+  try {
+    return !!(globalThis.matchMedia
+      && globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  } catch (e) { return false; }
+})();
+const RM_SHAKE = num(C.REDUCED_SHAKE, 0.28);
 
 // 우선순위 — 예산을 누가 먼저 쓰는가
 const PR_LOW = 0;      // 초당 여러 번 올 수 있는 것 (상성 타격 · 잡졸 처치)
@@ -124,6 +187,29 @@ export class Feel {
     this.shakeMag = 0;
     this.shakeRotMag = 0;
     this.shakeX = 0; this.shakeY = 0; this.shakeA = 0;
+    // 모양 — 축과 결. render 는 이 값을 안 봐도 된다(shakeX/Y 에 이미 섞여 나간다).
+    this.shakeAxis = AX_ISO;
+    this.shakeGrain = 1;
+    this.grainCd = 0;
+    this.grainX = 0; this.grainY = 0; this.grainA = 0;
+    this.vibX = 0; this.vibY = 0;
+    // 밀림 — 진동과 별개의 채널. 이것만 있고 진동이 0 인 연출이 증원이다.
+    this.pushX = 0; this.pushY = 0; this.pushVX = 0; this.pushVY = 0;
+    this.reduceMotion = REDUCED;
+
+    // 시간에 걸쳐 쏟아지는 연출. 스칼라뿐이라 프레임마다 할당이 없다.
+    // 0 화살비 1 증원 2 총진군 — 셋이 동시에 겹치는 판은 없다(쿨다운이 26초 이상).
+    this.pourMode = -1;
+    this.pourFrames = 0;
+    this.pourX = 0;
+    this.pourSpan = 0;
+    this.pourDir = 1;
+    this.pourKind = 1;
+    this.pourMag = 0;
+
+    // 진화의 재무장 — game 의 시계를 따라간다.
+    this.rearmPrevL = 0; this.rearmPrevR = 0;
+    this.rearmArmL = 0; this.rearmArmR = 0;
 
     const P = C.PARTICLE_MAX;
     this.pX = new Float32Array(P);
@@ -194,6 +280,7 @@ export class Feel {
     this.denyCd = 0;         // 실패한 입력의 최소 간격
     this.baseRingCd = 0;     // 기지 타격 링의 최소 간격
     this.foeHitCd = 0;       // 적의 상성 타격 충격 최소 간격
+    this.selfHitCd = 0;      // 내 성이 맞은 충격 최소 간격
     this.tideAt = -1e6;      // 해일 중복 방지 (SKILL(0) 과 NUKE 가 같이 온다)
   }
 
@@ -204,10 +291,18 @@ export class Feel {
     this.freezeLoad = 0; this.sinceFreeze = 1e6;
     this.shakeMag = 0; this.shakeRotMag = 0;
     this.shakeX = 0; this.shakeY = 0; this.shakeA = 0;
+    this.shakeAxis = AX_ISO; this.shakeGrain = 1; this.grainCd = 0;
+    this.vibX = 0; this.vibY = 0;
+    this.pushX = 0; this.pushY = 0; this.pushVX = 0; this.pushVY = 0;
+    this.pourMode = -1; this.pourFrames = 0;
+    // 재무장은 **비운다.** 탭에서 돌아왔을 때 게임의 rearmMs 는 그대로 돌고 있지만
+    // 그 사이 경과를 못 봤으므로 여기서 해방 연출을 터뜨리면 이유 없는 폭발이 된다.
+    this.rearmPrevL = 0; this.rearmPrevR = 0;
+    this.rearmArmL = 0; this.rearmArmR = 0;
     this.flashFrames = 0;
     this.bannerFrames = 0;
     this.streak = 0; this.streakGap = 0;
-    this.denyCd = 0; this.baseRingCd = 0; this.foeHitCd = 0;
+    this.denyCd = 0; this.baseRingCd = 0; this.foeHitCd = 0; this.selfHitCd = 0;
     this.tideAt = -1e6;
   }
 
@@ -268,8 +363,61 @@ export class Feel {
     if (this.flashFrames > 0) this.flashFrames--;
   }
 
+  // 시간에 걸쳐 쏟아지는 연출. **얼어 있어도 흐른다** — 화살비의 히트스톱
+  // 두 프레임 동안 화살이 멈춰 있으면 그건 쏟아짐이 아니라 정지 화면이다.
+  //
+  // 지금까지 스킬 셋은 전부 "한 프레임에 다 터진다"였다. 그래서 크기만 달랐고
+  // 성격이 없었다. 여기서 성격이 갈린다 —
+  //   화살비 위에서 아래로, 26프레임 동안, 세로로 지지직거리며
+  //   증원   아래에서 위로, 20프레임 동안, 진동 없이
+  //   총진군 뒤에서 앞으로, 22프레임 동안, 전열을 훑으며
+  stepPour() {
+    if (this.pourFrames <= 0) return;
+    this.pourFrames--;
+    const f = this.pourFrames;
+    const mode = this.pourMode;
+
+    if (mode === 0) {
+      // 화살비 — 하늘에서 내리꽂힌다. 착탄점이 매번 다른 x 라 선이 아니라 비가 된다.
+      if ((f % POUR_EVERY) === 0) {
+        const x = this.pourX + (Math.random() * 2 - 1) * this.pourSpan;
+        const g = gy(x);
+        this.push1(x, g - 190 - Math.random() * 90, (Math.random() * 2 - 1) * 0.5,
+                   6.2 + Math.random() * 2.4, 2.4 + Math.random() * 1.4, 14, this.pourKind);
+      }
+      // 6프레임마다 다시 채운다. 매 프레임 채우면 그냥 지속 진동(=예산 낭비)이고,
+      // 이만큼 띄우면 사이에서 한 번 꺼졌다가 다시 튄다 — **빗방울**이 된다.
+      // 세기는 작은데 여러 번 온다. 해일의 한 방과 정반대의 감촉이다.
+      if ((f % 6) === 0) this.addShake(this.pourMag, 0, AX_Y, 1);
+      return;
+    }
+
+    if (mode === 1) {
+      // 증원 — 발밑에서 솟는다. 진동을 한 톨도 안 쓴다. 화면이 들렸다 내려앉는
+      // 그 한 번(kick)과 이 기둥뿐이다. 흔들리지 않는 것이 이 스킬의 성격이다.
+      if ((f & 1) === 0) {
+        const x = this.pourX + (Math.random() * 2 - 1) * this.pourSpan;
+        this.push1(x, gy(x) - 4, (Math.random() * 2 - 1) * 0.6,
+                   -2.6 - Math.random() * 1.6, 2.6 + Math.random() * 1.6, 22, this.pourKind);
+      }
+      return;
+    }
+
+    if (mode === 2) {
+      // 총진군 — 전열을 뒤에서 앞으로 훑는다. 시간이 위치를 만든다.
+      const t = 1 - f / Math.max(1, SWEEP_FRAMES);
+      const x = this.pourX + this.pourDir * this.pourSpan * t;
+      if ((f & 1) === 0) {
+        this.push1(x, gy(x) - 10 - Math.random() * 22, this.pourDir * (1.6 + Math.random()),
+                   -0.8 - Math.random(), 2.4 + Math.random() * 1.4, 18, this.pourKind);
+      }
+    }
+  }
+
   // 파티클·링·숫자 — 시뮬레이션과 무관한 순수 연출. 얼어 있어도 흐른다.
   stepFx() {
+    this.stepPour();
+
     for (let i = 0; i < C.PARTICLE_MAX; i++) {
       if (this.pLife[i] <= 0) continue;
       this.pX[i] += this.pVX[i];
@@ -296,19 +444,50 @@ export class Feel {
     if (this.denyCd > 0) this.denyCd--;
     if (this.baseRingCd > 0) this.baseRingCd--;
     if (this.foeHitCd > 0) this.foeHitCd--;
+    if (this.selfHitCd > 0) this.selfHitCd--;
     if (this.streakGap > 0) { this.streakGap--; if (this.streakGap === 0) this.streak = 0; }
   }
 
   decayShake() {
+    // ── 밀림 ── 용수철이라 밀렸다가 되돌아온다. 진동과 더해져 나간다.
+    if (this.pushX !== 0 || this.pushY !== 0 || this.pushVX !== 0 || this.pushVY !== 0) {
+      this.pushVX = (this.pushVX - this.pushX * PUSH_K) * PUSH_D;
+      this.pushVY = (this.pushVY - this.pushY * PUSH_K) * PUSH_D;
+      this.pushX += this.pushVX;
+      this.pushY += this.pushVY;
+      const e = Math.abs(this.pushX) + Math.abs(this.pushY)
+              + Math.abs(this.pushVX) + Math.abs(this.pushVY);
+      if (e < PUSH_FLOOR) { this.pushX = 0; this.pushY = 0; this.pushVX = 0; this.pushVY = 0; }
+    }
+
     if (this.shakeMag > SHAKE_FLOOR) {
-      this.shakeX = (Math.random() * 2 - 1) * this.shakeMag;
-      this.shakeY = (Math.random() * 2 - 1) * this.shakeMag;
-      this.shakeA = (Math.random() * 2 - 1) * this.shakeRotMag;
+      // ── 결 ── grain 프레임마다 한 번만 방향을 새로 뽑는다.
+      // 매 프레임 뽑으면 세기와 무관하게 전부 "지지직"이 된다 — 그게 지금까지
+      // 해일과 화살비가 구분이 안 되던 이유다. 방향을 붙들고 있으면 같은 세기라도
+      // **쓸린다**. 크기가 아니라 여기서 무게가 나온다.
+      if (this.grainCd <= 0) {
+        this.grainCd = this.shakeGrain;
+        this.grainX = Math.random() * 2 - 1;
+        this.grainY = Math.random() * 2 - 1;
+        this.grainA = Math.random() * 2 - 1;
+      }
+      this.grainCd--;
+      const ax = this.shakeAxis;
+      this.vibX = this.grainX * this.shakeMag * (ax === AX_Y ? AX_MINOR : 1);
+      this.vibY = this.grainY * this.shakeMag * (ax === AX_X ? AX_MINOR : 1);
+      this.shakeA = this.grainA * this.shakeRotMag;
       this.shakeMag *= C.SHAKE_DECAY;
       this.shakeRotMag *= C.SHAKE_DECAY;
     } else {
       this.shakeMag = 0; this.shakeRotMag = 0;
-      this.shakeX = 0; this.shakeY = 0; this.shakeA = 0;
+      this.vibX = 0; this.vibY = 0; this.shakeA = 0;
+    }
+
+    this.shakeX = this.vibX + this.pushX;
+    this.shakeY = this.vibY + this.pushY;
+    if (this.reduceMotion) {
+      // 줄이되 없애지는 않는다. 회전만 완전히 뺀다 — 기울어지는 화면이 가장 나쁘다.
+      this.shakeX *= RM_SHAKE; this.shakeY *= RM_SHAKE; this.shakeA = 0;
     }
   }
 
@@ -319,15 +498,133 @@ export class Feel {
     if (this.bannerFrames > 0) this.bannerFrames--;
 
     this.stepFx();
+    this.stepRearm(game);
 
     if (game && game.state === S.OVER) {
       if (this.resultStep < this.resultSteps) this.resultStep++;
     } else this.resultStep = -1;
   }
 
-  addShake(mag, rot) {
-    if (mag > this.shakeMag) this.shakeMag = mag;
+  // ── 진화의 1.25초 ───────────────────────────────────────────
+  // 사용자가 진화에 대해 "큰 변화가 없다"고 세 번 말했다. 코드를 읽어 보니
+  // 이유가 명확했다: **진화의 실체는 순간이 아니라 1.25초짜리 구간인데**
+  // (promoteArmy 가 살아 있는 병력을 통째로 승격시키고 그 대가로 굳힌다),
+  // 지금까지 이 구간에는 그림도 소리도 감촉도 하나도 없었다.
+  // render 는 rearmMs 를 아예 안 읽고, feel 은 시작 프레임에 한 번 치고 끝났다.
+  // 그래서 진화는 "잠깐 반짝하고 숫자가 바뀌는 것"이었다.
+  //
+  // 여기서 그 구간에 활을 얹는다. 충격 → **굳음** → 해방.
+  // 굳음이 있어야 해방이 있다. 이 파일의 원칙 그대로다 — 더한 만큼 뺀다.
+  //
+  // **시계를 여기서 세지 않는다.** game.rearmMs 를 읽는다. 그래야 사자자리처럼
+  // 경직이 없는 판에서 이 구간이 저절로 사라지고, 드래프트로 시계가 멈춰 있는
+  // 동안(진화 직후 특성 선택) 연출도 같이 기다린다.
+  stepRearm(game) {
+    if (!game) return;
+    const playing = game.state === S.PLAY;
+    this.rearmSide(+game.rearmMs || 0, 0, playing);
+    this.rearmSide(+game.aiRearmMs || 0, 1, playing);
+  }
+
+  rearmSide(ms, side, playing) {
+    const mine = side === 0;
+    const prev = mine ? this.rearmPrevL : this.rearmPrevR;
+    if (mine) this.rearmPrevL = ms; else this.rearmPrevR = ms;
+    // ERA_UP 을 직접 본 재무장만 연출한다. 탭 복귀나 다른 경로로 rearmMs 가
+    // 이미 돌고 있던 것을 주워서 터뜨리면 이유 없는 폭발이 된다.
+    if (mine ? !this.rearmArmL : !this.rearmArmR) return;
+
+    if (ms > 0) {
+      if (!playing) return;         // 드래프트 화면 위에서 화면을 흔들지 않는다
+      if (mine) {
+        // 굳어 있다. **저주파 웅웅거림** — 세기 1px 이하인데 결이 5프레임이라
+        // 진동이 아니라 눌린 것처럼 느껴진다. 그리고 병력에서 빛이 하나씩 오른다.
+        // **상시 진동으로 두면 안 된다.** 처음엔 3프레임마다 채워 넣었는데
+        // 실측에서 진화 한 번이 흔들린 프레임을 75개씩 만들어 냈다(41회 → 3075).
+        // 그리고 감촉도 틀렸다 — 굳어 있는 것은 떠는 것이 아니다.
+        // 0.4초 간격의 **망치질 세 번**으로 바꿨다. 사이가 조용해야 두들김이 산다.
+        // 밀림도 안 쓴다 — 밀림의 꼬리(28프레임)가 망치질 사이의 침묵을
+        // 그대로 메워 버린다. 사이가 조용해야 두들김이 두들김으로 들린다.
+        if ((this.t % REARM_BEAT) === 0) this.addShake(REARM_HUM, 0, AX_Y, 6);
+        if ((this.t % REARM_EVERY) === 0) {
+          const x = C.SPAWN_L_X + Math.random() * (C.VIEW_W * 0.5 - C.SPAWN_L_X);
+          this.push1(x, gy(x) - 6, 0, -1.8 - Math.random(), 2.2 + Math.random(), 26, 1);
+        }
+      } else {
+        // **적이 굳어 있는 것은 내 기회다** (game.js 의 계약 주석 그대로).
+        // 그러니 내 화면을 흔들지 않는다 — 흔들리는 것은 위협의 언어다.
+        // 저쪽 전열 위로 붉은 것이 내려앉는 것만 보인다.
+        if ((this.t % REARM_EVERY) === 0) {
+          const x = C.VIEW_W * 0.5 + Math.random() * (C.SPAWN_R_X - C.VIEW_W * 0.5);
+          this.push1(x, gy(x) - 70 - Math.random() * 30, 0, 1.6 + Math.random(),
+                     2.2 + Math.random(), 24, 2);
+        }
+      }
+      return;
+    }
+
+    // ── 해방 ── 굳었던 것이 풀린다. 진화의 진짜 순간은 여기다.
+    if (mine) this.rearmArmL = 0; else this.rearmArmR = 0;
+    // 경직이 아예 없던 판(사자자리·ERA_PROMOTE 꺼짐)에는 풀릴 것도 없다.
+    if (prev <= 0) return;
+    if (mine) {
+      // 위로 솟는다. 진화는 커지는 것이니 화면도 커지는 쪽으로 움직여야 한다.
+      this.freeze(Math.max(2, (C.HITSTOP_ERA * 0.6) | 0), PR_ALWAYS);
+      this.addShake(C.SHAKE_ERA * 0.85, 0, AX_Y, 2);
+      this.kick(0, -3.6);
+      this.flash(C.FLASH_FRAMES);
+      const fx = C.VIEW_W * 0.34;
+      this.ring(fx, gy(fx) - 46);
+      // 전열 전체에서 오른다. 한 점에서 터지면 "기지가 폭발했다"로 읽힌다 —
+      // 승격된 것은 기지가 아니라 **나가 있는 병력**이다.
+      const n = (C.PART_ERA * 0.8) | 0;
+      for (let k = 0; k < n; k++) {
+        const x = C.SPAWN_L_X + (k / n) * (C.VIEW_W * 0.52 - C.SPAWN_L_X)
+                + (Math.random() * 2 - 1) * 12;
+        this.push1(x, gy(x) - 8, (Math.random() * 2 - 1) * 0.9,
+                   -3.4 - Math.random() * 1.8, 3.2 + Math.random() * 1.6, C.PART_LIFE, 1);
+      }
+    } else {
+      // 적이 풀렸다. 멈추지 않는다 — 손해에 구두점을 찍지 않는다.
+      // 대신 화면이 **내 쪽으로 밀린다.** 저쪽이 한 발 앞으로 나온 감촉이다.
+      this.addShake(C.SHAKE_ERA * 0.4, 0, AX_X, 4);
+      this.kick(-2.4, 0);
+      const n = (C.PART_ERA * 0.4) | 0;
+      for (let k = 0; k < n; k++) {
+        const x = C.VIEW_W * 0.52 + (k / n) * (C.SPAWN_R_X - C.VIEW_W * 0.52)
+                + (Math.random() * 2 - 1) * 12;
+        this.push1(x, gy(x) - 8, (Math.random() * 2 - 1) * 0.9,
+                   -2.2 - Math.random(), 2.8 + Math.random(), C.PART_LIFE, 2);
+      }
+    }
+  }
+
+  // 셰이크 요청. **모양은 더 센 쪽이 가져간다** — 작은 진동이 큰 사건의 결을
+  // 덮어쓰면 히트스톱 거버너를 둔 이유가 그대로 사라진다.
+  // axis·grain 을 안 주면 예전과 완전히 같은 등방 진동이다.
+  addShake(mag, rot, axis, grain) {
+    if (mag > this.shakeMag) {
+      this.shakeMag = mag;
+      this.shakeAxis = axis === undefined ? AX_ISO : (axis | 0);
+      this.shakeGrain = grain > 1 ? (grain | 0) : 1;
+      this.grainCd = 0;                    // 새 결은 다음 프레임에 바로 시작한다
+    }
     if (rot > this.shakeRotMag) this.shakeRotMag = rot;
+  }
+
+  // 밀림 임펄스. 화면이 그쪽으로 밀렸다가 되돌아온다.
+  // 진동이 아니므로 **얼마나 자주 오는가**보다 **어느 쪽인가**가 읽힌다.
+  kick(dx, dy) {
+    let vx = this.pushVX + dx, vy = this.pushVY + dy;
+    if (vx > PUSH_MAX) vx = PUSH_MAX; else if (vx < -PUSH_MAX) vx = -PUSH_MAX;
+    if (vy > PUSH_MAX) vy = PUSH_MAX; else if (vy < -PUSH_MAX) vy = -PUSH_MAX;
+    this.pushVX = vx; this.pushVY = vy;
+  }
+
+  // 화면 섬광. reduced-motion 이면 절반만 — 번쩍임은 움직임보다 더 직접적이다.
+  flash(n) {
+    const v = this.reduceMotion ? (n * 0.5) | 0 : n | 0;
+    if (v > this.flashFrames) this.flashFrames = v;
   }
 
   // 파티클 하나. **모든 연출이 이 한 곳을 지난다** — 링버퍼라 넘치면 조용히
@@ -448,7 +745,15 @@ export class Feel {
         this.spray(x, gy(x) - 16, n, mine ? 1 : 2,
                    1.8 + w * 1.6, 1.5, C.PART_LIFE, 3 + w * 2);
         // 잡졸은 화면을 흔들지 않는다. 무게가 있는 것만 손에 온다.
-        if (w >= 0.3) this.addShake(C.SHAKE_KILL * (0.45 + 0.55 * w), 0);
+        // 문턱을 0.3 → 0.45 로 올렸다: 처치는 초당 여러 번 나는 사건이고
+        // (실측 774회/750초, 그중 208회가 흔들었다) 중간 무게까지 흔들면
+        // 그 진동이 스킬·진화의 자리를 먼저 먹는다.
+        // 그리고 **축을 가른다** — 내가 잡은 것은 가로로 치고(때린 방향이 있다),
+        // 내 것이 죽은 것은 세로로 눌린다(맞은 것에는 방향이 없다).
+        if (w >= 0.45) {
+          this.addShake(C.SHAKE_KILL * (mine ? 0.45 + 0.55 * w : 0.3 + 0.4 * w), 0,
+                        mine ? AX_X : AX_Y, mine ? 2 : 3);
+        }
         // 히트스톱은 **내가 만든 충격**에만 건다.
         // 내 유닛이 죽은 것에 히트스톱을 걸면 손해가 성취처럼 찍힌다.
         //
@@ -466,8 +771,33 @@ export class Feel {
         const mine = b === SIDE_L;
         const bx = mine ? C.BASE_L_X : C.BASE_R_X;
         const top = gy(bx) - C.BASE_H;
-        this.freeze(C.HITSTOP_BASE, PR_HI);
-        this.addShake(C.SHAKE_BASE * (mine ? 1.2 : 0.95), 0);
+        // ── 여기가 셰이크 예산의 진짜 구멍이었다 ──
+        // 실측(5판×150초): BASE_HIT 612회 중 541회가 적 성 타격이고, 전선이
+        // 성에 붙으면 **초당 여러 번** 난다. 매번 4.75px 를 넣으면 감쇠 꼬리가
+        // 18프레임이라 서로 이어 붙어 사실상 상시 진동이 된다 —
+        // 66.9% 사고 때 EV.ATTACK 이 한 짓과 정확히 같은 구조다.
+        // 링에는 이미 간격(BASE_RING_GAP)이 있었는데 셰이크에는 없었다.
+        //
+        // 그래서 COUNTER_HIT 과 같은 처방을 쓴다: **매번 파편, 가끔 충격.**
+        // 숫자와 파편은 매번 나가므로 "얼마나 때렸는가"는 그대로 읽힌다.
+        const punct = mine ? (this.selfHitCd <= 0) : (this.baseRingCd <= 0);
+        if (mine) {
+          // **내 성이 맞은 것에는 히트스톱을 걸지 않는다.** 히트스톱은
+          // "제대로 먹혔다"의 문장부호다 — 손해에 찍으면 얻어맞는 순간이
+          // 성취처럼 읽힌다. 대신 **위아래로 눌린다**: 세로 전용에 결이 굵어서
+          // 때리는 쪽의 가로 충격과 축이 다르다.
+          if (punct) {
+            this.selfHitCd = SELF_HIT_GAP;
+            this.addShake(C.SHAKE_BASE * 0.85, 0, AX_Y, 3);
+          }
+        } else if (punct) {
+          this.freeze(C.HITSTOP_BASE, PR_HI);
+          this.addShake(C.SHAKE_BASE * 0.7, 0, AX_X, 2);
+        }
+        // **여기에 kick 을 쓰지 않는다.** 밀림은 이 파일에서 가장 드문 채널로
+        // 남겨 둔다 — 스킬·진화·승패에만 있다. 기지 타격처럼 초당 여러 번 오는
+        // 것에 붙이면 밀림이 상시가 되고, 그러면 해일이 밀어내는 것도 안 읽힌다.
+        // (실측: 붙였을 때 카메라 오프셋 프레임이 28.84% → 32.25% 로 올랐다)
         this.float(bx, top - 24, a, 0);
         // 벽에서 파편이 튄다. 내 성이면 붉게(피해), 적 성이면 금빛(성과).
         this.spray(bx + (mine ? 44 : -44), top + C.BASE_H * 0.45,
@@ -482,24 +812,31 @@ export class Feel {
       }
 
       case EV.ERA_UP:
+        // **진화는 순간이 아니라 구간이다.** 여기는 그 구간의 시작일 뿐이고,
+        // 굳음과 해방은 stepRearm 이 game.rearmMs 를 따라가며 그린다.
+        // 그래서 여기서 다 쏟지 않는다 — 다 쏟으면 뒤의 1.25초가 다시 빈다.
         if (b === SIDE_L) {
-          // 판을 바꾸는 순간. 예산을 무시하고 확실히 건다.
+          this.rearmArmL = 1;
           this.freeze(C.HITSTOP_ERA, PR_ALWAYS);
-          this.addShake(C.SHAKE_ERA, 0);
-          this.flashFrames = C.FLASH_FRAMES;
+          // 아래로 꽂힌다. 해방에서 위로 솟을 것이므로 시작은 반대여야
+          // 1.25초가 하나의 활로 읽힌다.
+          this.addShake(C.SHAKE_ERA * 0.9, 0, AX_Y, 3);
+          this.kick(0, 2.6);
+          this.flash(C.FLASH_FRAMES);
           this.ring(C.BASE_L_X, gy(C.BASE_L_X) - C.BASE_H * 0.5);
           this.spray(C.BASE_L_X, gy(C.BASE_L_X) - C.BASE_H * 0.5,
-                     C.PART_ERA, 1, 3.2, 2.2, C.PART_LIFE, 4);
+                     (C.PART_ERA * 0.6) | 0, 1, 3.2, 2.2, C.PART_LIFE, 4);
           this.banner(C.BAN_ERA);
         } else {
           // **적이 진화한 것도 판이 바뀐 것이다.** 지금까지 이건 아무 감촉도
           // 없었다 — 갑자기 안 죽는 적을 만나는데 이유가 손에 안 왔다.
-          // 밝게 축하하지 않고 서늘하게 알린다: 붉은 파편과 낮은 흔들림.
-          this.freeze(C.HITSTOP_BASE, PR_HI);
-          this.addShake(C.SHAKE_ERA * 0.5, 0);
+          // 밝게 축하하지 않고 서늘하게 알린다. 그리고 히트스톱을 뺐다:
+          // 적이 세지는 순간에 내 화면이 멈추면 그건 내 성과의 문법이다.
+          this.rearmArmR = 1;
+          this.addShake(C.SHAKE_ERA * 0.45, 0, AX_X, 5);
           this.ring(C.BASE_R_X, gy(C.BASE_R_X) - C.BASE_H * 0.5);
           this.spray(C.BASE_R_X, gy(C.BASE_R_X) - C.BASE_H * 0.5,
-                     (C.PART_ERA * 0.5) | 0, 2, 2.6, 1.6, C.PART_LIFE, 3.4);
+                     (C.PART_ERA * 0.4) | 0, 2, 2.6, 1.6, C.PART_LIFE, 3.4);
         }
         break;
 
@@ -546,7 +883,10 @@ export class Feel {
           this.spray(x, y, 2, 2, 2.2, 1.0, 20, 3);
           if (this.foeHitCd <= 0) {
             this.foeHitCd = FOE_HIT_GAP;
-            this.addShake(SHAKE_COUNTER * 0.7, 0);
+            // 예산 회수 지점. 0.7 배 등방 진동이었다 — 세기는 내 것의 70%인데
+            // 결이 같아서 **내가 때린 것과 손에서 구분이 안 됐다.**
+            // 세로 전용으로 낮게 깔면 세기를 더 줄여도 "맞았다"는 남는다.
+            this.addShake(SHAKE_COUNTER * 0.42, 0, AX_Y, 2);
             this.spray(x, y, 4, 2, 3.0, 1.4, 24, 3.4);
           }
           break;
@@ -556,34 +896,74 @@ export class Feel {
         this.spray(x, y, 2, 1, 2.2, 1.2, 20, 3);
         if (this.freeze(HITSTOP_COUNTER, PR_LOW)) {
           const s = this.streak > 8 ? 8 : this.streak;
-          this.addShake(SHAKE_COUNTER * (1 + s * 0.07), 0);
+          // 내 것은 가로로 친다. 때리는 방향이 있는 충격이다.
+          this.addShake(SHAKE_COUNTER * (1 + s * 0.07), 0, AX_X, 2);
           this.spray(x, y, 5, 1, 3.4, 2.0, 26, 3.6);
         }
         break;
       }
 
       case EV.SKILL: {
-        // 셋이 서로 다르게 느껴져야 한다. 해일이 가장 무겁다.
+        // ── 스킬 셋이 손에서 갈리는 곳 ──
+        // 고치기 전 실측: 셋이 전부 addShake 한 채널만 썼고 등방 난수였다.
+        // 해일 16px · 화살비 5~7px · 증원 4.2px — **크기만 다른 같은 진동**이라
+        // 눈을 감으면 어느 것을 썼는지 알 수 없었다. 그래서 채널을 나눈다.
+        //
+        //   해일   가로 · 굵은 결 · 한 번에 크게 · 밀어냄       → 무게
+        //   화살비 세로 · 잔 결 · 0.43초 동안 계속 · 안 밀림     → 쏟아짐
+        //   증원   진동 0 · 위로 밀림 한 번 · 아래서 위로 기둥   → 솟아오름
+        //   총진군 진동 0 · 앞으로 밀림 · 전열을 훑는 띠          → 휩쓸림
+        //
         // 그리고 **내가 쓴 것과 적이 쓴 것이 같으면 안 된다** — 같은 해일도
-        // 내 것이면 성과이고 적 것이면 재난이다.
+        // 내 것이면 성과이고 적 것이면 재난이다. 방향이 그걸 가른다:
+        // 내 것은 적 쪽으로, 적 것은 나에게로 밀린다.
         const mine = b === SIDE_L;
-        if (a === 0) {
+        const dir = mine ? 1 : -1;
+        if (a === C.SK_TIDE) {
           // 해일. 플레이어 경로는 EV.SKILL 과 EV.NUKE 를 **둘 다** 낸다.
           // 예전에는 그래서 링 2개·파티클 80개가 겹쳐 풀을 통째로 갈아엎었다.
           this.tide(mine);
-        } else if (a === 1) {
-          // 화살비. 내 것은 무조건 걸리고, 적 것은 예산을 따른다 —
-          // 히트스톱은 기본적으로 **내가 만든 충격**의 언어다.
-          this.freeze(C.HITSTOP_BASE, mine ? PR_ALWAYS : PR_HI);
-          this.addShake(C.SHAKE_BASE * (mine ? 1.4 : 1.1), 0);
+        } else if (a === C.SK_VOLLEY) {
+          // 화살비 — 하늘에서 쏟아지는 것을 한 프레임에 터뜨리면 그냥 폭발이다.
+          // 히트스톱을 4 → 2 로 줄이고(정지가 아니라 지속이다) 대신 26프레임
+          // 동안 세로로 지지직거리며 화살이 계속 떨어진다.
+          this.freeze(2, mine ? PR_HI : PR_LOW);
           const fx = this.frontline(game);
-          this.spray(fx, gy(fx) - 50, C.PART_KILL * 2, mine ? 1 : 2,
-                     2.6, 3.4, C.PART_LIFE, 3.4);
-        } else {
+          this.pourMode = 0;
+          this.pourFrames = POUR_FRAMES;
+          this.pourX = fx;
+          this.pourSpan = num(C.VOLLEY_TIER_R && C.VOLLEY_TIER_R[0], 190) * 0.8;
+          this.pourKind = mine ? 1 : 2;
+          this.pourMag = POUR_SHAKE * (mine ? 1 : 0.75);
+          this.addShake(this.pourMag * 1.5, 0, AX_Y, 1);
+          this.spray(fx, gy(fx) - 50, C.PART_KILL, mine ? 1 : 2, 2.6, 3.4, 22, 3.4);
+        } else if (a === C.SK_RALLY) {
+          // 증원 — **진동을 한 톨도 안 쓴다.** 셋 중 유일하게 안 흔들리는 것이
+          // 이 스킬의 성격이다. 화면이 위로 들렸다 내려앉고, 소환지점에서
+          // 기둥이 솟는다. 적 것은 반대로 **내려앉는다** — 저쪽 땅이 무거워진 것.
           const sx = mine ? C.SPAWN_L_X : C.SPAWN_R_X;
-          this.addShake(C.SHAKE_ERA * 0.6, 0);
-          this.spray(sx, gy(sx) - 16, C.PART_ERA, mine ? 0 : 2,
+          this.kick(0, mine ? -4.2 : 2.2);
+          this.pourMode = 1;
+          this.pourFrames = RISE_FRAMES;
+          this.pourX = sx;
+          this.pourSpan = 30;
+          this.pourKind = mine ? 1 : 2;
+          this.ring(sx, gy(sx) - 24);
+          this.spray(sx, gy(sx) - 16, (C.PART_ERA * 0.5) | 0, mine ? 0 : 2,
                      2.2, 2.6, C.PART_LIFE, 3.2);
+        } else {
+          // 총진군 — **여기가 비어 있었다.** a === 3(SK_SURGE) 이 증원 가지로
+          // 흘러 들어가서, 최대 시대의 마지막 스킬이 증원과 똑같이 느껴졌다.
+          // (실측 5판에서 11회 발동, 전부 증원의 감촉으로 나갔다)
+          // 병력 전체가 빨라지는 것이므로 한 점에서 터지지 않는다. 전열을 훑는다.
+          const sx = mine ? C.SPAWN_L_X : C.SPAWN_R_X;
+          this.kick(dir * 3.4, 0);
+          this.pourMode = 2;
+          this.pourFrames = SWEEP_FRAMES;
+          this.pourX = sx;
+          this.pourSpan = Math.abs(this.frontline(game) - sx);
+          this.pourDir = dir;
+          this.pourKind = mine ? 1 : 2;
         }
         break;
       }
@@ -601,7 +981,8 @@ export class Feel {
       case EV.WATER_HIT:
         // 0.5초마다 온다. 예전 값(2.4)은 후반 내내 화면을 떨게 했다.
         // 물은 압박이지 타격이 아니다 — 낮게 깔리는 진동으로 남긴다.
-        this.addShake(C.SHAKE_HIT * 0.9, 0);
+        // 세로에 결이 굵어서 **차오르는 것**으로 읽힌다. 타격의 가로 충격과 다르다.
+        this.addShake(C.SHAKE_HIT * 0.9, 0, AX_Y, 4);
         break;
 
       case EV.NO_GOLD:
@@ -634,7 +1015,10 @@ export class Feel {
         //  그 이벤트가 없는 예전 game.js 에서도 여기서 이미 갈린다.)
         const won = type === EV.WIN;
         this.freeze(C.HITSTOP_END, PR_ALWAYS);
-        this.addShake(C.SHAKE_END, C.SHAKE_ROT_END);
+        // 이긴 것은 위로 솟고 진 것은 아래로 꺼진다. 회전 세기는 같아도
+        // **밀리는 방향**이 반대라 결과가 손에서 먼저 온다.
+        this.addShake(C.SHAKE_END, C.SHAKE_ROT_END, AX_Y, won ? 2 : 4);
+        this.kick(0, won ? -4.4 : 3.2);
         // **성벽 위 하늘에서 터뜨린다.** 성벽 안쪽에 뿌리면 흰 성 위의 붉은 파편이
         // 흰 벽에 묻혀 안 보인다 (캡처로 확인했다). 어두운 배경 위여야 읽힌다.
         const bx = won ? C.BASE_R_X : C.BASE_L_X;
@@ -666,7 +1050,7 @@ export class Feel {
         const top = gy(bx) - C.BASE_H;
         this.freeze(C.HITSTOP_ERA, PR_ALWAYS);
         this.addShake(C.SHAKE_ERA, 0);
-        this.flashFrames = C.FLASH_FRAMES;
+        this.flash(C.FLASH_FRAMES);
         this.ring(bx, top + C.BASE_H * 0.5);
         this.spray(bx, top + C.BASE_H * 0.5, C.PART_ERA, 1, 3.4, 3.0, C.PART_LIFE, 4);
         break;
@@ -682,7 +1066,7 @@ export class Feel {
         if (b === 1) {
           // 완주. 이 게임에서 가장 밝은 순간이다.
           this.addShake(C.SHAKE_END, C.SHAKE_ROT_END * 1.5);
-          this.flashFrames = C.FLASH_FRAMES * 2;
+          this.flash(C.FLASH_FRAMES * 2);
           this.ring(lx, gy(lx) - C.BASE_H * 0.5);
           this.ring(mx, gy(mx) - 60);
           this.ring(rx, gy(rx) - C.BASE_H * 0.5);
@@ -716,18 +1100,37 @@ export class Feel {
   }
 
   // 해일 — SKILL(0) 과 NUKE 로 두 번 오는 것을 한 번으로 접는다.
+  //
+  // **무게**가 이 스킬의 성격이다. 무게는 크기가 아니라 느림과 방향에서 온다.
+  // 결을 4프레임으로 묶어(다른 어떤 연출보다 굵다) 가로로만 쓸리게 하고,
+  // 밀림 임펄스를 물이 가는 쪽으로 준다 — 화면이 파도에 떠밀렸다 돌아온다.
+  // 화살비의 잔 세로 지지직과 정확히 반대 축·반대 결이라 손에서 안 헷갈린다.
   tide(mine) {
     if (this.t - this.tideAt < 8) return;
     this.tideAt = this.t;
+    const dir = mine ? 1 : -1;
     const x = mine ? C.VIEW_W * 0.62 : C.VIEW_W * 0.38;
     const y = gy(x) - 40;
-    this.freeze(C.HITSTOP_NUKE, PR_ALWAYS);
-    this.addShake(C.SHAKE_NUKE, 0.01);
+    // 적의 해일도 무겁다 — 재난이니까. 다만 예산은 따로 쓴다.
+    this.freeze(mine ? C.HITSTOP_NUKE : ((C.HITSTOP_NUKE * 0.65) | 0), PR_ALWAYS);
+    this.addShake(C.SHAKE_NUKE * (mine ? 1 : 0.8), 0.01, AX_X, 4);
+    this.kick(dir * 5.0, 0);
     this.ring(x, y);
-    this.spray(x, y, C.PART_NUKE, mine ? 1 : 2, 3.6, 3.0, C.PART_LIFE, 4);
+    // 절반은 터지고 절반은 **간다.** 물은 한자리에서 터지지 않는다 —
+    // 지면을 따라 낮게 밀려가는 띠가 있어야 파도로 읽힌다.
+    const nb = (C.PART_NUKE * 0.35) | 0;
+    const nr = C.PART_NUKE - nb;
+    this.spray(x, y, nr, mine ? 1 : 2, 3.6, 3.0, C.PART_LIFE, 4);
+    const x0 = mine ? C.SPAWN_L_X : C.SPAWN_R_X;
+    for (let k = 0; k < nb; k++) {
+      const bx = x0 + (x - x0) * (k / nb) + (Math.random() * 2 - 1) * 10;
+      this.push1(bx, gy(bx) - 4 - Math.random() * 10,
+                 dir * (3.4 + Math.random() * 2.2), -0.6 - Math.random() * 0.8,
+                 3.4 + Math.random() * 1.8, C.PART_LIFE, mine ? 1 : 2);
+    }
     if (mine) {
       // 내가 쓴 것만 이름을 얻는다. 적의 해일은 어둡게 지나간다.
-      this.flashFrames = C.FLASH_FRAMES;
+      this.flash(C.FLASH_FRAMES);
       this.banner(C.BAN_NUKE);
     }
   }

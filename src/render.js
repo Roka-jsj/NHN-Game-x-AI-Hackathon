@@ -150,11 +150,30 @@ const DV_MET_THR = Float32Array.from([C.TH_AGGRO_HIGH, C.TH_HOARD_HIGH, C.TH_ECO
 const BUCKET_W = 32;
 const BUCKET_N = (C.VIEW_W / BUCKET_W | 0) + 2;
 
-// 스킬 연출 길이 (렌더 프레임)
-const FX_TIDE_F = 40, FX_VOLLEY_F = 48, FX_RALLY_F = 36;
+// ── 스킬 연출 길이 (렌더 프레임) ──
+// 예전에는 40·48·36 이었다. 도형이 한 번 지나가고 끝나서 **큰 기술이 터진 것이
+// 화면에 안 남았다.** 실측: 화살비·증원·진화가 전장 픽셀의 1.2% 미만만 칠했다
+// (해일만 17%). 그래서 셋 다 3단 구조로 다시 짰다 —
+//   예고(telegraph) → 발동(strike) → 여파(aftermath).
+// 아래 T_* 는 그 세 막의 경계다. t(0~1) 기준이라 길이를 바꿔도 비율이 안 깨진다.
+const FX_TIDE_F = 64, FX_VOLLEY_F = 66, FX_RALLY_F = 54;
 const FX_TOWER_F = 10;
-const FX_ERA_F = 34;
+const FX_ERA_F = 88;
 const VOLLEY_N = 26;
+
+// 막 경계 — 예고가 끝나는 시점 / 발동이 끝나는 시점
+const T_TIDE_TELE = 0.20, T_TIDE_HIT = 0.76;
+const T_VOL_TELE = 0.24, T_VOL_HIT = 0.78;
+const T_RAL_TELE = 0.20, T_RAL_HIT = 0.72;
+
+// 스킬이 지나간 자리 — **판이 바뀌었다는 증거는 연출이 끝난 뒤에도 남는다.**
+// 해일이 훑은 젖은 땅, 화살비가 파낸 구덩이, 증원이 세운 집결 표식.
+// 연출 자체와 수명이 다르므로 따로 센다 (약 2.7초).
+const SCAR_F = 160;
+const CRATER_N = 14;
+
+// 전경 바위 — 화면 아래 두 모서리. 원경(능선)·중경(기지·유닛)과 갈라 놓는 층이다
+const FG_N = 7;
 
 // ── 순수 드로잉 좌표 (spec-v2 §0 이 render.js 지역 상수로 허용한 것) ──
 // 버튼 열 좌표는 **config 가 단일 출처다.** 한때 여기 지역 상수로 복사해
@@ -621,6 +640,18 @@ export class Renderer {
       this.vOff[i] = (((i * 2654435761) % 997) / 997) * 2 - 1;
       this.vDelay[i] = ((i * 40503) % 251) / 251;
     }
+    // 구덩이 산포 — 화살비가 땅에 남기는 자국. 같은 이유로 미리 굽는다
+    this.cOff = new Float32Array(CRATER_N);
+    this.cSz = new Float32Array(CRATER_N);
+    for (let i = 0; i < CRATER_N; i++) {
+      this.cOff[i] = (((i * 1103515245 + 12345) % 733) / 733) * 2 - 1;
+      this.cSz[i] = 0.55 + ((i * 22695477) % 311) / 311 * 0.75;
+    }
+
+    // ── 흉터 — 스킬이 끝난 뒤에도 남는 것 ──
+    // fxSkill 과 같은 인덱스(side * SKILL_COUNT + skill)를 쓴다. 한 벌 더 만들지 않는다.
+    this.scarLife = new Int16Array(2 * C.SKILL_COUNT);
+    this.scarX = new Float32Array(2 * C.SKILL_COUNT);
   }
 
   // main 이 리사이즈에서만 부른다. 창 크기를 여기서만 읽는다 —
@@ -787,6 +818,8 @@ export class Renderer {
     this.drawRain(game);
     this.drawBase(game, SIDE_R);
     this.drawBase(game, SIDE_L);
+    // 흉터는 **지면에 남은 것**이라 유닛보다 먼저다. 유닛이 그 위를 밟고 지나가야 한다
+    this.drawScars(game);
     this.drawUnits(game, alpha);
     this.drawEraFx(game);
     this.drawSkillFx(game);
@@ -815,6 +848,7 @@ export class Renderer {
     const restart = game.tick < this.prevTick;
     if (restart) {                            // 새 판
       this.fxSkill.fill(0);
+      this.scarLife.fill(0);                  // 지난 판의 자국이 새 판에 남지 않는다
       this.fxTower.fill(0);
       this.fxEra.fill(0);
       this.prevSkillCd.fill(0);
@@ -862,9 +896,14 @@ export class Renderer {
           this.fxSkill[k] = i === C.SK_TIDE ? FX_TIDE_F : (i === C.SK_VOLLEY ? FX_VOLLEY_F : FX_RALLY_F);
           // 증원은 **쏜 쪽 기지 앞**에서 솟는다. 화살비만 전선에 떨어진다.
           this.fxSkillX[k] = i === C.SK_VOLLEY ? front : (s === SIDE_L ? C.SPAWN_L_X : C.SPAWN_R_X);
+          // 흉터도 같은 순간에 예약한다. 연출보다 오래 산다 — 그게 "판이 바뀌었다"는 증거다.
+          // 해일은 자기 진영 반대편 전체를 훑으므로 자국의 기준점이 전선이다.
+          this.scarLife[k] = SCAR_F;
+          this.scarX[k] = i === C.SK_TIDE ? front : this.fxSkillX[k];
         }
         this.prevSkillCd[k] = cd;
         if (this.fxSkill[k] > 0) this.fxSkill[k]--;
+        if (this.scarLife[k] > 0) this.scarLife[k]--;
       }
     }
 
@@ -1330,23 +1369,79 @@ export class Renderer {
       // **내 진화는 금색, 적 진화는 적 색이다.** 같은 연출을 주면 내 성취가 묻히고,
       // 아무 연출도 안 주면 적이 진화한 줄 모른다 (사용자가 실제로 못 느꼈다).
       const ramp = s === SIDE_L ? C.RAMP_BONUS : C.RAMP_STRUCT;
-      const sz = s === SIDE_L ? 1 : 0.72;
+      const mine = s === SIDE_L;
+      const sz0 = mine ? 1 : 0.74;
+      const gy = groundAt(cx);
+      const dir = mine ? 1 : -1;
+
+      // 이 게임에서 가장 큰 사건인데 얇은 고리 둘로 끝났다 (실측: 전장의 1.17%).
+      // 진화는 **세계가 바뀌는 것**이다 — 빛기둥이 하늘까지 서고, 지면을 따라
+      // 충격이 판을 건너가고, 잠깐 화면 전체가 밝아진다.
+
+      // (1) 화면 전체가 한 번 밝아진다 — 내 진화만. 드로우 콜 하나로 사는 사건감
+      if (mine && t < 0.34) {
+        const ft = 1 - t / 0.34;
+        ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.20 * ft * ft)];
+        ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
+      }
+
+      // (2) 빛기둥 — 기지에서 하늘 끝까지. 사다리꼴이라 위로 갈수록 벌어진다
+      if (t < 0.62) {
+        const bt = t / 0.62;
+        const a = bt < 0.22 ? bt / 0.22 : 1 - (bt - 0.22) / 0.78;
+        const aa = (a < 0 ? 0 : a) * (mine ? 1 : 0.7);
+        const w = (mine ? 44 : 30) * (0.5 + easeOutCubic(bt) * 0.8);
+        ctx.fillStyle = ramp[C.rampIndex(0.55 * aa)];
+        ctx.beginPath();
+        this.addTrap(cx, 0, gy, w * 2.1, w, 0);
+        ctx.fill();
+        ctx.fillStyle = ramp[C.rampIndex(0.95 * aa)];
+        ctx.beginPath();
+        this.addTrap(cx, 0, gy, w * 0.7, w * 0.34, 0);
+        ctx.fill();
+      }
+
+      // (3) 고리 셋 — 시차를 두고 나간다. 하나보다 셋이 훨씬 크게 읽힌다
       ctx.strokeStyle = ramp[C.rampIndex(1 - t)];
-      ctx.lineWidth = 4 * (1 - t) + 1;
-      ctx.beginPath();
-      ctx.arc(cx, cy, 30 + 260 * e * sz, 0, TAU);
-      ctx.stroke();
-      ctx.lineWidth = 2 * (1 - t) + 0.5;
-      ctx.beginPath();
-      ctx.arc(cx, cy, 30 + 160 * e * sz, 0, TAU);
-      ctx.stroke();
-      // 솟아오르는 알갱이 — 기지가 새 시대를 뱉는다
+      for (let r = 0; r < 3; r++) {
+        const p = t - r * 0.13;
+        if (p <= 0) continue;
+        const pe = easeOutCubic(p);
+        ctx.lineWidth = (5 - r * 1.2) * (1 - p) + 0.8;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 26 + (330 - r * 76) * pe * sz0, 0, TAU);
+        ctx.stroke();
+      }
+
+      // (4) 지면 충격 — 판을 가로질러 달린다. 진화가 **전장에 도달한다**
+      if (t < 0.7) {
+        const st = t / 0.7;
+        const reach = C.VIEW_W * 1.05 * easeOutCubic(st);
+        ctx.strokeStyle = ramp[C.rampIndex(0.9 * (1 - st))];
+        ctx.lineWidth = 6 * (1 - st) + 1;
+        ctx.beginPath();
+        const ex = cx + dir * reach;
+        ctx.moveTo(cx, gy - 3);
+        ctx.lineTo(ex, groundAt(ex) - 3);
+        ctx.stroke();
+        // 충격이 지나간 자리에서 튀어 오르는 지면
+        ctx.fillStyle = ramp[C.rampIndex(0.8 * (1 - st))];
+        ctx.beginPath();
+        for (let i = 0; i < 12; i++) {
+          const px = cx + dir * reach * (i / 12);
+          const h = 16 * (1 - st) * (0.5 + this.cSz[i % CRATER_N]);
+          this.addSpike(px, groundAt(px), 0, -1, h, 3.5);
+        }
+        ctx.fill();
+      }
+
+      // (5) 솟아오르는 알갱이 — 기지가 새 시대를 뱉는다. 예전보다 배로 많다
       ctx.fillStyle = ramp[C.rampIndex(1 - t)];
       ctx.beginPath();
-      for (let i = 0; i < 12; i++) {
-        const px = cx + (this.rn(s * 23 + i * 3) - 0.5) * (C.BASE_W + 30);
-        const py = groundAt(cx) - 10 - e * (60 + this.rn(s * 23 + i * 3 + 1) * 130);
-        const sz = 4 * (1 - t) + 1;
+      for (let i = 0; i < 24; i++) {
+        const px = cx + (this.rn(s * 23 + i * 3) - 0.5) * (C.BASE_W + 70);
+        const py = gy - 10 - e * (70 + this.rn(s * 23 + i * 3 + 1) * 210);
+        const sz = 5 * (1 - t) + 1;
         ctx.rect(px - sz * 0.5, py - sz * 0.5, sz, sz);
       }
       ctx.fill();
@@ -2069,10 +2164,153 @@ export class Renderer {
   //   화살비  전선 위에서 **아래로 쏟아진다**. 표적 원이 먼저 그려진다
   //   증원    내 기지에서 **위로 솟는다**. 금빛 기둥
   // 방향이 셋 다 달라야 한 프레임만 봐도 무엇이 터졌는지 안다.
+  // 해일 벽면의 표면 높이. q>0 이 진행 방향 앞쪽이다.
+  // 앞(u)은 3제곱이라 마지막에 뚝 떨어진다 — 그래서 **벽면**으로 보인다.
+  // 뒤(v)는 1.5제곱이라 길게 끌린다 — 그래서 꼬리가 생긴다.
+  tideSurf(q, RF, RBK, hgt) {
+    let k;
+    if (q > 0) { const u = q / RF; k = u >= 1 ? 0 : 1 - u * u * u; }
+    else { const v = -q / RBK; k = v >= 1 ? 0 : 1 - Math.pow(v, 1.5); }
+    return -hgt * k;
+  }
+
   drawSkillFx(game) {
+    // **화면을 가리는 것과 화면에 겹치는 것은 다르다.**
+    // 큰 기술이 도는 동안 판 전체를 배경색 한 겹으로 눌러 둔다. 그러면 같은 밝기의
+    // 도형이 두 배로 밝게 읽힌다 — 새 색을 안 만들고 대비를 버는 유일한 방법이고,
+    // 값은 드로우 콜 **하나**다. 양쪽이 동시에 쏴도 한 번만 깐다(제일 센 것 기준).
+    // 예고에서 차오르고 여파에서 빠진다. 갑자기 어두워지면 그건 깜빡임으로 읽힌다.
+    let veil = 0;
+    for (let k = 0; k < 2 * C.SKILL_COUNT; k++) {
+      const f = this.fxSkill[k];
+      if (f <= 0) continue;
+      const i = k % C.SKILL_COUNT;
+      const L = i === C.SK_TIDE ? FX_TIDE_F : (i === C.SK_VOLLEY ? FX_VOLLEY_F : FX_RALLY_F);
+      const t = 1 - f / L;
+      const peak = i === C.SK_TIDE ? 0.36 : (i === C.SK_VOLLEY ? 0.26 : 0.20);
+      const w = t < 0.22 ? t / 0.22 : (t > 0.82 ? (1 - t) / 0.18 : 1);
+      const v = peak * (w < 0 ? 0 : (w > 1 ? 1 : w));
+      if (v > veil) veil = v;
+    }
+    if (veil > 0.015) {
+      this.ctx.fillStyle = C.RAMP_BG[C.rampIndex(veil)];
+      this.ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
+    }
     // 양쪽을 **같은 코드로** 그리되 색·위치·진행 방향만 진영에서 받는다.
     // 코드를 두 벌로 복사하면 한쪽만 고쳐지는 날이 반드시 온다.
     for (let s = 0; s < 2; s++) this.drawSkillFxSide(game, s);
+  }
+
+  // ── 흉터 — 스킬이 지나갔다는 증거 ───────────────────────────
+  // 연출이 끝나면 40프레임 만에 흔적 없이 사라지던 것이 "가볍다"의 절반이었다.
+  // 여기 있는 것은 전부 **지면에 남는 것**이라 유닛보다 먼저 그린다 (유닛이 그 위를 밟는다).
+  // 색은 진영에서 받고, 같은 색끼리 묶어 종류마다 한 번씩만 칠한다.
+  drawScars(game) {
+    const ctx = this.ctx;
+    let any = 0;
+    for (let k = 0; k < 2 * C.SKILL_COUNT; k++) if (this.scarLife[k] > 0) { any = 1; break; }
+    if (!any) return;
+
+    for (let side = 0; side < 2; side++) {
+      const mine = side === SIDE_L;
+      const RB = mine ? C.RAMP_PLAYER : C.RAMP_STRUCT;
+      const RA = mine ? C.RAMP_BONUS : C.RAMP_DANGER;
+      const dir = mine ? 1 : -1;
+      const base = side * C.SKILL_COUNT;
+
+      // 해일이 훑고 간 자리 — 젖은 땅. 물러난 물가 선이 쏜 쪽으로 천천히 끌려간다
+      let L = this.scarLife[base + C.SK_TIDE];
+      if (L > 0) {
+        const a = L / SCAR_F;                       // 1 → 0
+        const s = 1 - a;
+        const x0 = mine ? this.scarX[base + C.SK_TIDE] - 300 * s : C.VIEW_W;
+        const x1 = mine ? C.VIEW_W : this.scarX[base + C.SK_TIDE] + 300 * s;
+        const xa = mine ? x0 : 0, xb = mine ? C.VIEW_W : x1;
+        // 젖은 띠 — 지면 바로 아래를 어둡게. 물이 핥고 간 자리다
+        ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.62 * a)];
+        ctx.beginPath();
+        ctx.moveTo(xa, groundAt(xa));
+        for (let x = xa; x <= xb; x += 16) ctx.lineTo(x, groundAt(x));
+        for (let x = xb; x >= xa; x -= 16) ctx.lineTo(x, groundAt(x) + 15);
+        ctx.closePath();
+        ctx.fill();
+        // 물러나는 포말 선 — 어디까지 잠겼었는지가 이 선 하나로 읽힌다
+        const edge = mine ? x0 : x1;
+        ctx.strokeStyle = RB[C.rampIndex(0.5 * a)];
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(edge, groundAt(edge) - 9);
+        ctx.lineTo(edge, groundAt(edge) + 5);
+        ctx.stroke();
+        // 떠밀려 온 잔해 — 굵기가 아니라 개수로 무게를 낸다
+        ctx.fillStyle = RA[C.rampIndex(0.34 * a)];
+        ctx.beginPath();
+        for (let i = 0; i < CRATER_N; i++) {
+          const x = xa + (xb - xa) * ((i * 7919 % 101) / 101);
+          const g = groundAt(x);
+          const w = 3 + this.cSz[i] * 5;
+          ctx.rect(x, g - 2 - this.cSz[i] * 3, w, 2.4);
+        }
+        ctx.fill();
+        ctx.lineWidth = C.STROKE;
+      }
+
+      // 화살비가 파낸 지면 — 구덩이와 아직 박혀 있는 화살대
+      L = this.scarLife[base + C.SK_VOLLEY];
+      if (L > 0) {
+        const a = L / SCAR_F;
+        const bx = this.scarX[base + C.SK_VOLLEY];
+        const r = C.VOLLEY_RADIUS;
+        // 구덩이 — 지면을 실제로 파낸다. 어두운 색 하나로 한 번에
+        ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.78 * a)];
+        ctx.beginPath();
+        for (let i = 0; i < CRATER_N; i++) {
+          const x = bx + this.cOff[i] * r;
+          const g = groundAt(x);
+          const w = 7 + this.cSz[i] * 11;
+          ctx.moveTo(x - w * 0.5, g);
+          ctx.lineTo(x - w * 0.2, g + 4 + this.cSz[i] * 4);
+          ctx.lineTo(x + w * 0.25, g + 3 + this.cSz[i] * 3);
+          ctx.lineTo(x + w * 0.5, g);
+          ctx.closePath();
+        }
+        ctx.fill();
+        // 박힌 화살대 — 쏜 방향으로 기울어 있다. 누가 쐈는지가 각도로 남는다
+        ctx.fillStyle = RB[C.rampIndex(0.58 * a)];
+        ctx.beginPath();
+        for (let i = 0; i < CRATER_N; i++) {
+          const x = bx + this.cOff[i] * r * 0.92;
+          const g = groundAt(x);
+          const tilt = (0.20 + this.cSz[i] * 0.16) * dir;
+          this.addBar(x, g, tilt, -1, 11 + this.cSz[i] * 7, 0, 1.1, 0.7);
+        }
+        ctx.fill();
+      }
+
+      // 증원이 세운 집결 표식 — 깃대 하나가 땅에 남는다
+      L = this.scarLife[base + C.SK_RALLY];
+      if (L > 0) {
+        const a = L / SCAR_F;
+        const bx = this.scarX[base + C.SK_RALLY];
+        const g = groundAt(bx);
+        ctx.fillStyle = RA[C.rampIndex(0.62 * a)];
+        ctx.beginPath();
+        ctx.rect(bx - 1.5, g - 40, 3, 40);
+        ctx.moveTo(bx, g - 38);
+        ctx.lineTo(bx + dir * 20, g - 33);
+        ctx.lineTo(bx, g - 28);
+        ctx.closePath();
+        for (let i = 0; i < 3; i++) ctx.rect(bx - 15 + i * 12, g - 2, 7, 2.5);
+        ctx.fill();
+        ctx.strokeStyle = RA[C.rampIndex(0.34 * a)];
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(bx + 34, g);
+        ctx.ellipse(bx, g, 34, 10, 0, 0, TAU);
+        ctx.stroke();
+        ctx.lineWidth = C.STROKE;
+      }
+    }
   }
 
   drawSkillFxSide(game, side) {
@@ -2085,125 +2323,376 @@ export class Renderer {
     const dir = mine ? 1 : -1;                            // 진행 방향
     const base = side * C.SKILL_COUNT;
 
-    // 해일 — 화면을 가로지르는 마루. **쏜 쪽에서 상대 쪽으로** 훑는다.
+    // ══ 해일 ══ 예고: 기지 앞이 부풀고 압력선이 먼저 달린다
+    //            발동: **물의 벽.** 뒤가 안 보인다 — 가리는 것이 곧 무게다
+    //            여파: 물러난 물이 젖은 땅을 남긴다 (drawScars)
     let f = this.fxSkill[base + C.SK_TIDE];
     if (f > 0) {
       const t = 1 - f / FX_TIDE_F;
-      const cx = mine ? -220 + (C.VIEW_W + 440) * easeOutCubic(t)
-                      : C.VIEW_W + 220 - (C.VIEW_W + 440) * easeOutCubic(t);
-      const R = 210, HGT = 126;
-      // 마루 — 뾰족한 산이 아니라 **물마루**여야 한다. 앞은 서고 뒤는 길게 끌린다
-      ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.5 * (1 - t * 0.55))];
-      ctx.beginPath();
-      ctx.moveTo(cx - R, C.VIEW_H);
-      for (let d = -R; d <= R; d += 14) {
-        const px = cx + d;
-        const k = d > 0 ? 1 - (d / R) * (d / R) * (d / R) : 1 - (d / R) * (d / R);
-        ctx.lineTo(px, groundAt(px) - HGT * (k > 0 ? Math.sqrt(k) : 0));
+      const ox = mine ? C.SPAWN_L_X : C.SPAWN_R_X;      // 쏜 쪽
+      const og = groundAt(ox);
+
+      // ── 1막 예고 ── 착탄 전에 "온다"는 것이 먼저 보여야 크기가 다르게 읽힌다
+      if (t < T_TIDE_TELE * 1.5) {
+        const tt = t / T_TIDE_TELE;
+        const a = tt < 1 ? tt : 1 - (tt - 1) / 0.5;
+        const aa = a < 0 ? 0 : (a > 1 ? 1 : a);
+        // 솟는 물기둥 — 기지 앞의 지면이 부푼다
+        ctx.fillStyle = RA[C.rampIndex(0.60 * aa)];
+        ctx.beginPath();
+        const ch = 104 * easeOutCubic(tt < 1 ? tt : 1);
+        ctx.moveTo(ox - dir * 58, og);
+        ctx.lineTo(ox - dir * 34, og - ch * 0.72);
+        ctx.lineTo(ox + dir * 6, og - ch);
+        ctx.lineTo(ox + dir * 46, og - ch * 0.55);
+        ctx.lineTo(ox + dir * 62, og);
+        ctx.closePath();
+        ctx.fill();
+        // 압력선 — 물보다 먼저 달려가는 결. 이것이 실제 예고다
+        ctx.strokeStyle = RB[C.rampIndex(0.66 * aa)];
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < 10; i++) {
+          const ph = tt * 1.45 + this.vDelay[i] * 0.85;
+          const p = ph - (ph | 0);
+          const x0 = ox + dir * p * (C.VIEW_W * 0.92);
+          const len = 34 + this.vOff[i] * 30;
+          const y = groundAt(x0) - 10 - i * 8;
+          ctx.moveTo(x0, y);
+          ctx.lineTo(x0 - dir * (len < 12 ? 12 : len), y);
+        }
+        ctx.stroke();
+        ctx.lineWidth = C.STROKE;
       }
-      ctx.lineTo(cx + R, C.VIEW_H);
-      ctx.closePath();
-      ctx.fill();
-      // 마루 위 흰 거품 — 물이라는 것을 이 선이 말한다
-      ctx.strokeStyle = RB[C.rampIndex(0.75 * (1 - t))];
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      for (let d = -R; d <= R; d += 14) {
-        const px = cx + d;
-        const k = d > 0 ? 1 - (d / R) * (d / R) * (d / R) : 1 - (d / R) * (d / R);
-        const py = groundAt(px) - HGT * (k > 0 ? Math.sqrt(k) : 0);
-        if (d === -R) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+
+      // ── 2막 발동 ── 물의 벽이 판을 훑는다
+      const H0 = T_TIDE_TELE * 0.62, H1 = T_TIDE_HIT + 0.05;
+      if (t >= H0 && t < H1) {
+        const ht = (t - H0) / (H1 - H0);
+        // 앞은 짧고 서고(벽면), 뒤는 길게 끈다(꼬리). 마루가 아니라 **벽**이어야 한다
+        const RF = 150, RBK = 330;
+        const span = C.VIEW_W + RF + RBK;
+        const cx = mine ? -RBK + span * ht : C.VIEW_W + RBK - span * ht;
+        const hgt = 138 + 104 * Math.sin(Math.PI * (ht > 1 ? 1 : ht));
+        const Q0 = -RBK, Q1 = RF, STEP = 14;
+        // 표면 높이는 tideSurf() 가 준다. **여기서 화살표 함수를 만들면 매 프레임 할당이다** —
+        // 클로저 하나가 60Hz × 두 진영이면 초당 120개의 쓰레기가 된다. 메서드로 뺀다.
+
+        // (a) 몸통 — **배경색으로 꽉 채운다.** 뒤에 선 유닛이 실제로 가려진다.
+        //     반투명한 붉은 덩어리는 앞을 지나가도 아무것도 안 가려서 무게가 없었다.
+        ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.94)];
+        ctx.beginPath();
+        ctx.moveTo(cx + Q0 * dir, C.VIEW_H);
+        for (let q = Q0; q <= Q1; q += STEP) { const px = cx + q * dir; ctx.lineTo(px, groundAt(px) + this.tideSurf(q, RF, RBK, hgt)); }
+        ctx.lineTo(cx + Q1 * dir, C.VIEW_H);
+        ctx.closePath();
+        ctx.fill();
+
+        // (b) 수면 아래 붉은 살 — 물이라는 것과 위험하다는 것을 같이 말한다
+        ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.46)];
+        ctx.beginPath();
+        for (let q = Q0; q <= Q1; q += STEP) { const px = cx + q * dir; ctx.lineTo(px, groundAt(px) + this.tideSurf(q, RF, RBK, hgt)); }
+        for (let q = Q1; q >= Q0; q -= STEP) { const px = cx + q * dir; ctx.lineTo(px, groundAt(px) + this.tideSurf(q, RF, RBK, hgt) + 52); }
+        ctx.closePath();
+        ctx.fill();
+
+        // (c) 물속의 결 — 세로 소용돌이. 통짜 덩어리가 아니라 흐르는 것으로 읽힌다
+        ctx.strokeStyle = RB[C.rampIndex(0.20)];
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < 12; i++) {
+          const q = Q0 + (Q1 - Q0) * ((i * 61 % 100) / 100);
+          const px = cx + q * dir;
+          const sy = groundAt(px) + this.tideSurf(q, RF, RBK, hgt);
+          ctx.moveTo(px, sy + 8 + this.vOff[i] * 10);
+          ctx.lineTo(px + dir * (10 + this.vOff[i] * 16), sy + 62 + this.vDelay[i] * 40);
+        }
+        ctx.stroke();
+
+        // (d) 마루의 흰 거품 — 벽의 윗날. 이 선이 굵어야 물이 무거워 보인다
+        ctx.strokeStyle = RB[C.rampIndex(0.92)];
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        for (let q = Q0; q <= Q1; q += STEP) {
+          const px = cx + q * dir;
+          const py = groundAt(px) + this.tideSurf(q, RF, RBK, hgt);
+          if (q === Q0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+        ctx.lineWidth = C.STROKE;
+
+        // (e) 말려 넘어가는 마루 끝 — 파도가 부서지는 그 모양
+        ctx.fillStyle = RB[C.rampIndex(0.80)];
+        ctx.beginPath();
+        for (let i = 0; i < 7; i++) {
+          const q = -18 - i * 24;
+          const px = cx + q * dir;
+          const py = groundAt(px) + this.tideSurf(q, RF, RBK, hgt);
+          const w = 22 - i * 2;
+          ctx.moveTo(px, py);
+          ctx.lineTo(px + dir * w, py - 4 - i * 1.5);
+          ctx.lineTo(px + dir * w * 0.5, py + 13 + i * 2);
+          ctx.closePath();
+        }
+        ctx.fill();
+
+        // (f) 물보라 — 벽 앞으로 튄다. 개수로 무게를 낸다
+        ctx.fillStyle = RB[C.rampIndex(0.70)];
+        ctx.beginPath();
+        for (let i = 0; i < 22; i++) {
+          const q = 10 + this.vDelay[i % VOLLEY_N] * 120;
+          const px = cx + q * dir;
+          const py = groundAt(px) - hgt * (0.35 + this.vOff[i % VOLLEY_N] * 0.55) - 10 - i * 3;
+          const sz = 5.5 - i * 0.14;
+          ctx.rect(px, py, sz, sz);
+        }
+        ctx.fill();
       }
-      ctx.stroke();
-      ctx.lineWidth = C.STROKE;
-      // 물보라 — 마루 꼭대기에서 **가는 쪽으로** 튄다
-      ctx.fillStyle = RB[C.rampIndex(0.65 * (1 - t))];
-      ctx.beginPath();
-      for (let i = 0; i < 14; i++) {
-        const d = this.vOff[i] * 80 * dir;
-        const px = cx + d + i * 3 * dir;
-        const k = 1 - (d / R) * (d / R);
-        const py = groundAt(px) - HGT * Math.sqrt(k > 0 ? k : 0) - 6 - (i * 6) - t * 30;
-        const sz = 5 - i * 0.2;
-        ctx.rect(px, py, sz, sz);
+
+      // ── 3막 여파 ── 물이 빠지며 지면을 훑는다 (남는 자국은 drawScars 가 맡는다)
+      if (t >= T_TIDE_HIT) {
+        const at = (t - T_TIDE_HIT) / (1 - T_TIDE_HIT);
+        const a = 1 - at;
+        ctx.fillStyle = RB[C.rampIndex(0.34 * a)];
+        ctx.beginPath();
+        for (let i = 0; i < 18; i++) {
+          const x = C.VIEW_W * ((i * 53 % 100) / 100);
+          const g = groundAt(x);
+          ctx.rect(x - dir * at * 90, g - 4 - this.vOff[i % VOLLEY_N] * 12 * a, 12 + this.cSz[i % CRATER_N] * 14, 2.5);
+        }
+        ctx.fill();
       }
-      ctx.fill();
     }
 
-    // 화살비 — **전선 부근**에만 쏟아진다. 어디에 떨어지는지가 보여야 한다
+    // ══ 화살비 ══ 예고: 표적이 지면에 그려지고 고리가 조여든다
+    //              발동: 화살이 꽂히고 지면이 튄다
+    //              여파: 먼지가 오르고 화살대가 박힌 채 남는다 (drawScars)
     f = this.fxSkill[base + C.SK_VOLLEY];
     if (f > 0) {
       const t = 1 - f / FX_VOLLEY_F;
       const bx = this.fxSkillX[base + C.SK_VOLLEY];
-      // 착탄 지대 — 지면에 그은 타원과 양 끝 기둥. 표적이 먼저 보여야 한다
-      ctx.strokeStyle = RA[C.rampIndex(0.85 * (1 - t))];
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.ellipse(bx, groundAt(bx) - 3, C.VOLLEY_RADIUS, 18, 0, 0, TAU);
-      for (let s = -1; s <= 1; s += 2) {
-        const ex = bx + s * C.VOLLEY_RADIUS;
-        ctx.moveTo(ex, groundAt(ex) - 30);
-        ctx.lineTo(ex, groundAt(ex));
+      const R = C.VOLLEY_RADIUS;
+      const bg = groundAt(bx);
+
+      // ── 1막 예고 ── **어디에 떨어지는지가 떨어지기 전에** 보여야 한다
+      if (t < T_VOL_TELE) {
+        const tt = t / T_VOL_TELE;
+        // 지면이 물든다 — 여기가 위험 구역이다
+        ctx.fillStyle = RA[C.rampIndex(0.22 * tt)];
+        ctx.beginPath();
+        ctx.moveTo(bx + R, bg - 2);
+        ctx.ellipse(bx, bg - 2, R, 20, 0, 0, TAU);
+        ctx.fill();
+        // 조여드는 고리 — 2.6배에서 1배로. 조여드는 동안 굵어진다
+        ctx.strokeStyle = RA[C.rampIndex(0.35 + 0.6 * tt)];
+        ctx.lineWidth = 1.5 + 3 * tt;
+        ctx.beginPath();
+        const k = 2.6 - 1.6 * easeOutCubic(tt);
+        ctx.moveTo(bx + R * k, bg - 2);
+        ctx.ellipse(bx, bg - 2, R * k, 20 * k, 0, 0, TAU);
+        ctx.stroke();
+        // 표적 기둥과 눈금 — 폭이 얼마인지가 읽힌다
+        ctx.strokeStyle = RA[C.rampIndex(0.85 * tt)];
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        for (let s = -1; s <= 1; s += 2) {
+          const ex = bx + s * R;
+          ctx.moveTo(ex, groundAt(ex) - 46 * tt);
+          ctx.lineTo(ex, groundAt(ex) + 6);
+          ctx.moveTo(ex - s * 14, groundAt(ex) - 46 * tt);
+          ctx.lineTo(ex, groundAt(ex) - 46 * tt);
+        }
+        ctx.stroke();
+        // 화면 위에서 들어오는 그림자 — 하늘에서 뭔가 오고 있다
+        ctx.strokeStyle = RB[C.rampIndex(0.30 * tt)];
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < VOLLEY_N; i++) {
+          const x = bx + this.vOff[i] * R * 1.1;
+          const y = -30 + tt * 90 + this.vDelay[i] * 40;
+          ctx.moveTo(x, y);
+          ctx.lineTo(x - 0.22 * dir * 26, y + 26);
+        }
+        ctx.stroke();
+        ctx.lineWidth = C.STROKE;
       }
-      ctx.stroke();
-      // 화살 — 위에서 아래로. 촉이 아래를 향한다
-      ctx.fillStyle = RB[C.rampIndex(0.95)];
-      ctx.beginPath();
-      for (let i = 0; i < VOLLEY_N; i++) {
-        const lt = (t - this.vDelay[i] * 0.45) / 0.5;
-        if (lt <= 0 || lt >= 1) continue;
-        const ax = bx + this.vOff[i] * C.VOLLEY_RADIUS;
-        const g = groundAt(ax);
-        const ay = g - 250 + 258 * lt * lt;
-        const tilt = 0.22 * dir;
-        this.addBar(ax, ay, tilt, 1, 18, 0, 1.2, 0.5);
-        this.addSpike(ax + tilt * 18, ay + 18, tilt, 1, 6, 2.2);
+
+      // ── 2막 발동 ── 화살이 꽂힌다
+      if (t >= T_VOL_TELE * 0.9) {
+        const at = (t - T_VOL_TELE * 0.9) / (T_VOL_HIT - T_VOL_TELE * 0.9);
+        // 남아 있는 표적 — 발동 중에도 구역이 계속 읽혀야 한다
+        ctx.strokeStyle = RA[C.rampIndex(0.55 * (1 - at))];
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(bx + R, bg - 2);
+        ctx.ellipse(bx, bg - 2, R, 20, 0, 0, TAU);
+        ctx.stroke();
+        ctx.lineWidth = C.STROKE;
+
+        // 화살 — 위에서 아래로. 촉이 아래를 향한다. 예전보다 굵고 길다
+        ctx.fillStyle = RB[C.rampIndex(0.95)];
+        ctx.beginPath();
+        for (let i = 0; i < VOLLEY_N; i++) {
+          const lt = (at - this.vDelay[i] * 0.42) / 0.5;
+          if (lt <= 0 || lt >= 1) continue;
+          const ax = bx + this.vOff[i] * R;
+          const g = groundAt(ax);
+          const ay = g - 300 + 308 * lt * lt;
+          const tilt = 0.22 * dir;
+          this.addBar(ax, ay, tilt, 1, 26, 0, 1.8, 0.7);
+          this.addSpike(ax + tilt * 26, ay + 26, tilt, 1, 9, 3.0);
+        }
+        ctx.fill();
+
+        // 착탄 — 흙이 튄다. 예전에는 작은 가시 셋이었다. 지금은 위로 뿜는다
+        ctx.fillStyle = RA[C.rampIndex(0.9)];
+        ctx.beginPath();
+        for (let i = 0; i < VOLLEY_N; i++) {
+          const lt = (at - this.vDelay[i] * 0.42) / 0.5;
+          if (lt < 1 || lt > 1.7) continue;
+          const p = (lt - 1) / 0.7;
+          const ax = bx + this.vOff[i] * R;
+          const g = groundAt(ax);
+          const h = 26 * (1 - p);
+          this.addSpike(ax, g, 0, -1, h + 10, 4.2 * (1 - p) + 1);
+          this.addSpike(ax, g, -0.72, -0.7, h * 0.7, 3 * (1 - p) + 0.8);
+          this.addSpike(ax, g, 0.72, -0.7, h * 0.7, 3 * (1 - p) + 0.8);
+        }
+        ctx.fill();
+
+        // 지면 충격파 — 구역 가운데에서 좌우로 퍼지는 밝은 선.
+        // 한 발 한 발이 아니라 **한 번의 사건**으로 묶어 주는 것이 이 선이다
+        if (at > 0.18 && at < 1.15) {
+          const st = (at - 0.18) / 0.97;
+          ctx.strokeStyle = RB[C.rampIndex(0.75 * (1 - st))];
+          ctx.lineWidth = 4 * (1 - st) + 1;
+          ctx.beginPath();
+          for (let s = -1; s <= 1; s += 2) {
+            const x0 = bx + s * R * 0.1, x1 = bx + s * R * (0.1 + 1.5 * easeOutCubic(st));
+            ctx.moveTo(x0, groundAt(x0) - 3);
+            ctx.lineTo(x1, groundAt(x1) - 3);
+          }
+          ctx.stroke();
+          ctx.lineWidth = C.STROKE;
+        }
       }
-      ctx.fill();
-      // 착탄 자국
-      ctx.fillStyle = RA[C.rampIndex(0.85 * (1 - t))];
-      ctx.beginPath();
-      for (let i = 0; i < VOLLEY_N; i++) {
-        const lt = (t - this.vDelay[i] * 0.45) / 0.5;
-        if (lt < 1 || lt > 1.8) continue;
-        const ax = bx + this.vOff[i] * C.VOLLEY_RADIUS;
-        const g = groundAt(ax);
-        this.addSpike(ax, g, 0, -1, 12, 3.4);
-        this.addSpike(ax, g, -0.7, -0.7, 8, 2.4);
-        this.addSpike(ax, g, 0.7, -0.7, 8, 2.4);
+
+      // ── 3막 여파 ── 먼지가 오른다
+      if (t >= T_VOL_HIT * 0.86) {
+        const dt = (t - T_VOL_HIT * 0.86) / (1 - T_VOL_HIT * 0.86);
+        ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.55 * (1 - dt))];
+        ctx.beginPath();
+        for (let i = 0; i < CRATER_N; i++) {
+          const x = bx + this.cOff[i] * R;
+          const g = groundAt(x);
+          const r = (10 + this.cSz[i] * 16) * (0.4 + dt);
+          this.addCircle(x + this.cOff[i] * 22 * dt, g - 10 - dt * (34 + this.cSz[i] * 30), r);
+        }
+        ctx.fill();
       }
-      ctx.fill();
-      ctx.lineWidth = C.STROKE;
     }
 
-    // 증원 — 내 기지 앞에서 솟는다. 금색 기둥과 퍼지는 고리
+    // ══ 증원 ══ 예고: 지면이 갈라지고 먼지가 인다
+    //            발동: 빛기둥이 솟고 기치가 선다
+    //            여파: 기둥이 가라앉고 집결 표식이 남는다 (drawScars)
     f = this.fxSkill[base + C.SK_RALLY];
     if (f > 0) {
       const t = 1 - f / FX_RALLY_F;
       const bx = this.fxSkillX[base + C.SK_RALLY];
       const g = groundAt(bx);
-      ctx.fillStyle = RA[C.rampIndex(0.9 * (1 - t))];
-      ctx.beginPath();
-      for (let i = 0; i < C.RALLY_COUNT; i++) {
-        const px = bx + (i - 1) * 24;
-        const hgt = 74 * easeOutCubic(Math.min(1, t * 2.2));
-        ctx.rect(px - 4, g - hgt, 8, hgt);
-        this.addSpike(px, g - hgt - 14, 0, -1, 16, 6);
-        // 기둥을 타고 오르는 알갱이
-        for (let k = 0; k < 3; k++) {
-          const py = g - ((t * 150 + k * 26 + i * 11) % 90);
-          ctx.rect(px - 8 + k * 6, py, 3, 3);
+      const SPREAD = 30;
+
+      // ── 1막 예고 ── 땅이 먼저 갈라진다. 뭔가 올라온다는 것을 지면이 말한다
+      if (t < T_RAL_TELE * 1.3) {
+        const tt = t / T_RAL_TELE;
+        const a = tt < 1 ? tt : 1 - (tt - 1) / 0.3;
+        const aa = a < 0 ? 0 : (a > 1 ? 1 : a);
+        ctx.strokeStyle = RA[C.rampIndex(0.9 * aa)];
+        ctx.lineWidth = 1.5 + 3 * aa;
+        ctx.beginPath();
+        for (let i = 0; i < C.RALLY_COUNT; i++) {
+          const px = bx + (i - 1) * SPREAD;
+          const w = 16 * easeOutCubic(tt < 1 ? tt : 1);
+          ctx.moveTo(px - w, groundAt(px - w));
+          ctx.lineTo(px - w * 0.3, groundAt(px) - 5);
+          ctx.lineTo(px + w * 0.3, groundAt(px) + 3);
+          ctx.lineTo(px + w, groundAt(px + w));
         }
+        ctx.stroke();
+        ctx.lineWidth = C.STROKE;
+        // 갈라진 틈에서 이는 먼지
+        ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.5 * aa)];
+        ctx.beginPath();
+        for (let i = 0; i < 10; i++) {
+          const px = bx + (this.vOff[i] * 1.6) * SPREAD;
+          this.addCircle(px, g - 6 - tt * 22 * this.cSz[i % CRATER_N], 5 + this.cSz[i % CRATER_N] * 9);
+        }
+        ctx.fill();
       }
-      ctx.fill();
-      ctx.strokeStyle = RA[C.rampIndex(0.85 * (1 - t))];
-      ctx.lineWidth = 2.5;
-      ctx.beginPath();
-      const r = 12 + 62 * easeOutCubic(t);
-      ctx.moveTo(bx + r, g);
-      ctx.ellipse(bx, g, r, r * 0.32, 0, 0, TAU);
-      ctx.stroke();
-      ctx.lineWidth = C.STROKE;
+
+      // ── 2막 발동 ── 빛기둥. 예전 74px 에서 122px 로, 그리고 기치가 달린다
+      if (t >= T_RAL_TELE * 0.72) {
+        const rt = (t - T_RAL_TELE * 0.72) / (T_RAL_HIT - T_RAL_TELE * 0.72);
+        const fade = rt > 1 ? 1 - (rt - 1) / (1 / (T_RAL_HIT - T_RAL_TELE * 0.72) - 1) : 1;
+        const fa = fade < 0 ? 0 : (fade > 1 ? 1 : fade);
+        const hgt = 122 * easeOutCubic(rt < 1 ? rt : 1);
+        ctx.fillStyle = RA[C.rampIndex(0.95 * fa)];
+        ctx.beginPath();
+        for (let i = 0; i < C.RALLY_COUNT; i++) {
+          const px = bx + (i - 1) * SPREAD;
+          const h = hgt * (i === 1 ? 1 : 0.84);
+          ctx.rect(px - 6, g - h, 12, h);
+          this.addSpike(px, g - h - 20, 0, -1, 22, 8);
+          // 기치 — 기둥 꼭대기에 걸린 깃발. 진영 방향으로 날린다
+          if (rt > 0.45) {
+            const fy = g - h + 12;
+            ctx.moveTo(px, fy);
+            ctx.lineTo(px + dir * 22, fy + 6);
+            ctx.lineTo(px, fy + 13);
+            ctx.closePath();
+          }
+          // 기둥을 타고 오르는 알갱이
+          for (let k = 0; k < 4; k++) {
+            const py = g - ((t * 190 + k * 24 + i * 13) % 130);
+            ctx.rect(px - 11 + k * 6, py, 3.5, 3.5);
+          }
+        }
+        ctx.fill();
+        // 기둥 심 — 안쪽이 더 밝으면 빛으로 읽힌다
+        ctx.fillStyle = RB[C.rampIndex(0.85 * fa)];
+        ctx.beginPath();
+        for (let i = 0; i < C.RALLY_COUNT; i++) {
+          const px = bx + (i - 1) * SPREAD;
+          const h = hgt * (i === 1 ? 1 : 0.84);
+          ctx.rect(px - 2, g - h + 6, 4, h - 6);
+        }
+        ctx.fill();
+        // 퍼지는 고리 둘 — 하나는 빠르게 크게, 하나는 늦게 따라온다
+        ctx.strokeStyle = RA[C.rampIndex(0.9 * fa)];
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        for (let k = 0; k < 2; k++) {
+          const p = rt - k * 0.3;
+          if (p <= 0) continue;
+          const r = 14 + 96 * easeOutCubic(p > 1 ? 1 : p);
+          ctx.moveTo(bx + r, g);
+          ctx.ellipse(bx, g, r, r * 0.30, 0, 0, TAU);
+        }
+        ctx.stroke();
+        ctx.lineWidth = C.STROKE;
+      }
+
+      // ── 3막 여파 ── 기둥이 가라앉으며 흙먼지가 주저앉는다
+      if (t >= T_RAL_HIT) {
+        const at = (t - T_RAL_HIT) / (1 - T_RAL_HIT);
+        ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.45 * (1 - at))];
+        ctx.beginPath();
+        for (let i = 0; i < 10; i++) {
+          const px = bx + this.vOff[i] * SPREAD * 2.4;
+          this.addCircle(px, g - 8 - at * 12, (6 + this.cSz[i % CRATER_N] * 12) * (0.6 + at * 0.8));
+        }
+        ctx.fill();
+      }
     }
   }
 
