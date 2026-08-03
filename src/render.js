@@ -18,8 +18,15 @@
 // 화면 규칙: **카메라는 움직이지 않는다.** 전장 전체가 한 화면에 있다.
 // 플래시게임의 핵심이 그거다 — 스크롤 없이 판 전체가 보인다.
 //
-// 색은 여섯 개뿐이다 (COL_BG GRID STRUCT PLAYER DANGER BONUS).
-// 새 색을 만들지 않는다. 대비가 더 필요하면 알파 램프로 번다.
+// 색은 이제 여섯이 아니다. config 가 넷을 더 줬고 각각 **계약이 있다**:
+//   U_COL[6]     병종. 아군·적군이 같은 색을 쓰고 진영은 명도가 가른다
+//   COL_THREAT   적의 예고와 적 스킬 **전용**. 이 색이 뜨면 뜻은 하나다 — 곧 맞는다
+//   ERA_TINT[5]  시대. 배경·지형·기지에만 얇게. 유닛 색을 덮지 않는다
+//   SKILL_COL[4] 내 스킬. 적 스킬은 COL_THREAT 이다
+// 새 색을 더 만들지 않는다. 대비가 더 필요하면 알파 램프로 번다.
+//
+// **루프 안에서 rgba 문자열을 만들지 않는다.** 미리 구운 램프(RAMP_*)를 쓰거나,
+// 불투명해야 하는 자리(겹치는 몸)는 아래 mixOver 로 모듈에 한 번만 굽는다.
 
 import * as C from './config.js';
 import { S, SIDE_L, SIDE_R, groundAt } from './game.js';
@@ -106,6 +113,7 @@ const LBL_BEATEN = '격파한 사령관';
 const LBL_FOE_ERA = '적 시대';
 const LBL_FOE_UP = '적이 진화했다';
 const LBL_CAMP_TIME = '원정 누적';
+const LBL_MYMIX = '내가 뽑은 구성';
 const LBL_SLASH = '/';
 const BR_TITLE = '차오른다';
 const BR_SUB = '금으로 병력을 사서 적 기지를 부순다. 버티면 물이 먼저 삼킨다.';
@@ -114,6 +122,17 @@ const BR_2 = '금이 차면 병력을 산다';
 const BR_3 = '물이 차오른다';
 const BR_RING = '상성이 돈다 — 하나로 전부를 이길 수 없다';
 const BR_ARROW = '화살표 쪽이 이긴다';
+// **거인과 투석기는 나가는 화살표가 없다.** 표(C.COUNTER)에 우위가 여섯뿐이고
+// 그 둘은 이기는 상대가 없다 — 버그가 아니라 설계다. 화면이 그 말을 해야
+// "이 둘은 상성이 안 뜬다"가 고장으로 안 읽힌다.
+const BR_NOEDGE = '이 둘은 이기는 상대가 없다 — 벽과 공성이 값어치다';
+// ── 범례 — 플레이어가 끝까지 몰랐던 것들 ──
+const BR_L1 = '진화 — 아래 글자는 다음 시대. 경험치가 차야 켜진다';
+const BR_L2 = '포탑 120금 — 기지 위 대포. 두 단계까지 올린다';
+const BR_L3 = ' — 우하단 원. 병력을 공짜로 세운다';
+const BR_L4 = '회색 칸 — 붉은 값은 금 부족, 아래 막대는 소환 대기';
+const BR_L5 = '위 가운데 막대가 전선. 삼각형이 오른쪽일수록 이긴다';
+const BR_L6 = '잠기면 어두워진다 — 아군은 채운 몸, 적군은 밝은 테';
 // 설명 화면의 확인 버튼. **이 화면은 저절로 닫히지 않는다** — 이 버튼을 눌러야
 // 시작한다. 예전에는 이 자리에 작은 글씨가 깜빡였고 9초 뒤 화면이 혼자 사라졌다.
 const BR_START = '전투 시작';
@@ -206,6 +225,20 @@ function applyLayout(portrait) {
 }
 const btnX = (i) => BTN_X0 + i * (BTN_W + BTN_GAP);
 
+// 버튼 한 칸의 색 — **화면의 유닛과 같은 색이어야 한다.**
+// 그래야 "이 버튼이 저 유닛"이 글자 없이 연결된다. 스킬 칸도 같은 규칙으로
+// 자기 연출 색을 쓴다 (해일 = 물빛, 화살비 = 호박). 진화·포탑은 금색 그대로다.
+const BTN_RAMP = (() => {
+  const a = new Array(C.BTN_COUNT);
+  for (let i = 0; i < C.BTN_COUNT; i++) a[i] = C.RAMP_BONUS;
+  for (let k = 0; k < C.UNIT_KINDS && k < C.BTN_COUNT; k++) a[k] = C.RAMP_UNIT[k];
+  if (C.RAMP_SKILL) {
+    a[C.B_TIDE] = C.RAMP_SKILL[C.SK_TIDE] || C.RAMP_BONUS;
+    a[C.B_VOLLEY] = C.RAMP_SKILL[C.SK_VOLLEY] || C.RAMP_BONUS;
+  }
+  return a;
+})();
+
 // 버튼 열 전체가 차지하는 상자 — 통째로 구워 두고 붙이기 위한 것
 const STRIP_X = BTN_X0 - 3;
 const STRIP_W = C.BTN_COUNT * (BTN_W + BTN_GAP) - BTN_GAP + 6;
@@ -230,7 +263,10 @@ const BUB_W_MAX = 400;
 //   「전투 시작」 버튼(350..610 × 380..432) 위에 겹쳤다. (2) 거인이 궁수 바로
 //   옆(158,350)이라 궁수→거인 화살표의 몸통이 24px 짜리 토막이 되어,
 //   플레이어 눈에는 "거인은 화살표가 하나도 없다" 로 보였다.
-const RING_CX = 286, RING_CY = 272, RING_R = 78;
+// 고리를 26px 올렸다 — 화면 아래에 **범례 세 줄**이 들어갈 자리를 냈다.
+// 플레이어가 끝까지 몰랐던 것들(진화 버튼의 회색, 포탑 120, 우하단 원의 이름,
+// 회색 버튼의 두 가지 이유, 상단 분절 막대, 물에 잠긴 진영)이 전부 거기 산다.
+const RING_CX = 286, RING_CY = 246, RING_R = 74;
 const RING_NX = new Float32Array(C.UNIT_KINDS);
 const RING_NY = new Float32Array(C.UNIT_KINDS);
 const RING_LDY = new Float32Array(C.UNIT_KINDS);   // 이름을 배지 위/아래 어디에 두는가
@@ -240,8 +276,8 @@ const RING_LDY = new Float32Array(C.UNIT_KINDS);   // 이름을 배지 위/아�
   put(C.U_SPEAR,  RING_CX + RING_R, RING_CY,           44);
   put(C.U_CAV,    RING_CX,          RING_CY + RING_R,  44);
   put(C.U_ARCHER, RING_CX - RING_R, RING_CY,           44);
-  put(C.U_GIANT,  96,  212, 44);                              // 궁수가 이긴다
-  put(C.U_CATA,   120, 350, 44);                              // 기병이 이긴다
+  put(C.U_GIANT,  92,  188, 44);                              // 궁수가 이긴다
+  put(C.U_CATA,   112, 320, -42);                             // 기병이 이긴다 (이름은 위로)
 })();
 
 // 그릴 화살표 목록 — **C.COUNTER 를 읽어서 만든다.** 손으로 쓴 목록은 표와
@@ -270,7 +306,12 @@ const CTR_N = (() => {
   }
   return n;
 })();
-const BRIEF_STEP = 40;                 // 화살표 하나가 나타나는 간격 (렌더 프레임)
+// 화살표 하나가 나타나는 간격 (렌더 프레임).
+// 40 이었다 — 여섯 개가 다 나오는 데 **4초**가 걸렸고, 그래서 이 화면을 3초쯤
+// 본 사람은 "화살표가 네 개뿐"이라고 읽었다 (아트 디렉터의 보고가 정확히 그것이다).
+// 표에는 우위가 여섯이고 그중 둘(궁수→거인 · 기병→투석기)이 마지막에 나온다.
+// 22 면 2.2초에 여섯이 다 선다.
+const BRIEF_STEP = 22;
 
 // ── 결과 카드 (렌더 프레임) ──
 // 판이 끝난 **직후 잠깐은 전장을 그대로 보여 준다.** 기지가 터지는 순간과
@@ -279,6 +320,10 @@ const BRIEF_STEP = 40;                 // 화살표 하나가 나타나는 간�
 // 배너 글자가 통계 위로 비쳐 "처치 / 프로파일" 이 안 읽혔다.
 const RESULT_HOLD_F = 16;              // 카드가 올라오기 전에 전장을 보여 주는 시간
 const RESULT_REVEAL_F = 22;            // 카드 안쪽(선·숫자)이 차오르는 시간
+
+// 결과 화면의 구성 패널 — 카드는 가운데 좁게 서 있고 **왼쪽이 통째로 비어 있다.**
+// 통계 아래에 붙였더니 「아무 키나」 줄과 겹쳤다 (통계 줄 수가 원정/단판에서 다르다).
+const RMIX_X = 40, RMIX_W = 240, RMIX_Y = 262;
 
 // 상단 HUD
 const HUD_HP_W = 92, HUD_HP_H = 13;
@@ -337,7 +382,87 @@ function mixOver(hex, bg, a) {
   const b = Math.round(h(hex, 5) * a + h(bg, 5) * (1 - a));
   return 'rgb(' + r + ',' + g + ',' + b + ')';
 }
-const MINE_DIM = mixOver(C.COL_PLAYER, C.COL_BG, 0.60);
+
+// ── 병종 색 — 규칙 1 을 화면에 옮긴 표 ────────────────────────
+// 플레이어: "x=200~580 구간이 실루엣 하나로 뭉쳐 몇 기인지도, 검사인지 창병인지
+// 궁수인지도 셀 수 없다." **상성 삼각형이 핵심인 게임에서 내가 뭘 뽑았는지
+// 화면으로 확인이 안 된다.** 실루엣은 하나를 떼어 놓고 볼 때만 읽힌다.
+//
+// 색으로 풀되 **진영을 색에 쓰지 않는다.** 양쪽이 같은 색을 쓰고,
+//   아군 = 밝은 채움 + 어두운 테        (색이 그대로 산다)
+//   적군 = 가라앉은 채움 + 밝은 심 테   (같은 색이 어둡게 깔리고 테가 종류를 말한다)
+// 진영은 명도와 잉크 방향이 가른다. 그건 실측으로 검증된 설계이고 안 건드린다.
+//
+// **알파 램프로는 안 된다.** 어두운 톤이 밝은 몸 위에 얹히면 다시 밝아져서
+// 정작 뭉치는 자리에서만 효과가 사라진다 (위 mixOver 주석의 그 실측). 그래서
+// 배경과 미리 섞어 **불투명한 색**을 굽는다. 인덱스는 (side*UNIT_KINDS + kind)*2 + tone.
+const UK = C.UNIT_KINDS;
+const U_BODY = new Array(2 * UK * 2);
+// 적군의 밝은 심 테 — 어두운 몸이 배경에 묻히지 않게 하고, **거기서 병종이 읽힌다**
+const U_RIM = new Array(UK);
+// 물속에서 되살릴 때 쓰는 중간 톤 (수면 아래는 어두운 막이 한 겹 더 얹힌다)
+const U_SUNK = new Array(UK);
+(() => {
+  for (let k = 0; k < UK; k++) {
+    const hex = C.U_COL[k];
+    U_BODY[(SIDE_L * UK + k) * 2] = hex;                          // 아군 밝은 톤
+    U_BODY[(SIDE_L * UK + k) * 2 + 1] = mixOver(hex, C.COL_BG, 0.60);
+    U_BODY[(SIDE_R * UK + k) * 2] = mixOver(hex, C.COL_BG, 0.40);  // 적군 — 가라앉는다
+    U_BODY[(SIDE_R * UK + k) * 2 + 1] = mixOver(hex, C.COL_BG, 0.27);
+    U_RIM[k] = mixOver(hex, C.COL_BG, 0.82);
+    U_SUNK[k] = mixOver(hex, C.COL_BG, 0.72);
+  }
+})();
+const uBody = (side, kind, tone) => U_BODY[(side * UK + kind) * 2 + tone];
+
+// ── 스킬 색 — 내 것만. 적 스킬은 COL_THREAT 이다 (규칙 2) ─────
+// [side][skill] 두 축을 하나로 굽는다. 루프에서 삼항을 두 번 타지 않는다.
+const SK_RAMP = new Array(2 * C.SKILL_COUNT);
+for (let i = 0; i < C.SKILL_COUNT; i++) {
+  SK_RAMP[SIDE_L * C.SKILL_COUNT + i] = C.RAMP_SKILL[i] || C.RAMP_BONUS;
+  SK_RAMP[SIDE_R * C.SKILL_COUNT + i] = C.RAMP_THREAT;
+}
+// 스킬 이름 — 시대마다 바뀐다. 적 쪽은 적 시대로 읽어야 한다
+function skName(game, i, mine) {
+  const row = C.SKILL_TIER_NAME && C.SKILL_TIER_NAME[i];
+  if (!row) return C.SKILL_NAME[i] || '';
+  const t = mine
+    ? (game.skillTier ? game.skillTier(i) : 0)
+    : (game.aiSkillTier ? game.aiSkillTier(i) : 0);
+  const ti = t < row.length ? (t < 0 ? 0 : t) : row.length - 1;
+  return row[ti] || C.SKILL_NAME[i];
+}
+
+// ── 시대 색조 — 화면의 공기 ───────────────────────────────────
+// 실루엣은 이미 시대마다 커진다(검사 684 → 2156 픽셀). 그건 확대해야 보이는 차이다.
+// **시대는 화면의 공기가 바뀌어야 한다** — 하늘·지층·기지에 얇게 깐다.
+// 유닛 색을 절대 덮지 않는다: 여기 쓰이는 것은 전부 유닛보다 뒤에 그려진다.
+const ERA_RAMP = (e) => C.RAMP_ERA[e < 0 ? 0 : (e >= C.ERA_COUNT ? C.ERA_COUNT - 1 : e)];
+// ERA_TINT 는 **깔개**라 일부러 어둡다 (돌 시대 #2A3F4A 는 배경과 거의 붙어 있다).
+// 그래서 앞에 세워야 하는 것 — 재무장 표식·시대 강조선 — 에는 그대로 못 쓴다.
+// 색상은 그대로 두고 **밝기만** 올린 짝을 굽는다. 새 색을 만드는 것이 아니다.
+const ERA_LIT = C.ERA_TINT.map((h) => {
+  const r = parseInt(h.slice(1, 3), 16), g = parseInt(h.slice(3, 5), 16), b = parseInt(h.slice(5, 7), 16);
+  const m = r > g ? (r > b ? r : b) : (g > b ? g : b);
+  const k = m > 0 ? 226 / m : 1;
+  const cl = (v) => { const x = Math.round(v * k); return (x > 255 ? 255 : x).toString(16).padStart(2, '0'); };
+  return '#' + cl(r) + cl(g) + cl(b);
+});
+const ERA_LIT_RAMP = ERA_LIT.map((h) => {
+  const r = parseInt(h.slice(1, 3), 16), g = parseInt(h.slice(3, 5), 16), b = parseInt(h.slice(5, 7), 16);
+  const out = new Array(C.RAMP_STEPS + 1);
+  for (let i = 0; i <= C.RAMP_STEPS; i++) out[i] = `rgba(${r},${g},${b},${(i / C.RAMP_STEPS).toFixed(3)})`;
+  return out;
+});
+const eraLit = (e) => ERA_LIT_RAMP[e < 0 ? 0 : (e >= C.ERA_COUNT ? C.ERA_COUNT - 1 : e)];
+
+// 적 예고 (EV.AI_CAST) — 이 화면이 통째로 비어 있었다.
+// 플레이어가 원정 6판을 전부 진 이유가 "적 스킬이 안 보여서"였다.
+const LBL_CAST = '적';
+const LBL_INBOUND = '온다';
+const LBL_REARM = '재무장';
+const CAST_Y = 92;                     // 예고 띠 — HUD 아래, 하늘 안
+const CAST_W = 250, CAST_H = 34;
 
 export class Renderer {
   constructor(canvas, ctx) {
@@ -362,6 +487,10 @@ export class Renderer {
     this.cmdScale = -1;
     this.briefCanvas = null;
     this.briefScale = -1;
+    // 결과 카드는 다 뜬 뒤로 안 바뀐다. 구워 두고 붙인다
+    this.resCardCanvas = null;
+    this.resCardOn = 0;
+    this.resCardScale = -1;
     this.stageSeed = 0;              // 전투마다 지형·능선이 달라진다
     this.bakedStage = -1;
     this.bakedDip = -1;
@@ -685,6 +814,9 @@ export class Renderer {
     this.fxSkill = new Int16Array(2 * C.SKILL_COUNT);
     this.fxSkillX = new Float32Array(2 * C.SKILL_COUNT);
     this.prevSkillCd = new Float32Array(2 * C.SKILL_COUNT);
+    // 발동한 **순간의 등급**을 붙잡는다. 연출이 도는 1초 사이에 시대가 오르면
+    // 등급이 바뀌고, 그러면 화면의 물기둥 수와 실제 피해 구역이 어긋난다.
+    this.fxTier = new Uint8Array(2 * C.SKILL_COUNT);
     this.fxTower = new Int16Array(2);
     this.fxTowerX = new Float32Array(2);
     this.prevTowerCd = new Float32Array(2);
@@ -893,8 +1025,13 @@ export class Renderer {
     // 흉터는 **지면에 남은 것**이라 유닛보다 먼저다. 유닛이 그 위를 밟고 지나가야 한다
     this.drawScars(game);
     this.drawUnits(game, alpha);
+    this.drawStun(game);
+    this.drawRearm(game);
     this.drawEraFx(game);
     this.drawSkillFx(game);
+    // 적 예고는 **스킬 연출보다 위**다. 지금 터지고 있는 것보다 다음에 올 것이
+    // 더 급한 정보다 — 플레이어가 원정 6판을 진 이유가 정확히 이것이었다.
+    this.drawAiCast(game);
     this.drawParticles(feel);
     this.drawRings(feel);
     this.drawWater(game, alpha);
@@ -927,6 +1064,7 @@ export class Renderer {
     const restart = game.tick < this.prevTick;
     if (restart) {                            // 새 판
       this.fxSkill.fill(0);
+      this.fxTier.fill(0);
       this.scarLife.fill(0);                  // 지난 판의 자국이 새 판에 남지 않는다
       this.fxTower.fill(0);
       this.fxEra.fill(0);
@@ -965,7 +1103,7 @@ export class Renderer {
       // 결과 카드는 **자기 시계로** 올라온다. 히트스톱에 물리지 않아야
       // "전장 잠깐 → 불투명한 카드" 순서가 언제나 같은 길이로 나온다.
       if (this.overFrames < 4096) this.overFrames++;
-    } else { this.overTime = -1; this.overFrames = 0; }
+    } else { this.overTime = -1; this.overFrames = 0; this.resCardOn = 0; }
 
     const front = game.frontlineX ? game.frontlineX() : HALF_W;
     for (let s = 0; s < 2; s++) {
@@ -977,6 +1115,10 @@ export class Renderer {
         const cd = cds ? (cds[i] || 0) : (s === SIDE_L && i === C.SK_TIDE ? (game.nukeCd || 0) : 0);
         if (cd > this.prevSkillCd[k] + 1) {
           this.fxSkill[k] = i === C.SK_TIDE ? FX_TIDE_F : (i === C.SK_VOLLEY ? FX_VOLLEY_F : FX_RALLY_F);
+          // 등급을 그 자리에서 굳힌다 — 화살비의 낙하 구역 수와 해일의 밀어냄이
+          // 여기서 갈린다. game 이 tier 를 안 주는 빌드에서는 조용히 0 이다
+          const tf = s === SIDE_L ? game.skillTier : game.aiSkillTier;
+          this.fxTier[k] = (typeof tf === 'function' ? (tf.call(game, i) | 0) : 0) & 3;
           // 증원은 **쏜 쪽 기지 앞**에서 솟는다. 화살비만 전선에 떨어진다.
           this.fxSkillX[k] = i === C.SK_VOLLEY ? front : (s === SIDE_L ? C.SPAWN_L_X : C.SPAWN_R_X);
           // 흉터도 같은 순간에 예약한다. 연출보다 오래 산다 — 그게 "판이 바뀌었다"는 증거다.
@@ -1021,7 +1163,7 @@ export class Renderer {
   paintBackground(game) {
     const era = game.era | 0;
     const e = era < 0 ? 0 : (era >= C.ERA_COUNT ? C.ERA_COUNT - 1 : era);
-    if (typeof document === 'undefined') { this.drawSky(e); this.drawTerrain(); return; }
+    if (typeof document === 'undefined') { this.drawSky(e); this.drawTerrain(e); return; }
     const s = this.viewScale > 2 ? 2 : (this.viewScale < 0.25 ? 0.25 : this.viewScale);
     if (this.bakedScale !== s || this.bakedEra !== e) {
       const w = Math.ceil(C.VIEW_W * s), h = Math.ceil(C.VIEW_H * s);
@@ -1037,7 +1179,7 @@ export class Renderer {
       octx.fillStyle = C.COL_BG;
       octx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
       this.drawSky(e);
-      this.drawTerrain();
+      this.drawTerrain(e);
       this.ctx = prev;
       this.bakedScale = s; this.bakedEra = e;
     }
@@ -1052,6 +1194,8 @@ export class Renderer {
   // 알파 램프로 같은 결과를 공짜로 얻을 수 있기 때문이다.
   drawSky(era) {
     const ctx = this.ctx;
+    const RE = ERA_RAMP(era);
+    const RL = eraLit(era);
     // 위가 어둡고 지평선이 밝다. 다만 **맨 위도 배경색보다는 확실히 밝아야** 한다 —
     // 그래야 순수 배경색으로 칠한 근경(처마)이 검은 덩어리로 읽힌다.
     const bh = C.GROUND_Y / SKY_BANDS;
@@ -1060,6 +1204,27 @@ export class Renderer {
       ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.32 + t * t * 0.46)];
       ctx.fillRect(0, bh * i, C.VIEW_W, bh + 1);
     }
+    // ── 시대의 공기 ── 사용자: "진화해도 이미지 바뀌는 것도 없다."
+    // 실루엣은 이미 시대마다 커지지만 그건 확대해야 보인다. **하늘부터 바뀐다.**
+    // 위로 갈수록 짙게 깔아 시대마다 다른 하늘색이 되게 한다.
+    // 배경은 한 번 굽는 그림이므로 이 스무 번의 채우기는 매 프레임 비용이 0 이다.
+    for (let i = 0; i < SKY_BANDS; i++) {
+      const t = i / (SKY_BANDS - 1);
+      ctx.fillStyle = RE[C.rampIndex(0.34 * (1 - t) * (1 - t) + 0.06)];
+      ctx.fillRect(0, bh * i, C.VIEW_W, bh + 1);
+    }
+    // 시대의 구름 — 위쪽의 빈 하늘을 메운다. 다섯 시대가 다른 결을 가진다
+    ctx.fillStyle = RL[C.rampIndex(0.06 + era * 0.012)];
+    ctx.beginPath();
+    for (let i = 0; i < 7; i++) {
+      const cx = 40 + this.rn(this.stageSeed + 90 + i * 7) * (C.VIEW_W - 80);
+      const cy = 26 + this.rn(this.stageSeed + 91 + i * 7) * 132;
+      const w = 70 + this.rn(this.stageSeed + 92 + i * 7) * 150;
+      const h = 8 + (i % 3) * 5 + era * 1.5;
+      ctx.moveTo(cx + w * 0.5, cy);
+      ctx.ellipse(cx, cy, w * 0.5, h, 0, 0, TAU);
+    }
+    ctx.fill();
 
     // 안개 낀 해 — 새 색이 아니라 금색의 아주 낮은 알파다.
     // 시대가 오를수록 밝아진다. 세계가 밝아지는 것이 곧 진보다.
@@ -1096,25 +1261,46 @@ export class Renderer {
       ctx.fill(this.skyLamp);
     }
 
-    // 건너편 둑 — 능선 발치와 지면 사이가 통짜 검정으로 남아 있었다.
-    // 가로 결 몇 줄이면 그게 절벽면으로 읽힌다
-    ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.09)];
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let i = 0; i < 5; i++) {
-      const yy = C.GROUND_Y - 10 - i * 15;
-      ctx.moveTo(0, yy + this.rn(i * 17) * 6);
-      ctx.lineTo(C.VIEW_W, yy - this.rn(i * 17 + 3) * 6);
+    // 건너편 둑 — **협곡의 모양이 여기서 한 번 더 보여야 한다.**
+    // 예전에는 곧은 가로선 다섯이었다. 전투마다 협곡 깊이가 다른데(STAGE_DIP,
+    // game.stageDip) 화면에서는 지면 한 줄만 그 사실을 알고 있었고, 그 위 300px 은
+    // 그 판이 어떤 지형인지 모르는 장식이었다. 이제 지면 곡선을 줄여 되풀이한다 —
+    // 깊은 협곡이면 이 층들도 같이 깊어진다.
+    for (let i = 0; i < 7; i++) {
+      const k = 0.78 - i * 0.10;                   // 위로 갈수록 얕아진다 (원근)
+      const off = 12 + i * 26;
+      ctx.strokeStyle = (i < 3 ? C.RAMP_STRUCT : RE)[C.rampIndex(0.13 - i * 0.012)];
+      ctx.lineWidth = i < 3 ? 1.4 : 1;
+      ctx.beginPath();
+      for (let x = 0; x <= C.VIEW_W; x += 24) {
+        const y = C.GROUND_Y - off + (groundAt(x) - C.GROUND_Y) * k + this.rn(i * 13 + x * 0.05) * 4;
+        if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
     }
-    ctx.stroke();
     ctx.lineWidth = C.STROKE;
+    // 층 사이의 그늘 — 선만 있으면 종이가 되고, 이 띠가 있어야 벽이 된다
+    ctx.fillStyle = RE[C.rampIndex(0.28)];
+    ctx.beginPath();
+    for (let x = 0; x <= C.VIEW_W; x += 24) {
+      ctx.lineTo(x, C.GROUND_Y - 12 + (groundAt(x) - C.GROUND_Y) * 0.78);
+    }
+    for (let x = C.VIEW_W; x >= 0; x -= 24) {
+      ctx.lineTo(x, C.GROUND_Y - 12 + (groundAt(x) - C.GROUND_Y) * 0.78 + 14);
+    }
+    ctx.closePath();
+    ctx.fill();
 
     // 지평선 안개 — 능선 발치를 흐려 원경과 근경을 분리한다
     for (let i = 0; i < 4; i++) {
       ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.20 - i * 0.045)];
       ctx.fillRect(0, C.GROUND_Y - 58 + i * 15, C.VIEW_W, 15);
     }
-
+    // 시대의 지평선 빛 — 안개 위에 얇게. 다섯 시대가 여기서 가장 크게 갈린다
+    for (let i = 0; i < 5; i++) {
+      ctx.fillStyle = RL[C.rampIndex(0.03 + i * 0.017)];
+      ctx.fillRect(0, C.GROUND_Y - 66 + i * 13, C.VIEW_W, 13);
+    }
   }
 
   // 비 — 물이 어디서 오는가. 수위가 오를수록 굵어진다.
@@ -1137,18 +1323,43 @@ export class Renderer {
       ctx.lineTo(x - len * 0.14, y + len);
     }
     ctx.stroke();
+
+    // ── 시대의 티끌 ── 하늘의 470px 이 죽은 장식이었다 (플레이어 보고:
+    // "위 470px은 장식용 산과 하늘"). 여기에 **시대마다 다른 것이 떠오른다** —
+    // 돌 시대의 재, 화약 시대의 불티, 기계 시대의 증기. 색만 바뀌는 게 아니라
+    // 시대가 오를수록 수와 속도가 는다. 한 경로에 모아 한 번만 칠한다.
+    const eI2 = eraIdx(game.era);
+    ctx.fillStyle = eraLit(eI2)[C.rampIndex(0.10 + eI2 * 0.045)];
+    ctx.beginPath();
+    const mn = 10 + eI2 * 4;
+    for (let i = 0; i < mn; i++) {
+      const sp = 26 + this.rn(i * 5 + 40) * (30 + eI2 * 26);
+      const span = C.GROUND_Y + 60;
+      const y = C.GROUND_Y - ((this.rn(i * 5 + 41) * span + t * sp) % span);
+      const x = this.rn(i * 5 + 43) * C.VIEW_W + Math.sin(t * 0.7 + i) * 16;
+      const sz = 1.6 + this.rn(i * 5 + 44) * (2 + eI2 * 0.8);
+      ctx.rect(x, y, sz, sz);
+    }
+    ctx.fill();
     ctx.lineWidth = C.STROKE;
   }
 
   // ── 근경 — 협곡 바닥 · 지층 · 벽 ────────────────────────────
-  drawTerrain() {
+  drawTerrain(era) {
     const ctx = this.ctx;
+    const RE = ERA_RAMP(era || 0);
+    const RL = eraLit(era || 0);
 
     ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.95)];
+    ctx.fill(this.floorFill);
+    // 시대의 땅 — 얇게 얹는다. **유닛보다 뒤에 있으므로 병종 색을 덮지 않는다**
+    ctx.fillStyle = RE[C.rampIndex(0.42)];
     ctx.fill(this.floorFill);
 
     // 지층 띠 — 물때처럼 쌓였다. 이 깊이가 있어야 물이 무섭다
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.5)];
+    ctx.fill(this.strataFill);
+    ctx.fillStyle = RE[C.rampIndex(0.30)];
     ctx.fill(this.strataFill);
     ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.10)];
     ctx.lineWidth = 1;
@@ -1162,11 +1373,15 @@ export class Renderer {
     // 잡석
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.55)];
     ctx.fill(this.rubble);
+    ctx.fillStyle = RL[C.rampIndex(0.16)];
+    ctx.fill(this.rubble);
 
     // 협곡 벽
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.75)];
     ctx.fill(this.cliffPath);
-    ctx.strokeStyle = C.RAMP_GRID[C.rampIndex(0.9)];
+    ctx.fillStyle = RE[C.rampIndex(0.34)];
+    ctx.fill(this.cliffPath);
+    ctx.strokeStyle = RL[C.rampIndex(0.22)];
     ctx.lineWidth = C.STROKE;
     ctx.stroke(this.cliffPath);
 
@@ -1277,6 +1492,22 @@ export class Renderer {
     // 석재 줄눈 — 어두운 색으로 한 번에
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.45)];
     ctx.fill(this.baseStone[side]);
+
+    // 시대의 성벽 — **기지도 시대를 입는다.** 아래쪽으로 갈수록 짙게 물들여
+    // 오래된 돌 위에 새 시대가 얹혔다는 결을 만든다. 유닛보다 뒤이므로 안전하다.
+    {
+      const eb = ((mine ? game.era : game.aiEra) | 0);
+      const REb = ERA_RAMP(eb);
+      // **얇게.** 0.40/0.22 로 깔아 봤더니 내 성이 회분홍이 되어 진영 대비가
+      // 죽었다 (기지의 밝기가 곧 진영이다). 색조는 남기고 무게만 뺀다.
+      ctx.fillStyle = REb[C.rampIndex(0.24)];
+      ctx.fillRect(x, y + h * 0.45, w, h * 0.55);
+      ctx.fillStyle = REb[C.rampIndex(0.12)];
+      ctx.fillRect(x, y, w, h * 0.45);
+      // 시대의 띠 한 줄 — 성벽 허리. 진화하면 이 선의 색이 바뀐다
+      ctx.fillStyle = eraLit(eb)[C.rampIndex(mine ? 0.55 : 0.34)];
+      ctx.fillRect(x + 4, y + h * 0.45 - 3, w - 8, 3);
+    }
 
     // 성문 — 아치 + 격자
     const gw = 34, gh = 50;
@@ -1629,23 +1860,26 @@ export class Renderer {
       const dir = s === SIDE_L ? 1 : -1;
       const mine = s === SIDE_L;
       const ramp = mine ? C.RAMP_PLAYER : C.RAMP_STRUCT;
-      // 같은 편끼리 갈리는 두 단계. **아군의 두 단계가 1.0 과 0.78 이었고
-      // 그건 알파가 다른 흰색 두 개다** — 겹치면 위의 것이 아래를 다시 밝혀
-      // 20기가 실루엣 하나가 된다. 아군의 어두운 톤만 불투명한 색으로 바꾼다.
-      const cHi = mine ? C.COL_PLAYER : C.RAMP_STRUCT[C.rampIndex(0.55)];
-      const cLo = mine ? MINE_DIM : C.RAMP_STRUCT[C.rampIndex(0.36)];
 
-      for (let tone = 0; tone < 2; tone++) {
-        ctx.fillStyle = tone ? cLo : cHi;
-        ctx.beginPath();
-        let any = 0;
-        for (let j = 0; j < n; j++) {
-          const i = list[j];
-          if (game.uSide[i] !== s || SIEGE[game.uKind[i]] || (i & 1) !== tone) continue;
-          this.addUnitFill(game, i, dir);
-          any = 1;
+      // 몸 — **병종 × 명암 두 단계**로 묶어 칠한다.
+      // 예전에는 명암 두 단계뿐이었고(전부 흰색/회청색), 그래서 스무 기가 겹치면
+      // 병종이 사라졌다. 이제 색이 병종을 말하고 두 단계는 **같은 병종끼리**를 가른다
+      // (인접한 유닛은 대개 인덱스가 인접하므로 i&1 이면 옆 사람과 갈린다.
+      //  x 로 위상을 만들면 걸을 때마다 명도가 깜빡인다 — 인덱스는 안 변한다).
+      // 색은 램프가 아니라 배경과 미리 섞은 **불투명한 색**이다. 알파로는 겹칠 때
+      // 아래가 다시 밝아져 정작 뭉치는 자리에서만 효과가 사라진다.
+      for (let k = 0; k < UK; k++) {
+        if (SIEGE[k]) continue;                 // 공성 병기는 맨 위에 따로 올린다
+        for (let tone = 0; tone < 2; tone++) {
+          let any = 0;
+          for (let j = 0; j < n; j++) {
+            const i = list[j];
+            if (game.uSide[i] !== s || game.uKind[i] !== k || (i & 1) !== tone) continue;
+            if (!any) { ctx.fillStyle = uBody(s, k, tone); ctx.beginPath(); any = 1; }
+            this.addUnitFill(game, i, dir);
+          }
+          if (any) ctx.fill();
         }
-        if (any) ctx.fill();
       }
 
       // 안쪽 디테일 — 방패 보스 · 면갑 · 안장 · 거인의 얼굴 그늘.
@@ -1661,44 +1895,55 @@ export class Renderer {
 
       // 윤곽 — 밀집했을 때 서로 겹쳐 한 덩어리로 보이는 것을 끊는다.
       // 전선에는 30기가 21px 간격으로 겹쳐 선다. 이 선이 약하면 반죽이 된다.
-      // 적군은 어두운 분리선 위에 **밝은 심**을 한 번 더 얹는다 — 어두운 몸이
-      // 배경에 묻히지 않게 하는 것도 이 선이 맡는다.
-      for (let pass = 0; pass < 2; pass++) {
-        if (pass === 1 && mine) break;
-        ctx.strokeStyle = pass === 0 ? C.COL_BG : C.COL_STRUCT;
-        // 아군 분리선을 2.6 → 3.1 로. 흰 몸 위의 어두운 금이 이것뿐이다
-        ctx.lineWidth = pass === 0 ? (mine ? 3.1 : 3.2) : 1.4;
-        ctx.beginPath();
-        for (let j = 0; j < n; j++) {
-          const i = list[j];
-          if (game.uSide[i] !== s || SIEGE[game.uKind[i]]) continue;
-          this.addUnitOutline(game, i, dir);
+      // 어두운 분리선은 진영·병종과 무관하므로 **한 번에** 긋는다.
+      ctx.strokeStyle = C.COL_BG;
+      ctx.lineWidth = mine ? 3.1 : 3.2;
+      ctx.beginPath();
+      for (let j = 0; j < n; j++) {
+        const i = list[j];
+        if (game.uSide[i] !== s || SIEGE[game.uKind[i]]) continue;
+        this.addUnitOutline(game, i, dir);
+      }
+      ctx.stroke();
+      // 적군만 **밝은 심**을 한 번 더 얹는다. 어두운 몸이 배경에 묻히지 않게 하는
+      // 것도 이 선이 맡고, **적의 병종은 여기서 읽힌다** — 몸은 가라앉아 있으므로.
+      if (!mine) {
+        ctx.lineWidth = 1.4;
+        for (let k = 0; k < UK; k++) {
+          if (SIEGE[k]) continue;
+          let any = 0;
+          for (let j = 0; j < n; j++) {
+            const i = list[j];
+            if (game.uSide[i] !== s || game.uKind[i] !== k) continue;
+            if (!any) { ctx.strokeStyle = U_RIM[k]; ctx.beginPath(); any = 1; }
+            this.addUnitOutline(game, i, dir);
+          }
+          if (any) ctx.stroke();
         }
-        ctx.stroke();
       }
 
       // 공성 병기 — 대열을 통과하는 유닛이라 남의 몸에 묻힌다.
       // 그래서 **몸 패스가 다 끝난 뒤 맨 위에 다시 올린다.**
       // 혼자 앞서 나가다 죽는 그림이 이 유닛의 성격이고, 그게 보여야 한다.
-      ctx.fillStyle = cHi;
-      ctx.beginPath();
-      let anyS = 0;
-      for (let j = 0; j < n; j++) {
-        const i = list[j];
-        if (game.uSide[i] !== s || !SIEGE[game.uKind[i]]) continue;
-        this.addUnitFill(game, i, dir);
-        anyS = 1;
-      }
-      if (anyS) {
+      for (let k = 0; k < UK; k++) {
+        if (!SIEGE[k]) continue;
+        let anyS = 0;
+        for (let j = 0; j < n; j++) {
+          const i = list[j];
+          if (game.uSide[i] !== s || game.uKind[i] !== k) continue;
+          if (!anyS) { ctx.fillStyle = uBody(s, k, 0); ctx.beginPath(); anyS = 1; }
+          this.addUnitFill(game, i, dir);
+        }
+        if (!anyS) continue;
         ctx.fill();
         for (let pass = 0; pass < 2; pass++) {
           if (pass === 1 && mine) break;
-          ctx.strokeStyle = pass === 0 ? C.COL_BG : C.COL_STRUCT;
+          ctx.strokeStyle = pass === 0 ? C.COL_BG : U_RIM[k];
           ctx.lineWidth = pass === 0 ? (mine ? 2.6 : 3.2) : 1.4;
           ctx.beginPath();
           for (let j = 0; j < n; j++) {
             const i = list[j];
-            if (game.uSide[i] !== s || !SIEGE[game.uKind[i]]) continue;
+            if (game.uSide[i] !== s || game.uKind[i] !== k) continue;
             this.addUnitOutline(game, i, dir);
           }
           ctx.stroke();
@@ -2289,10 +2534,14 @@ export class Renderer {
 
     for (let side = 0; side < 2; side++) {
       const mine = side === SIDE_L;
-      const RB = mine ? C.RAMP_PLAYER : C.RAMP_STRUCT;
-      const RA = mine ? C.RAMP_BONUS : C.RAMP_DANGER;
+      // 자국도 **누가 남겼는지**를 색으로 말한다. 스킬 연출과 같은 규칙이다 —
+      // 내 것은 SKILL_COL, 적 것은 COL_THREAT. 흰 심(RB)만 진영을 유지한다.
+      const RB = mine ? C.RAMP_PLAYER : C.RAMP_THREAT;
       const dir = mine ? 1 : -1;
       const base = side * C.SKILL_COUNT;
+      const RA = SK_RAMP[base + C.SK_TIDE];
+      const RV = SK_RAMP[base + C.SK_VOLLEY];
+      const RY = SK_RAMP[base + C.SK_RALLY];
 
       // 해일이 훑고 간 자리 — 젖은 땅. 물러난 물가 선이 쏜 쪽으로 천천히 끌려간다
       let L = this.scarLife[base + C.SK_TIDE];
@@ -2336,7 +2585,9 @@ export class Renderer {
       if (L > 0) {
         const a = L / SCAR_F;
         const bx = this.scarX[base + C.SK_VOLLEY];
-        const r = C.VOLLEY_RADIUS;
+        // 반경도 등급을 따른다 — 표적과 자국이 어긋나면 화면이 거짓말을 한다
+        const tr = this.fxTier[base + C.SK_VOLLEY];
+        const r = (C.VOLLEY_TIER_R && C.VOLLEY_TIER_R[tr]) || C.VOLLEY_RADIUS;
         // 구덩이 — 지면을 실제로 파낸다. 어두운 색 하나로 한 번에
         ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.78 * a)];
         ctx.beginPath();
@@ -2352,7 +2603,7 @@ export class Renderer {
         }
         ctx.fill();
         // 박힌 화살대 — 쏜 방향으로 기울어 있다. 누가 쐈는지가 각도로 남는다
-        ctx.fillStyle = RB[C.rampIndex(0.58 * a)];
+        ctx.fillStyle = RV[C.rampIndex(0.72 * a)];
         ctx.beginPath();
         for (let i = 0; i < CRATER_N; i++) {
           const x = bx + this.cOff[i] * r * 0.92;
@@ -2369,7 +2620,7 @@ export class Renderer {
         const a = L / SCAR_F;
         const bx = this.scarX[base + C.SK_RALLY];
         const g = groundAt(bx);
-        ctx.fillStyle = RA[C.rampIndex(0.62 * a)];
+        ctx.fillStyle = RY[C.rampIndex(0.62 * a)];
         ctx.beginPath();
         ctx.rect(bx - 1.5, g - 40, 3, 40);
         ctx.moveTo(bx, g - 38);
@@ -2378,7 +2629,7 @@ export class Renderer {
         ctx.closePath();
         for (let i = 0; i < 3; i++) ctx.rect(bx - 15 + i * 12, g - 2, 7, 2.5);
         ctx.fill();
-        ctx.strokeStyle = RA[C.rampIndex(0.34 * a)];
+        ctx.strokeStyle = RY[C.rampIndex(0.34 * a)];
         ctx.lineWidth = 1.6;
         ctx.beginPath();
         ctx.moveTo(bx + 34, g);
@@ -2392,10 +2643,14 @@ export class Renderer {
   drawSkillFxSide(game, side) {
     const ctx = this.ctx;
     const mine = side === SIDE_L;
-    // 내 것은 흰색 계열(COL_PLAYER), 적 것은 회청색 계열(COL_STRUCT).
-    // 유닛에 이미 쓰고 있는 바로 그 두 색이다 — 새 색을 만들지 않는다.
-    const RB = mine ? C.RAMP_PLAYER : C.RAMP_STRUCT;      // 본체
-    const RA = mine ? C.RAMP_BONUS : C.RAMP_DANGER;       // 강조 (금색 / 붉은색)
+    // **색이 스킬을 말하고, 진영은 색의 정체를 말한다.**
+    //   내 스킬  = SKILL_COL[해일 물빛 · 화살비 호박 · 증원 연둣빛]
+    //   적 스킬  = COL_THREAT 하나 (규칙 2 — 이 색이 뜨면 뜻은 "곧 맞는다" 뿐이다)
+    // 예전에는 양쪽이 흰색/회청색이었고 강조가 금색/붉은색이었다. 그래서
+    // 「해일」에 물이 없었고, 적 화살비가 배경 빗줄기와 같은 회색이었다.
+    const SC = SK_RAMP;
+    const RB = mine ? C.RAMP_PLAYER : C.RAMP_THREAT;      // 거품·마루 (물의 흰 살)
+    const RA = mine ? C.RAMP_BONUS : C.RAMP_THREAT;       // 강조
     const dir = mine ? 1 : -1;                            // 진행 방향
     const base = side * C.SKILL_COUNT;
 
@@ -2464,16 +2719,32 @@ export class Renderer {
         ctx.closePath();
         ctx.fill();
 
-        // (b) 수면 아래 붉은 살 — 물이라는 것과 위험하다는 것을 같이 말한다
-        ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.46)];
+        // (b) **물이다.** 플레이어가 정확히 짚었다 — "이름이 「해일」인데 물이 없습니다."
+        //     예전에는 붉은 띠 한 줄이었고 나머지는 배경색 덩어리였다. 물 한 방울이
+        //     없었으니 이름이 거짓말이었다. 이제 벽 전체가 물빛으로 찬다:
+        //     깊은 살(수면부터 바닥까지) 위에 밝은 표층(52px)을 얹는다.
+        //     내 것은 SKILL_COL[해일]의 물빛, 적 것은 COL_THREAT 이다.
+        const WT = SC[base + C.SK_TIDE];
+        // 거품은 **양쪽 다 흰색**이다. 물이라는 것은 거품이 말하고,
+        // 누구의 물인지는 몸 색(WT)이 말한다 — 그래야 적 해일도 '물'로 읽힌다.
+        const FOAM = C.RAMP_PLAYER;
+        ctx.fillStyle = WT[C.rampIndex(0.34)];
+        ctx.beginPath();
+        ctx.moveTo(cx + Q0 * dir, C.VIEW_H);
+        for (let q = Q0; q <= Q1; q += STEP) { const px = cx + q * dir; ctx.lineTo(px, groundAt(px) + this.tideSurf(q, RF, RBK, hgt)); }
+        ctx.lineTo(cx + Q1 * dir, C.VIEW_H);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = WT[C.rampIndex(0.62)];
         ctx.beginPath();
         for (let q = Q0; q <= Q1; q += STEP) { const px = cx + q * dir; ctx.lineTo(px, groundAt(px) + this.tideSurf(q, RF, RBK, hgt)); }
         for (let q = Q1; q >= Q0; q -= STEP) { const px = cx + q * dir; ctx.lineTo(px, groundAt(px) + this.tideSurf(q, RF, RBK, hgt) + 52); }
         ctx.closePath();
         ctx.fill();
 
-        // (c) 물속의 결 — 세로 소용돌이. 통짜 덩어리가 아니라 흐르는 것으로 읽힌다
-        ctx.strokeStyle = RB[C.rampIndex(0.20)];
+        // (c) 물속의 결 — 세로 소용돌이 + 가로로 끌리는 흐름선.
+        //     통짜 덩어리가 아니라 **흐르는 것**으로 읽혀야 물이 된다
+        ctx.strokeStyle = RB[C.rampIndex(0.26)];
         ctx.lineWidth = 2;
         ctx.beginPath();
         for (let i = 0; i < 12; i++) {
@@ -2483,10 +2754,19 @@ export class Renderer {
           ctx.moveTo(px, sy + 8 + this.vOff[i] * 10);
           ctx.lineTo(px + dir * (10 + this.vOff[i] * 16), sy + 62 + this.vDelay[i] * 40);
         }
+        // 가로 흐름 — 물이 어느 쪽으로 가는지가 이 선들로 읽힌다
+        for (let i = 0; i < 9; i++) {
+          const q = Q0 + (Q1 - Q0) * this.vDelay[i];
+          const px = cx + q * dir;
+          const sy = groundAt(px) + this.tideSurf(q, RF, RBK, hgt) + 14 + i * 7;
+          const ln = 40 + this.vOff[i] * 34;
+          ctx.moveTo(px, sy);
+          ctx.lineTo(px - dir * (ln < 16 ? 16 : ln), sy + 3);
+        }
         ctx.stroke();
 
         // (d) 마루의 흰 거품 — 벽의 윗날. 이 선이 굵어야 물이 무거워 보인다
-        ctx.strokeStyle = RB[C.rampIndex(0.92)];
+        ctx.strokeStyle = FOAM[C.rampIndex(0.92)];
         ctx.lineWidth = 5;
         ctx.beginPath();
         for (let q = Q0; q <= Q1; q += STEP) {
@@ -2498,7 +2778,7 @@ export class Renderer {
         ctx.lineWidth = C.STROKE;
 
         // (e) 말려 넘어가는 마루 끝 — 파도가 부서지는 그 모양
-        ctx.fillStyle = RB[C.rampIndex(0.80)];
+        ctx.fillStyle = FOAM[C.rampIndex(0.80)];
         ctx.beginPath();
         for (let i = 0; i < 7; i++) {
           const q = -18 - i * 24;
@@ -2513,7 +2793,7 @@ export class Renderer {
         ctx.fill();
 
         // (f) 물보라 — 벽 앞으로 튄다. 개수로 무게를 낸다
-        ctx.fillStyle = RB[C.rampIndex(0.70)];
+        ctx.fillStyle = FOAM[C.rampIndex(0.70)];
         ctx.beginPath();
         for (let i = 0; i < 22; i++) {
           const q = 10 + this.vDelay[i % VOLLEY_N] * 120;
@@ -2523,6 +2803,23 @@ export class Renderer {
           ctx.rect(px, py, sz, sz);
         }
         ctx.fill();
+
+        // (g) **밀어냄** — 2등급부터 적이 실제로 뒤로 간다 (C.TIDE_PUSH_PX).
+        //     시뮬이 하는 일을 화면이 안 그리면 "넉백이 안 보인다"가 된다.
+        //     벽 앞으로 뻗는 갈매기표의 길이가 곧 밀리는 거리다.
+        const tier = this.fxTier[base + C.SK_TIDE];
+        const push = (C.TIDE_PUSH_PX && C.TIDE_PUSH_PX[tier]) || 0;
+        if (push > 0) {
+          ctx.fillStyle = FOAM[C.rampIndex(0.92)];
+          ctx.beginPath();
+          for (let i = 0; i < 4; i++) {
+            const px = cx + (Q1 - 6) * dir;
+            const py = groundAt(px) - 18 - i * 22;
+            this.addBar(px, py, dir, 0, push, 0, 2.6, 2.6);
+            this.addSpike(px + dir * push, py, dir, 0, 12, 7);
+          }
+          ctx.fill();
+        }
       }
 
       // ── 3막 여파 ── 물이 빠지며 지면을 훑는다 (남는 자국은 drawScars 가 맡는다)
@@ -2546,48 +2843,67 @@ export class Renderer {
     f = this.fxSkill[base + C.SK_VOLLEY];
     if (f > 0) {
       const t = 1 - f / FX_VOLLEY_F;
-      const bx = this.fxSkillX[base + C.SK_VOLLEY];
-      const R = C.VOLLEY_RADIUS;
-      const bg = groundAt(bx);
+      const front = this.fxSkillX[base + C.SK_VOLLEY];
+      // **등급이 오르면 떨어지는 자리가 는다** — 전선 → 전선+상대 후방 → 셋.
+      // 화면이 한 군데만 그리면, 후방에서 사라지는 증원이 설명되지 않는다.
+      // 좌표는 volleyZoneX() 하나로만 읽는다 — game.doVolley 와 같은 출처다.
+      const tier = this.fxTier[base + C.SK_VOLLEY];
+      const R0 = (C.VOLLEY_TIER_R && C.VOLLEY_TIER_R[tier]) || C.VOLLEY_RADIUS;
+      const ZN = (C.VOLLEY_TIER_ZONES && C.VOLLEY_TIER_ZONES[tier]) || 1;
+      const VC = SC[base + C.SK_VOLLEY];               // 화살비의 색 (내 것 / 적 것)
 
       // ── 1막 예고 ── **어디에 떨어지는지가 떨어지기 전에** 보여야 한다
       if (t < T_VOL_TELE) {
         const tt = t / T_VOL_TELE;
+        const k = 2.6 - 1.6 * easeOutCubic(tt);
         // 지면이 물든다 — 여기가 위험 구역이다
-        ctx.fillStyle = RA[C.rampIndex(0.22 * tt)];
+        ctx.fillStyle = VC[C.rampIndex(0.24 * tt)];
         ctx.beginPath();
-        ctx.moveTo(bx + R, bg - 2);
-        ctx.ellipse(bx, bg - 2, R, 20, 0, 0, TAU);
+        for (let z = 0; z < ZN; z++) {
+          const bx = this.volleyZoneX(side, z, front), R = z === 0 ? R0 : R0 * 0.75;
+          const bg = groundAt(bx);
+          ctx.moveTo(bx + R, bg - 2);
+          ctx.ellipse(bx, bg - 2, R, 20, 0, 0, TAU);
+        }
         ctx.fill();
         // 조여드는 고리 — 2.6배에서 1배로. 조여드는 동안 굵어진다
-        ctx.strokeStyle = RA[C.rampIndex(0.35 + 0.6 * tt)];
+        ctx.strokeStyle = VC[C.rampIndex(0.40 + 0.6 * tt)];
         ctx.lineWidth = 1.5 + 3 * tt;
         ctx.beginPath();
-        const k = 2.6 - 1.6 * easeOutCubic(tt);
-        ctx.moveTo(bx + R * k, bg - 2);
-        ctx.ellipse(bx, bg - 2, R * k, 20 * k, 0, 0, TAU);
+        for (let z = 0; z < ZN; z++) {
+          const bx = this.volleyZoneX(side, z, front), R = z === 0 ? R0 : R0 * 0.75;
+          const bg = groundAt(bx);
+          ctx.moveTo(bx + R * k, bg - 2);
+          ctx.ellipse(bx, bg - 2, R * k, 20 * k, 0, 0, TAU);
+        }
         ctx.stroke();
         // 표적 기둥과 눈금 — 폭이 얼마인지가 읽힌다
-        ctx.strokeStyle = RA[C.rampIndex(0.85 * tt)];
+        ctx.strokeStyle = VC[C.rampIndex(0.9 * tt)];
         ctx.lineWidth = 2.5;
         ctx.beginPath();
-        for (let s = -1; s <= 1; s += 2) {
-          const ex = bx + s * R;
-          ctx.moveTo(ex, groundAt(ex) - 46 * tt);
-          ctx.lineTo(ex, groundAt(ex) + 6);
-          ctx.moveTo(ex - s * 14, groundAt(ex) - 46 * tt);
-          ctx.lineTo(ex, groundAt(ex) - 46 * tt);
+        for (let z = 0; z < ZN; z++) {
+          const bx = this.volleyZoneX(side, z, front), R = z === 0 ? R0 : R0 * 0.75;
+          for (let s = -1; s <= 1; s += 2) {
+            const ex = bx + s * R;
+            ctx.moveTo(ex, groundAt(ex) - 46 * tt);
+            ctx.lineTo(ex, groundAt(ex) + 6);
+            ctx.moveTo(ex - s * 14, groundAt(ex) - 46 * tt);
+            ctx.lineTo(ex, groundAt(ex) - 46 * tt);
+          }
         }
         ctx.stroke();
         // 화면 위에서 들어오는 그림자 — 하늘에서 뭔가 오고 있다
-        ctx.strokeStyle = RB[C.rampIndex(0.30 * tt)];
+        ctx.strokeStyle = RB[C.rampIndex(0.34 * tt)];
         ctx.lineWidth = 2;
         ctx.beginPath();
-        for (let i = 0; i < VOLLEY_N; i++) {
-          const x = bx + this.vOff[i] * R * 1.1;
-          const y = -30 + tt * 90 + this.vDelay[i] * 40;
-          ctx.moveTo(x, y);
-          ctx.lineTo(x - 0.22 * dir * 26, y + 26);
+        for (let z = 0; z < ZN; z++) {
+          const bx = this.volleyZoneX(side, z, front), R = z === 0 ? R0 : R0 * 0.75;
+          for (let i = z ? 1 : 0; i < VOLLEY_N; i += (z ? 2 : 1)) {
+            const x = bx + this.vOff[i] * R * 1.1;
+            const y = -30 + tt * 90 + this.vDelay[i] * 40;
+            ctx.moveTo(x, y);
+            ctx.lineTo(x - 0.22 * dir * 26, y + 26);
+          }
         }
         ctx.stroke();
         ctx.lineWidth = C.STROKE;
@@ -2597,42 +2913,52 @@ export class Renderer {
       if (t >= T_VOL_TELE * 0.9) {
         const at = (t - T_VOL_TELE * 0.9) / (T_VOL_HIT - T_VOL_TELE * 0.9);
         // 남아 있는 표적 — 발동 중에도 구역이 계속 읽혀야 한다
-        ctx.strokeStyle = RA[C.rampIndex(0.55 * (1 - at))];
+        ctx.strokeStyle = VC[C.rampIndex(0.6 * (1 - at))];
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(bx + R, bg - 2);
-        ctx.ellipse(bx, bg - 2, R, 20, 0, 0, TAU);
+        for (let z = 0; z < ZN; z++) {
+          const bx = this.volleyZoneX(side, z, front), R = z === 0 ? R0 : R0 * 0.75;
+          const bg = groundAt(bx);
+          ctx.moveTo(bx + R, bg - 2);
+          ctx.ellipse(bx, bg - 2, R, 20, 0, 0, TAU);
+        }
         ctx.stroke();
         ctx.lineWidth = C.STROKE;
 
         // 화살 — 위에서 아래로. 촉이 아래를 향한다. 예전보다 굵고 길다
         ctx.fillStyle = RB[C.rampIndex(0.95)];
         ctx.beginPath();
-        for (let i = 0; i < VOLLEY_N; i++) {
-          const lt = (at - this.vDelay[i] * 0.42) / 0.5;
-          if (lt <= 0 || lt >= 1) continue;
-          const ax = bx + this.vOff[i] * R;
-          const g = groundAt(ax);
-          const ay = g - 300 + 308 * lt * lt;
-          const tilt = 0.22 * dir;
-          this.addBar(ax, ay, tilt, 1, 26, 0, 1.8, 0.7);
-          this.addSpike(ax + tilt * 26, ay + 26, tilt, 1, 9, 3.0);
+        for (let z = 0; z < ZN; z++) {
+          const bx = this.volleyZoneX(side, z, front), R = z === 0 ? R0 : R0 * 0.75;
+          for (let i = z ? 1 : 0; i < VOLLEY_N; i += (z ? 2 : 1)) {
+            const lt = (at - this.vDelay[i] * 0.42) / 0.5;
+            if (lt <= 0 || lt >= 1) continue;
+            const ax = bx + this.vOff[i] * R;
+            const g = groundAt(ax);
+            const ay = g - 300 + 308 * lt * lt;
+            const tilt = 0.22 * dir;
+            this.addBar(ax, ay, tilt, 1, 26, 0, 1.8, 0.7);
+            this.addSpike(ax + tilt * 26, ay + 26, tilt, 1, 9, 3.0);
+          }
         }
         ctx.fill();
 
         // 착탄 — 흙이 튄다. 예전에는 작은 가시 셋이었다. 지금은 위로 뿜는다
-        ctx.fillStyle = RA[C.rampIndex(0.9)];
+        ctx.fillStyle = VC[C.rampIndex(0.92)];
         ctx.beginPath();
-        for (let i = 0; i < VOLLEY_N; i++) {
-          const lt = (at - this.vDelay[i] * 0.42) / 0.5;
-          if (lt < 1 || lt > 1.7) continue;
-          const p = (lt - 1) / 0.7;
-          const ax = bx + this.vOff[i] * R;
-          const g = groundAt(ax);
-          const h = 26 * (1 - p);
-          this.addSpike(ax, g, 0, -1, h + 10, 4.2 * (1 - p) + 1);
-          this.addSpike(ax, g, -0.72, -0.7, h * 0.7, 3 * (1 - p) + 0.8);
-          this.addSpike(ax, g, 0.72, -0.7, h * 0.7, 3 * (1 - p) + 0.8);
+        for (let z = 0; z < ZN; z++) {
+          const bx = this.volleyZoneX(side, z, front), R = z === 0 ? R0 : R0 * 0.75;
+          for (let i = z ? 1 : 0; i < VOLLEY_N; i += (z ? 2 : 1)) {
+            const lt = (at - this.vDelay[i] * 0.42) / 0.5;
+            if (lt < 1 || lt > 1.7) continue;
+            const p = (lt - 1) / 0.7;
+            const ax = bx + this.vOff[i] * R;
+            const g = groundAt(ax);
+            const h = 26 * (1 - p);
+            this.addSpike(ax, g, 0, -1, h + 10, 4.2 * (1 - p) + 1);
+            this.addSpike(ax, g, -0.72, -0.7, h * 0.7, 3 * (1 - p) + 0.8);
+            this.addSpike(ax, g, 0.72, -0.7, h * 0.7, 3 * (1 - p) + 0.8);
+          }
         }
         ctx.fill();
 
@@ -2643,10 +2969,13 @@ export class Renderer {
           ctx.strokeStyle = RB[C.rampIndex(0.75 * (1 - st))];
           ctx.lineWidth = 4 * (1 - st) + 1;
           ctx.beginPath();
-          for (let s = -1; s <= 1; s += 2) {
-            const x0 = bx + s * R * 0.1, x1 = bx + s * R * (0.1 + 1.5 * easeOutCubic(st));
-            ctx.moveTo(x0, groundAt(x0) - 3);
-            ctx.lineTo(x1, groundAt(x1) - 3);
+          for (let z = 0; z < ZN; z++) {
+            const bx = this.volleyZoneX(side, z, front), R = z === 0 ? R0 : R0 * 0.75;
+            for (let s = -1; s <= 1; s += 2) {
+              const x0 = bx + s * R * 0.1, x1 = bx + s * R * (0.1 + 1.5 * easeOutCubic(st));
+              ctx.moveTo(x0, groundAt(x0) - 3);
+              ctx.lineTo(x1, groundAt(x1) - 3);
+            }
           }
           ctx.stroke();
           ctx.lineWidth = C.STROKE;
@@ -2658,11 +2987,14 @@ export class Renderer {
         const dt = (t - T_VOL_HIT * 0.86) / (1 - T_VOL_HIT * 0.86);
         ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.55 * (1 - dt))];
         ctx.beginPath();
-        for (let i = 0; i < CRATER_N; i++) {
-          const x = bx + this.cOff[i] * R;
-          const g = groundAt(x);
-          const r = (10 + this.cSz[i] * 16) * (0.4 + dt);
-          this.addCircle(x + this.cOff[i] * 22 * dt, g - 10 - dt * (34 + this.cSz[i] * 30), r);
+        for (let z = 0; z < ZN; z++) {
+          const bx = this.volleyZoneX(side, z, front), R = z === 0 ? R0 : R0 * 0.75;
+          for (let i = 0; i < CRATER_N; i++) {
+            const x = bx + this.cOff[i] * R;
+            const g = groundAt(x);
+            const r = (10 + this.cSz[i] * 16) * (0.4 + dt);
+            this.addCircle(x + this.cOff[i] * 22 * dt, g - 10 - dt * (34 + this.cSz[i] * 30), r);
+          }
         }
         ctx.fill();
       }
@@ -2677,13 +3009,14 @@ export class Renderer {
       const bx = this.fxSkillX[base + C.SK_RALLY];
       const g = groundAt(bx);
       const SPREAD = 30;
+      const RY = SC[base + C.SK_RALLY];      // 증원의 색 (내 것 = 연둣빛 / 적 것 = 자홍)
 
       // ── 1막 예고 ── 땅이 먼저 갈라진다. 뭔가 올라온다는 것을 지면이 말한다
       if (t < T_RAL_TELE * 1.3) {
         const tt = t / T_RAL_TELE;
         const a = tt < 1 ? tt : 1 - (tt - 1) / 0.3;
         const aa = a < 0 ? 0 : (a > 1 ? 1 : a);
-        ctx.strokeStyle = RA[C.rampIndex(0.9 * aa)];
+        ctx.strokeStyle = RY[C.rampIndex(0.9 * aa)];
         ctx.lineWidth = 1.5 + 3 * aa;
         ctx.beginPath();
         for (let i = 0; i < C.RALLY_COUNT; i++) {
@@ -2712,7 +3045,7 @@ export class Renderer {
         const fade = rt > 1 ? 1 - (rt - 1) / (1 / (T_RAL_HIT - T_RAL_TELE * 0.72) - 1) : 1;
         const fa = fade < 0 ? 0 : (fade > 1 ? 1 : fade);
         const hgt = 122 * easeOutCubic(rt < 1 ? rt : 1);
-        ctx.fillStyle = RA[C.rampIndex(0.95 * fa)];
+        ctx.fillStyle = RY[C.rampIndex(0.95 * fa)];
         ctx.beginPath();
         for (let i = 0; i < C.RALLY_COUNT; i++) {
           const px = bx + (i - 1) * SPREAD;
@@ -2744,7 +3077,7 @@ export class Renderer {
         }
         ctx.fill();
         // 퍼지는 고리 둘 — 하나는 빠르게 크게, 하나는 늦게 따라온다
-        ctx.strokeStyle = RA[C.rampIndex(0.9 * fa)];
+        ctx.strokeStyle = RY[C.rampIndex(0.9 * fa)];
         ctx.lineWidth = 3;
         ctx.beginPath();
         for (let k = 0; k < 2; k++) {
@@ -2769,6 +3102,335 @@ export class Renderer {
         }
         ctx.fill();
       }
+    }
+  }
+
+  // 화살비의 낙하 구역 — game.doVolley 와 **같은 순서·같은 좌표**여야 한다.
+  //   0 전선 · 1 상대 후방 · 2 그 둘의 중간. 반경은 0 번만 R, 나머지는 0.75R.
+  // 여기가 어긋나면 화면이 거짓말을 한다 — 표적이 뜬 자리에 피해가 안 들어간다.
+  volleyZoneX(side, z, front) {
+    if (z === 0) return front;
+    const rear = side === SIDE_L ? C.SPAWN_R_X : C.SPAWN_L_X;
+    return z === 1 ? rear : (front + rear) * 0.5;
+  }
+
+  // ── 적의 예고 (EV.AI_CAST) ─────────────────────────────────
+  // **이 화면이 통째로 비어 있었다.** 적 스킬은 걸린 뒤 0.7~1초 뜸을 들이는데
+  // 그 창에 아무것도 안 그려서, 플레이어에게는 그냥 군대가 사라져 있었다.
+  // 여기서 말해야 하는 것은 셋이다 — **무엇이 · 어디에 · 언제.**
+  // 색은 COL_THREAT 하나만 쓴다 (규칙 2). 이 색이 뜨면 뜻은 하나여야 한다.
+  drawAiCast(game) {
+    const sk = (typeof game.aiCastSkill === 'number') ? (game.aiCastSkill | 0) : -1;
+    if (sk < 0 || sk >= C.SKILL_COUNT) return;
+    const ctx = this.ctx;
+    const total = (C.AI_CAST_MS && C.AI_CAST_MS[sk]) || 900;
+    const left = game.aiCastMs > 0 ? game.aiCastMs : 0;
+    let p = 1 - left / total;                 // 0 = 방금 걸렸다 · 1 = 지금 터진다
+    p = p < 0 ? 0 : (p > 1 ? 1 : p);
+    const R = C.RAMP_THREAT;
+    // 맥박은 시뮬 시간에서 나온다 — 결정론이고, **임박할수록 빨라진다**
+    const beat = 0.58 + 0.42 * Math.sin(game.simTime * (0.010 + 0.026 * p));
+    const tier = (typeof game.aiSkillTier === 'function') ? (game.aiSkillTier(sk) | 0) : 0;
+    const front = game.frontlineX ? game.frontlineX() : HALF_W;
+
+    if (sk === C.SK_VOLLEY) {
+      // ── 어디에 — **실제 피해 구역 위에** 표적을 놓는다 ──
+      const r0 = (C.VOLLEY_TIER_R && C.VOLLEY_TIER_R[tier]) || C.VOLLEY_RADIUS;
+      const zones = (C.VOLLEY_TIER_ZONES && C.VOLLEY_TIER_ZONES[tier]) || 1;
+      // 지면 얼룩 — 여기가 위험 구역이다
+      ctx.fillStyle = R[C.rampIndex(0.10 + 0.14 * beat)];
+      ctx.beginPath();
+      for (let z = 0; z < zones; z++) {
+        const cx = this.volleyZoneX(SIDE_R, z, front), r = z === 0 ? r0 : r0 * 0.75;
+        const g = groundAt(cx);
+        ctx.moveTo(cx + r, g - 2);
+        ctx.ellipse(cx, g - 2, r, 21, 0, 0, TAU);
+      }
+      ctx.fill();
+      // 조여드는 고리 — 남은 시간이 **크기**로 읽힌다
+      ctx.strokeStyle = R[C.rampIndex(0.45 + 0.5 * p)];
+      ctx.lineWidth = 1.6 + 3.4 * p;
+      ctx.beginPath();
+      for (let z = 0; z < zones; z++) {
+        const cx = this.volleyZoneX(SIDE_R, z, front), r = z === 0 ? r0 : r0 * 0.75;
+        const g = groundAt(cx);
+        const k = 2.5 - 1.5 * easeOutCubic(p);
+        ctx.moveTo(cx + r * k, g - 2);
+        ctx.ellipse(cx, g - 2, r * k, 21 * k, 0, 0, TAU);
+      }
+      ctx.stroke();
+      // 구역의 폭 — 기둥 둘. "여기부터 여기까지"가 못 박힌다
+      ctx.strokeStyle = R[C.rampIndex(0.55 + 0.4 * beat)];
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      for (let z = 0; z < zones; z++) {
+        const cx = this.volleyZoneX(SIDE_R, z, front), r = z === 0 ? r0 : r0 * 0.75;
+        for (let e = -1; e <= 1; e += 2) {
+          const ex = cx + e * r, eg = groundAt(ex);
+          ctx.moveTo(ex, eg + 6);
+          ctx.lineTo(ex, eg - 54);
+          ctx.moveTo(ex, eg - 54);
+          ctx.lineTo(ex - e * 15, eg - 54);
+        }
+      }
+      ctx.stroke();
+      ctx.lineWidth = C.STROKE;
+      // 하늘에서 내려오는 그림자 — **위에서 온다**는 것을 방향으로 말한다
+      ctx.fillStyle = R[C.rampIndex(0.30 + 0.4 * p)];
+      ctx.beginPath();
+      for (let z = 0; z < zones; z++) {
+        const cx = this.volleyZoneX(SIDE_R, z, front), r = z === 0 ? r0 : r0 * 0.75;
+        const nn = z === 0 ? 9 : 6;
+        for (let i = 0; i < nn; i++) {
+          const x = cx + this.vOff[(i * 3 + z * 7) % VOLLEY_N] * r * 0.92;
+          const y = 108 + ((p * 150 + i * 26) % 150);
+          this.addSpike(x, y, 0, 1, 13, 3.4);
+        }
+      }
+      ctx.fill();
+    } else if (sk === C.SK_TIDE) {
+      // ── 해일 — 적 기지에서 판 전체를 훑으러 온다 ──
+      const ox = C.SPAWN_R_X, og = groundAt(ox);
+      // 부풀어 오르는 벽 — 적 쪽에서 무언가가 선다
+      const wh = 30 + 74 * easeOutCubic(p);
+      ctx.fillStyle = R[C.rampIndex(0.16 + 0.22 * beat)];
+      ctx.beginPath();
+      ctx.moveTo(ox + 66, og);
+      ctx.lineTo(ox + 42, og - wh * 0.7);
+      ctx.lineTo(ox - 6, og - wh);
+      ctx.lineTo(ox - 52, og - wh * 0.55);
+      ctx.lineTo(ox - 70, og);
+      ctx.closePath();
+      ctx.fill();
+      // 지면을 따라 달려오는 압력선 — **판 전체가 맞는다**는 것을 폭으로 말한다
+      ctx.strokeStyle = R[C.rampIndex(0.22 + 0.30 * beat)];
+      ctx.lineWidth = 8;
+      ctx.beginPath();
+      ctx.moveTo(0, groundAt(0) - 5);
+      for (let x = 48; x <= C.VIEW_W; x += 48) ctx.lineTo(x, groundAt(x) - 5);
+      ctx.stroke();
+      ctx.lineWidth = C.STROKE;
+      // 왼쪽으로 달려가는 갈매기표 — 오는 방향이 곧 이 스킬의 정체다
+      ctx.fillStyle = R[C.rampIndex(0.55 + 0.35 * p)];
+      ctx.beginPath();
+      for (let i = 0; i < 12; i++) {
+        const ph = (p * 1.1 + i * 0.083) % 1;
+        const x = C.VIEW_W - ph * C.VIEW_W;
+        const y = groundAt(x) - 16 - (i % 4) * 15;
+        this.addSpike(x, y, -1, 0, 17, 8);
+      }
+      ctx.fill();
+      // 밀어냄 — 2등급부터 **전선이 실제로 뒤로 간다.** 길이가 곧 그 거리다
+      const push = (C.TIDE_PUSH_PX && C.TIDE_PUSH_PX[tier]) || 0;
+      if (push > 0) {
+        const fg = groundAt(front);
+        ctx.fillStyle = R[C.rampIndex(0.85)];
+        ctx.beginPath();
+        this.addBar(front, fg - 30, -1, 0, push, 0, 3, 3);
+        this.addSpike(front - push, fg - 30, -1, 0, 13, 8);
+        ctx.fill();
+      }
+      // 넘어뜨림 — 3등급. 넘어진 사람 표식 둘을 전선에 세운다
+      if ((C.TIDE_STUN_MS && C.TIDE_STUN_MS[tier]) > 0) {
+        ctx.strokeStyle = R[C.rampIndex(0.9)];
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        for (let i = 0; i < 2; i++) {
+          const x = front - 40 + i * 80, g = groundAt(x);
+          ctx.moveTo(x - 13, g - 7); ctx.lineTo(x + 13, g - 7);
+          ctx.moveTo(x + 9, g - 13); ctx.lineTo(x + 13, g - 7);
+          ctx.lineTo(x + 9, g - 1);
+        }
+        ctx.stroke();
+        ctx.lineWidth = C.STROKE;
+      }
+    } else if (sk === C.SK_RALLY) {
+      // ── 증원 — 적 기지 앞의 땅이 갈라진다 ──
+      const bx = C.SPAWN_R_X, g = groundAt(bx), SPREAD = 30;
+      ctx.strokeStyle = R[C.rampIndex(0.45 + 0.45 * beat)];
+      ctx.lineWidth = 2 + 3 * p;
+      ctx.beginPath();
+      for (let i = 0; i < C.RALLY_COUNT; i++) {
+        const px = bx + (i - 1) * SPREAD, w = 18 * easeOutCubic(p);
+        ctx.moveTo(px - w, groundAt(px - w));
+        ctx.lineTo(px, groundAt(px) - 6);
+        ctx.lineTo(px + w, groundAt(px + w));
+      }
+      ctx.stroke();
+      ctx.lineWidth = C.STROKE;
+      ctx.fillStyle = R[C.rampIndex(0.5 + 0.4 * p)];
+      ctx.beginPath();
+      for (let i = 0; i < C.RALLY_COUNT; i++) {
+        const px = bx + (i - 1) * SPREAD;
+        this.addSpike(px, g - 16 - 34 * p, 0, -1, 18, 8);
+      }
+      ctx.fill();
+    } else {
+      // ── 총진군 — 살아 있는 적 전부가 잠깐 빨라진다. 발밑에 고리를 깐다 ──
+      ctx.strokeStyle = R[C.rampIndex(0.4 + 0.5 * beat)];
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      let any = 0;
+      for (let j = 0; j < this.aliveN; j++) {
+        const i = this.list[j];
+        if (game.uSide[i] !== SIDE_R) continue;
+        const rr = 8 + this.sw[i] * 0.5 * (0.6 + 0.5 * p);
+        ctx.moveTo(this.sx[i] + rr, this.sgy[i] + 2);
+        ctx.ellipse(this.sx[i], this.sgy[i] + 2, rr, rr * 0.32, 0, 0, TAU);
+        any = 1;
+      }
+      if (any) ctx.stroke();
+      ctx.lineWidth = C.STROKE;
+    }
+
+    // ── 언제 — 하늘에 뜬 띠 하나. 이름과 남은 시간이 같이 읽힌다 ──
+    const bx0 = HALF_W - CAST_W * 0.5;
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.93)];
+    ctx.beginPath();
+    ctx.roundRect(bx0, CAST_Y, CAST_W, CAST_H, 6);
+    ctx.fill();
+    ctx.strokeStyle = R[C.rampIndex(0.5 + 0.5 * beat)];
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(bx0 + 1, CAST_Y + 1, CAST_W - 2, CAST_H - 2, 6);
+    ctx.stroke();
+    ctx.lineWidth = C.STROKE;
+    // 경고 세모 — 글자를 못 읽어도 이 모양은 읽힌다
+    ctx.fillStyle = R[C.rampIndex(0.55 + 0.45 * beat)];
+    ctx.beginPath();
+    ctx.moveTo(bx0 + 17, CAST_Y + 8);
+    ctx.lineTo(bx0 + 27, CAST_Y + 25);
+    ctx.lineTo(bx0 + 7, CAST_Y + 25);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(1)];
+    ctx.fillRect(bx0 + 16, CAST_Y + 13, 2, 6);
+    ctx.fillRect(bx0 + 16, CAST_Y + 21, 2, 2);
+    // 남은 시간 막대 — 줄어드는 것이 시계다
+    ctx.fillStyle = R[C.rampIndex(0.22)];
+    ctx.fillRect(bx0 + 6, CAST_Y + CAST_H - 6, CAST_W - 12, 3);
+    ctx.fillStyle = C.COL_THREAT;
+    ctx.fillRect(bx0 + 6, CAST_Y + CAST_H - 6, (CAST_W - 12) * (1 - p), 3);
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.font = FONT_TINY;
+    ctx.fillStyle = R[C.rampIndex(0.7)];
+    ctx.fillText(LBL_CAST, bx0 + 34, CAST_Y + 9);
+    ctx.font = FONT_MID;
+    ctx.fillStyle = C.COL_THREAT;
+    ctx.fillText(skName(game, sk, false), bx0 + 50, CAST_Y + 6);
+    ctx.textAlign = 'right';
+    ctx.font = FONT_TINY;
+    ctx.fillStyle = R[C.rampIndex(0.62)];
+    ctx.fillText(LBL_INBOUND, bx0 + CAST_W - 12, CAST_Y + 10);
+    ctx.textAlign = 'left';
+  }
+
+  // ── 재무장 — 진화 직후 1.25초, 병력이 굳는다 ────────────────
+  // config 가 이 구간을 만들어 뒀는데 **화면에서 아무도 안 읽고 있었다.**
+  // 그래서 진화는 "숫자가 커지는 것"으로 보였다. 여기서 대가가 보여야
+  // "언제 누를지"가 판단이 된다 — 전선이 맞붙은 순간에 올리면 그 자리에서 죽는다.
+  drawRearm(game) {
+    const ctx = this.ctx;
+    const full = C.ERA_REARM_MS > 0 ? C.ERA_REARM_MS : 1;
+    for (let s = 0; s < 2; s++) {
+      const ms = (s === SIDE_L ? game.rearmMs : game.aiRearmMs) || 0;
+      if (!(ms > 0)) continue;
+      const q = 1 - ms / full;                        // 0 → 1 로 차오른다
+      const era = (s === SIDE_L ? game.era : game.aiEra) | 0;
+      const RE = ERA_RAMP(era);                       // 깔개 — 유닛을 눌러 굳힌다
+      const RL = eraLit(era);                         // 앞에 서는 선 — 밝기만 올린 짝
+      // 유닛마다 **차오르는 상자.** 굳어 있다는 것과 언제 풀리는지가 같이 읽힌다
+      ctx.fillStyle = RE[C.rampIndex(0.72)];
+      ctx.beginPath();
+      let any = 0;
+      for (let j = 0; j < this.aliveN; j++) {
+        const i = this.list[j];
+        if (game.uSide[i] !== s) continue;
+        const w = this.sw[i] + 8, h = this.sh[i] + 8;
+        const x = this.sx[i] - w * 0.5, y = this.sgy[i] + 3 - h;
+        ctx.rect(x, y + h * (1 - q), w, h * q);
+        any = 1;
+      }
+      if (any) ctx.fill();
+      ctx.strokeStyle = RL[C.rampIndex(0.9)];
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      for (let j = 0; j < this.aliveN; j++) {
+        const i = this.list[j];
+        if (game.uSide[i] !== s) continue;
+        const w = this.sw[i] + 8, h = this.sh[i] + 8;
+        const x = this.sx[i] - w * 0.5, y = this.sgy[i] + 3 - h;
+        // 네 모서리만 — 통째로 두르면 유닛이 안 보인다
+        const c = 6;
+        ctx.moveTo(x, y + c); ctx.lineTo(x, y); ctx.lineTo(x + c, y);
+        ctx.moveTo(x + w - c, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + c);
+        ctx.moveTo(x + w, y + h - c); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w - c, y + h);
+        ctx.moveTo(x + c, y + h); ctx.lineTo(x, y + h); ctx.lineTo(x, y + h - c);
+      }
+      ctx.stroke();
+      ctx.lineWidth = C.STROKE;
+      // 한 마디 — **굳어 있는 병력 위**에 붙인다.
+      // 처음엔 기지 위에 뒀는데 오른쪽 것이 사령관 카드(706~896 × 8~124) 뒤로
+      // 들어갔다. 그리고 기지가 아니라 병력이 굳는 것이므로, 병력을 가리키는
+      // 편이 뜻도 맞다. 병력이 하나도 없으면 기지 위로 떨어진다.
+      let cx = s === SIDE_L ? C.BASE_L_X : C.BASE_R_X;
+      let cn = 0, csum = 0;
+      for (let j = 0; j < this.aliveN; j++) {
+        const i = this.list[j];
+        if (game.uSide[i] !== s) continue;
+        csum += this.sx[i]; cn++;
+      }
+      if (cn > 0) cx = csum / cn;
+      if (cx < 70) cx = 70; else if (cx > C.VIEW_W - 70) cx = C.VIEW_W - 70;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const ty = groundAt(cx) - 132;
+      ctx.font = FONT_SMALL;
+      ctx.fillStyle = RL[C.rampIndex(0.95)];
+      ctx.fillText(LBL_REARM, cx, ty);
+      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.9)];
+      ctx.font = FONT_TINY;
+      ctx.fillText(C.ERA_NAME[era < C.ERA_COUNT ? era : C.ERA_COUNT - 1], cx, ty + 16);
+      // 남은 시간 — 짧은 막대 하나. 언제 풀리는지가 숫자 없이 읽힌다
+      ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.9)];
+      ctx.fillRect(cx - 27, ty + 26, 54, 4);
+      ctx.fillStyle = RL[C.rampIndex(0.95)];
+      ctx.fillRect(cx - 27, ty + 26, 54 * q, 4);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+    }
+  }
+
+  // ── 넘어진 병력 — 범람(해일 3등급)이 실제로 하는 일 ─────────
+  // game.uStun 을 읽는다. 이게 없으면 "해일이 세다"가 숫자로만 존재한다.
+  // 색은 **누가 넘어뜨렸는가**로 정한다: 내 병력이 넘어졌으면 적이 한 것이므로
+  // COL_THREAT, 적 병력이 넘어졌으면 내 해일이므로 SKILL_COL[해일] 이다.
+  drawStun(game) {
+    if (!game.uStun) return;
+    const ctx = this.ctx;
+    for (let s = 0; s < 2; s++) {
+      const ramp = s === SIDE_L ? C.RAMP_THREAT : (C.RAMP_SKILL[C.SK_TIDE] || C.RAMP_PLAYER);
+      ctx.strokeStyle = ramp[C.rampIndex(0.85)];
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      let any = 0;
+      for (let j = 0; j < this.aliveN; j++) {
+        const i = this.list[j];
+        if (game.uSide[i] !== s || !game.uStun[i]) continue;
+        // 머리 위에서 도는 별 — 어디서나 통하는 "넘어졌다"의 기호
+        const cx = this.sx[i], cy = this.sgy[i] - this.sh[i] - 9;
+        const a = game.simTime * 0.008 + i;
+        for (let k = 0; k < 3; k++) {
+          const th = a + k * 2.094;
+          ctx.moveTo(cx + Math.cos(th) * 9 - 2.5, cy + Math.sin(th) * 3.5);
+          ctx.lineTo(cx + Math.cos(th) * 9 + 2.5, cy + Math.sin(th) * 3.5);
+        }
+        any = 1;
+      }
+      if (any) ctx.stroke();
+      ctx.lineWidth = C.STROKE;
     }
   }
 
@@ -2880,37 +3542,40 @@ export class Renderer {
       ctx.lineTo(C.VIEW_W, C.VIEW_H);
       ctx.closePath();
       ctx.clip();
+      // **병종 색도 물속에서 살아 있어야 한다.** 예전에는 아군을 흰색 한 겹으로,
+      // 적군을 회청색 테 한 겹으로 되살렸다 — 진영은 돌아왔지만 병종이 죽었다.
+      // 어차피 종류별로 나눠 그리는 값은 위 drawUnits 와 같은 구조다.
       for (let pi = 0; pi < 2; pi++) {
         const s = pi === 0 ? SIDE_R : SIDE_L;
         const dir = s === SIDE_L ? 1 : -1;
         const mine = s === SIDE_L;
-        if (mine) {                          // 아군 — 몸을 다시 밝힌다
-          ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.50)];
-          ctx.beginPath();
-          let anyF = 0;
-          for (let j = 0; j < n; j++) {
-            const i = list[j];
-            if (game.uSide[i] !== s || sgy[i] <= wy) continue;
-            this.addUnitFill(game, i, dir);
-            anyF = 1;
+        if (mine) {                          // 아군 — 몸을 다시 밝힌다 (병종 색으로)
+          for (let k = 0; k < UK; k++) {
+            let anyF = 0;
+            for (let j = 0; j < n; j++) {
+              const i = list[j];
+              if (game.uSide[i] !== s || game.uKind[i] !== k || sgy[i] <= wy) continue;
+              if (!anyF) { ctx.fillStyle = U_SUNK[k]; ctx.beginPath(); anyF = 1; }
+              this.addUnitFill(game, i, dir);
+            }
+            if (anyF) ctx.fill();
           }
-          if (anyF) ctx.fill();
+          continue;
         }
         // 적군은 밝은 테만 되살린다. **아군 쪽 분리선은 여기서 다시 긋지 않는다** —
         // 유닛 경로를 한 번 더 짓는 값이 비싸고(128기 잠긴 프레임에서 실측 +1.7ms),
         // 물속에서 갈려야 하는 것은 몇 기인가보다 **어느 편인가**다.
-        if (mine) continue;
-        ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.70)];
         ctx.lineWidth = 2.0;
-        ctx.beginPath();
-        let anyO = 0;
-        for (let j = 0; j < n; j++) {
-          const i = list[j];
-          if (game.uSide[i] !== s || sgy[i] <= wy) continue;
-          this.addUnitOutline(game, i, dir);
-          anyO = 1;
+        for (let k = 0; k < UK; k++) {
+          let anyO = 0;
+          for (let j = 0; j < n; j++) {
+            const i = list[j];
+            if (game.uSide[i] !== s || game.uKind[i] !== k || sgy[i] <= wy) continue;
+            if (!anyO) { ctx.strokeStyle = U_RIM[k]; ctx.beginPath(); anyO = 1; }
+            this.addUnitOutline(game, i, dir);
+          }
+          if (anyO) ctx.stroke();
         }
-        if (anyO) ctx.stroke();
       }
       ctx.restore();
       ctx.lineWidth = C.STROKE;
@@ -3212,17 +3877,15 @@ export class Renderer {
     // 지금 살아 있는 적 구성이다. 아이콘 줄은 카드에 구워져 있고 여기서는 막대만 칠한다.
     const mx = CMD_X + 10, mw = CMD_W - 20, cw = mw / C.UNIT_KINDS;
     const my = CMD_Y + 78, mh = 15;
-    ctx.fillStyle = C.COL_STRUCT;
-    ctx.beginPath();
-    let anyF = 0;
+    // **막대도 그 병종 색이다.** 전장에서 보라색 덩어리를 세고 여기서 보라색 막대를
+    // 보면 "거인이 늘었다"가 두 번 말할 필요 없이 이어진다. 여섯 칸뿐이라 값이 싸다
     for (let k = 0; k < C.UNIT_KINDS; k++) {
       const v = this.foeMix[k];
       if (v <= 0) continue;
       const f = v / this.foeMax;
-      ctx.rect(mx + cw * k + 2, my + mh * (1 - f), cw - 4, mh * f);
-      anyF = 1;
+      ctx.fillStyle = C.RAMP_UNIT[k][C.rampIndex(0.9)];
+      ctx.fillRect(mx + cw * k + 2, my + mh * (1 - f), cw - 4, mh * f);
     }
-    if (anyF) ctx.fill();
 
     // 적이 진화한 순간 — 카드가 밝게 뛴다. 내 진화의 금빛 배너와 겹치지 않는 신호다
     if (this.fxFoeEra > 0) {
@@ -3400,7 +4063,7 @@ export class Renderer {
     for (let k = 0; k < C.UNIT_KINDS; k++) ctx.rect(mx + cw * k + 2, CMD_Y + 78, cw - 4, 15);
     ctx.fill();
     for (let k = 0; k < C.UNIT_KINDS; k++) {
-      this.drawMixIcon(k, mx + cw * (k + 0.5), CMD_Y + 104, C.RAMP_STRUCT[C.rampIndex(0.8)]);
+      this.drawMixIcon(k, mx + cw * (k + 0.5), CMD_Y + 104, C.RAMP_UNIT[k][C.rampIndex(0.72)]);
     }
   }
 
@@ -3655,31 +4318,29 @@ export class Renderer {
     }
     ctx.lineWidth = C.STROKE;
 
-    // 3) 아이콘 — 채우는 것 넷 묶음, 선인 것 둘 묶음, 파낸 구멍 한 묶음
-    for (let g = 0; g < 4; g++) {
-      const acc = g & 1, on = g >> 1;
-      ctx.fillStyle = (acc ? C.RAMP_BONUS : C.RAMP_PLAYER)[C.rampIndex(on ? 0.95 : 0.30)];
+    // 2.5) 병종 띠 — 칸 왼쪽 모서리의 색 조각. **전장의 그 색 그대로다.**
+    //      테두리(살 수 있는가)는 건드리지 않는다 — 채널을 섞으면 둘 다 안 읽힌다.
+    for (let i = 0; i < C.BTN_COUNT; i++) {
+      ctx.fillStyle = BTN_RAMP[i][C.rampIndex(ok[i] ? 1 : 0.40)];
       ctx.beginPath();
-      let any = 0;
-      for (let i = 0; i < C.BTN_COUNT; i++) {
-        if ((i >= C.B_ERA) !== !!acc || (!!ok[i]) !== !!on) continue;
-        const x = btnX(i);
-        if (this.addBtnIconFill(i, x + LAY.iconDX, by + LAY.iconDY)) any = 1;
-      }
-      if (any) ctx.fill();
+      ctx.roundRect(btnX(i) + 1, by + 3, 4, bh - 6, 2);
+      ctx.fill();
+    }
+
+    // 3) 아이콘 — **칸마다 제 색이다.** 이 그림은 서명이 바뀔 때만 굽는 오프스크린
+    //    한 장이라 칸당 fill 한 번을 써도 매 프레임 비용이 0 이다.
+    for (let i = 0; i < C.BTN_COUNT; i++) {
+      const x = btnX(i);
+      ctx.fillStyle = BTN_RAMP[i][C.rampIndex(ok[i] ? 0.98 : 0.32)];
+      ctx.beginPath();
+      if (this.addBtnIconFill(i, x + LAY.iconDX, by + LAY.iconDY)) ctx.fill();
     }
     ctx.lineWidth = 2;
-    for (let g = 0; g < 4; g++) {
-      const acc = g & 1, on = g >> 1;
-      ctx.strokeStyle = (acc ? C.RAMP_BONUS : C.RAMP_PLAYER)[C.rampIndex(on ? 0.95 : 0.30)];
+    for (let i = 0; i < C.BTN_COUNT; i++) {
+      const x = btnX(i);
+      ctx.strokeStyle = BTN_RAMP[i][C.rampIndex(ok[i] ? 0.98 : 0.32)];
       ctx.beginPath();
-      let any = 0;
-      for (let i = 0; i < C.BTN_COUNT; i++) {
-        if ((i >= C.B_ERA) !== !!acc || (!!ok[i]) !== !!on) continue;
-        const x = btnX(i);
-        if (this.addBtnIconStroke(i, x + LAY.iconDX, by + LAY.iconDY)) any = 1;
-      }
-      if (any) ctx.stroke();
+      if (this.addBtnIconStroke(i, x + LAY.iconDX, by + LAY.iconDY)) ctx.stroke();
     }
     ctx.lineWidth = C.STROKE;
     ctx.fillStyle = C.COL_BG;                        // 방패 보스·바퀴 축 구멍
@@ -3715,9 +4376,9 @@ export class Renderer {
     ctx.textAlign = 'left';
     ctx.font = P ? FONT_BTN_P : FONT_BTN;
     for (let i = 0; i < C.BTN_COUNT; i++) {
-      const base = i >= C.B_ERA ? C.RAMP_BONUS : C.RAMP_PLAYER;
-      ctx.fillStyle = base[C.rampIndex(ok[i] ? 1 : 0.4)];
-      ctx.fillText(btnLabel(game, i), btnX(i) + 7, by + LAY.nameDY);
+      // 이름도 그 병종 색이다. 검사는 거의 흰색이라 기본은 무채색으로 남는다
+      ctx.fillStyle = BTN_RAMP[i][C.rampIndex(ok[i] ? 1 : 0.42)];
+      ctx.fillText(btnLabel(game, i), btnX(i) + 10, by + LAY.nameDY);
     }
 
     ctx.font = P ? FONT_SMALL_P : FONT_SMALL;
@@ -3731,17 +4392,17 @@ export class Renderer {
         this.drawLeft(cost[i], x + (P ? 24 : 20), ly, P ? 13 : 9);
       } else if (m === 1) {
         ctx.fillStyle = ok[i] ? C.COL_BONUS : C.RAMP_PLAYER[C.rampIndex(0.32)];
-        ctx.fillText(ok[i] ? READY : C.ERA_NAME[Math.min(C.ERA_COUNT - 1, game.era + 1)], x + 7, ly);
+        ctx.fillText(ok[i] ? READY : C.ERA_NAME[Math.min(C.ERA_COUNT - 1, game.era + 1)], x + 10, ly);
       } else if (m === 2) {
         ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.5)];
-        ctx.fillText(LABEL_MAX, x + 7, ly);
+        ctx.fillText(LABEL_MAX, x + 10, ly);
       } else if (m === 3) {
         ctx.fillStyle = C.COL_BONUS;
-        ctx.fillText(READY, x + 7, ly);
+        ctx.fillText(READY, x + 10, ly);
       } else {
         ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.34)];
-        const wsec = this.drawLeft(cost[i], x + 7, ly, P ? 13 : 9);
-        ctx.fillText(LABEL_S, x + 7 + wsec + 1, ly);
+        const wsec = this.drawLeft(cost[i], x + 10, ly, P ? 13 : 9);
+        ctx.fillText(LABEL_S, x + 10 + wsec + 1, ly);
       }
     }
 
@@ -3762,34 +4423,37 @@ export class Renderer {
     const raw = game.skillCd ? (game.skillCd[C.SK_RALLY] || 0) : 0;
     const cd = raw / C.SKILL_CD[C.SK_RALLY];
     const ok = raw <= 0;
+    // **증원도 제 색을 가진다.** 우하단 원만 금색으로 남으면 그 칸이
+    // 진화·포탑과 같은 것으로 읽힌다 — 스킬인데 스킬로 안 보였다.
+    const RY = (C.RAMP_SKILL && C.RAMP_SKILL[C.SK_RALLY]) || C.RAMP_BONUS;
 
     ctx.fillStyle = C.COL_BG;
     ctx.beginPath();
     ctx.arc(cx, cy, r + 3, 0, TAU);
     ctx.fill();
     if (ok) {
-      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.10)];
+      ctx.fillStyle = RY[C.rampIndex(0.10)];
       ctx.beginPath();
       ctx.arc(cx, cy, r, 0, TAU);
       ctx.fill();
     }
 
     if (cd > 0) {                       // 쿨다운 — 남은 만큼의 원호
-      ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(0.30)];
+      ctx.strokeStyle = RY[C.rampIndex(0.30)];
       ctx.lineWidth = 4;
       ctx.beginPath();
       ctx.arc(cx, cy, r - 2, -Math.PI * 0.5, -Math.PI * 0.5 + TAU * cd);
       ctx.stroke();
       ctx.lineWidth = C.STROKE;
     }
-    ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(ok ? 0.95 : 0.30)];
+    ctx.strokeStyle = RY[C.rampIndex(ok ? 0.95 : 0.30)];
     ctx.lineWidth = C.STROKE;
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, TAU);
     ctx.stroke();
 
     // 아이콘 — 작은 사람 셋이 위로 솟는다. "셋이 온다"가 그대로 보인다
-    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(ok ? 1 : 0.32)];
+    ctx.fillStyle = RY[C.rampIndex(ok ? 1 : 0.32)];
     ctx.beginPath();
     for (let i = 0; i < 3; i++) {
       const px = cx + (i - 1) * 9;
@@ -3806,7 +4470,7 @@ export class Renderer {
     // 바뀌므로(증원→원군→정예군) game 에게 묻는다 — 스킬 버튼과 같은 규칙이다.
     const name = (game && typeof game.skillName === 'function')
       ? (game.skillName(C.SK_RALLY) || RALLY_NAME) : RALLY_NAME;
-    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(ok ? 1 : 0.34)];
+    ctx.fillStyle = RY[C.rampIndex(ok ? 1 : 0.34)];
     ctx.fillText(name, cx, cy - r + 3);
     ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.42)];
     ctx.fillText(KEY_RALLY, cx, cy + r - 13);
@@ -4105,7 +4769,10 @@ export class Renderer {
     const ctx = this.ctx;
     if (typeof document !== 'undefined') {
       const s = this.viewScale > 2 ? 2 : (this.viewScale < 0.25 ? 0.25 : this.viewScale);
-      if (this.briefScale !== s + LAY.portrait * 100) {
+      // 증원의 이름은 시대마다 바뀐다 (증원→원군→정예군). 서명에 넣지 않으면
+      // 굽힌 그림에 옛 이름이 그대로 남는다 — 버튼에서 겪은 그 실패다
+      const sig = s + LAY.portrait * 100 + ((game && game.era | 0) + 1) * 1000;
+      if (this.briefScale !== sig) {
         const w = Math.ceil(C.VIEW_W * s), h = Math.ceil(C.VIEW_H * s);
         if (!this.briefCanvas) this.briefCanvas = document.createElement('canvas');
         if (this.briefCanvas.width !== w || this.briefCanvas.height !== h) {
@@ -4116,31 +4783,33 @@ export class Renderer {
         this.ctx = octx;
         octx.setTransform(s, 0, 0, s, 0, 0);
         octx.clearRect(0, 0, C.VIEW_W, C.VIEW_H);
-        this.paintBrief();
+        this.paintBrief(game);
         this.ctx = prev;
-        this.briefScale = s + LAY.portrait * 100;
+        this.briefScale = sig;
       }
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(this.briefCanvas, 0, 0, C.VIEW_W, C.VIEW_H);
       ctx.imageSmoothingEnabled = true;
     } else {
-      this.paintBrief();
+      this.paintBrief(game);
     }
     // 상성 화살표 — **하나씩 순서대로** 그린다. 한꺼번에 보여 주면 그림이
     // 아니라 무늬가 된다. game.stateTick 이 BRIEF 진입 후 프레임 수다.
     // 목록은 C.COUNTER 에서 뽑은 것이라 **표에 있는 우위가 전부** 나온다.
     const tick = (typeof game.stateTick === 'number') ? game.stateTick : 600;
-    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.9)];
-    ctx.beginPath();
+    // **화살표도 이기는 쪽의 병종 색이다.** 여섯 개가 다 금색이면 어느 화살표가
+    // 누구에게서 나갔는지 선을 눈으로 따라가야 알 수 있다. 색이 그걸 대신한다
     for (let k = 0; k < CTR_N; k++) {
       const f = (tick - k * BRIEF_STEP) / BRIEF_STEP;
       if (f <= 0) continue;
       const g = f > 1 ? 1 : easeOutCubic(f);
       const a = CTR_A[k], d = CTR_D[k];
       const x0 = RING_NX[a], y0 = RING_NY[a];
+      ctx.fillStyle = C.RAMP_UNIT[a][C.rampIndex(0.95)];
+      ctx.beginPath();
       this.addArrow(x0, y0, x0 + (RING_NX[d] - x0) * g, y0 + (RING_NY[d] - y0) * g, 30);
+      ctx.fill();
     }
-    ctx.fill();
 
     // 진짜 버튼 열을 설명 위에 다시 올린다 — 화살표가 가리키는 그 칸이다
     this.drawButtons(game);
@@ -4174,7 +4843,7 @@ export class Renderer {
     ctx.textBaseline = 'top';
   }
 
-  paintBrief() {
+  paintBrief(game) {
     const ctx = this.ctx;
     // 화면을 덮되 **버튼 열은 위에 다시 올린다** (drawBrief 가 그 일을 한다).
     // 설명이 가리키는 손가락 자리가 진짜 버튼이어야 배운다.
@@ -4210,18 +4879,35 @@ export class Renderer {
     ctx.fillText(BR_RING, 286, 118);
 
     const cx = RING_CX, cy = RING_CY;
-    // 화살표는 여기서 굽지 않는다 — **하나씩 순서대로 나타나야** 고리가 읽힌다
+    // 화살표는 여기서 굽지 않는다 — **하나씩 순서대로 나타나야** 고리가 읽힌다.
+    // 배지와 이름은 **전장에서 쓰는 그 색**이다. 설명 화면에서 익힌 색이
+    // 그대로 버튼이고 그대로 유닛이어야 한 번 배운 것이 두 번 쓰인다.
     for (let k = 0; k < C.UNIT_KINDS; k++) {
-      this.drawUnitBadge(k, RING_NX[k], RING_NY[k], 1, C.COL_PLAYER);
+      this.drawUnitBadge(k, RING_NX[k], RING_NY[k], 1, C.U_COL[k]);
     }
     ctx.font = FONT_SMALL;
-    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.85)];
     for (let k = 0; k < C.UNIT_KINDS; k++) {
+      ctx.fillStyle = C.RAMP_UNIT[k][C.rampIndex(0.95)];
       ctx.fillText(BTN_NAME[k], RING_NX[k], RING_NY[k] + RING_LDY[k]);
     }
     ctx.font = FONT_MICRO;
     ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.62)];
     ctx.fillText(BR_ARROW, cx, cy);
+    // 거인·투석기에는 나가는 화살표가 없다. **그 사실 자체를 적는다** —
+    // 안 적으면 화면이 덜 그려진 것으로 보인다 (실제로 그렇게 보고됐다).
+    ctx.textAlign = 'left';
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.42)];
+    ctx.fillText(BR_NOEDGE, 16, 352);
+    ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(0.22)];
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(RING_NX[C.U_GIANT], RING_NY[C.U_GIANT] + 30);
+    ctx.lineTo(10, 344);
+    ctx.moveTo(RING_NX[C.U_CATA], RING_NY[C.U_CATA] + 30);
+    ctx.lineTo(10, 344);
+    ctx.stroke();
+    ctx.lineWidth = C.STROKE;
+    ctx.textAlign = 'center';
 
     // ── 오른쪽 — 판이 어떻게 굴러가는가. 세 줄 ──
     const RX = 600;
@@ -4288,16 +4974,96 @@ export class Renderer {
       ctx.fillText(r === 0 ? BR_1 : (r === 1 ? BR_2 : BR_3), RX + 132, y);
     }
 
-    // ── 아래 — 진짜 버튼 열을 가리키는 화살표 ──
-    // 이 화면은 버튼을 덮지 않는다. 손가락이 갈 곳을 그림이 직접 가리킨다.
-    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.9)];
-    ctx.beginPath();
-    for (let k = 0; k < 2; k++) {
-      const ax = 214 + k * 532;
-      this.addBar(ax, H - 46, 0, 1, 22, 0, 2.6, 2.6);
-      this.addSpike(ax, H - 24, 0, 1, 15, 8.5);
+    // 아래를 가리키던 큰 화살표 둘은 뺐다 — **범례가 그 자리를 대신한다.**
+    // 화살표는 "저기를 봐라"까지만 말했고, 정작 그 칸이 왜 회색인지는 안 말했다.
+    // 그게 플레이어가 끝까지 몰랐던 것이었다.
+
+    // ── 범례 — **끝까지 몰랐던 것들** ──────────────────────────
+    // 실제 플레이 보고에서 나온 여섯 가지다. 가운데는 「전투 시작」 버튼이
+    // 차지하므로 좌우 두 덩이로 나눠 그 사이를 비워 둔다.
+    // 세로 좌표는 H(=버튼 열 바로 위)에서 되짚는다 — 폰 세로에서 버튼 열이
+    // 올라오면 범례도 같이 올라온다.
+    const LG0 = H - 74, LGH = 26;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = FONT_MICRO;
+    for (let col = 0; col < 2; col++) {
+      const lx = col ? 620 : 12;
+      for (let r = 0; r < 3; r++) {
+        const y = LG0 + r * LGH;
+        const n = col * 3 + r;
+        // 아이콘 — 글자를 못 읽어도 어느 칸 얘기인지는 모양이 말한다
+        const ix = lx + 12;
+        if (n === 0) {                                   // 진화
+          ctx.fillStyle = C.COL_BONUS;
+          ctx.beginPath();
+          ctx.moveTo(ix, y - 8); ctx.lineTo(ix + 7, y + 1); ctx.lineTo(ix + 3, y + 1);
+          ctx.lineTo(ix + 3, y + 8); ctx.lineTo(ix - 3, y + 8); ctx.lineTo(ix - 3, y + 1);
+          ctx.lineTo(ix - 7, y + 1); ctx.closePath();
+          ctx.fill();
+        } else if (n === 1) {                            // 포탑
+          ctx.fillStyle = C.COL_BONUS;
+          ctx.beginPath();
+          ctx.rect(ix - 8, y + 2, 16, 6);
+          ctx.rect(ix - 5, y - 4, 10, 6);
+          this.addBar(ix + 2, y - 2, 1, -0.2, 10, 1, 2, 1.5);
+          ctx.fill();
+        } else if (n === 2) {                            // 증원
+          ctx.fillStyle = (C.SKILL_COL && C.SKILL_COL[C.SK_RALLY]) || C.COL_BONUS;
+          ctx.beginPath();
+          for (let k = 0; k < 3; k++) {
+            const px = ix + (k - 1) * 6;
+            const hh = k === 1 ? 9 : 6;
+            ctx.rect(px - 1.6, y - hh * 0.5 + 2, 3.2, hh);
+            this.addCircle(px, y - hh * 0.5, 1.9);
+          }
+          ctx.fill();
+        } else if (n === 3) {                            // 회색 칸 두 종류
+          ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.9)];
+          ctx.beginPath(); ctx.roundRect(ix - 10, y - 7, 9, 14, 2); ctx.fill();
+          ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.30)];
+          ctx.beginPath(); ctx.roundRect(ix + 1, y - 7, 9, 14, 2); ctx.fill();
+          ctx.fillStyle = C.COL_PLAYER;
+          ctx.fillRect(ix + 2, y + 4, 4, 2);
+        } else if (n === 4) {                            // 전선 막대
+          ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.7)];
+          ctx.fillRect(ix - 11, y - 4, 22, 9);
+          ctx.fillStyle = C.COL_PLAYER;
+          ctx.fillRect(ix - 11, y - 4, 12, 9);
+          ctx.fillStyle = C.COL_BONUS;
+          ctx.beginPath();
+          ctx.moveTo(ix + 1, y - 5); ctx.lineTo(ix - 3, y - 10); ctx.lineTo(ix + 5, y - 10);
+          ctx.closePath(); ctx.fill();
+        } else {                                         // 물
+          ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.45)];
+          ctx.fillRect(ix - 11, y - 1, 22, 9);
+          ctx.fillStyle = C.COL_DANGER;
+          ctx.fillRect(ix - 11, y - 3, 22, 2.5);
+          ctx.fillStyle = C.COL_PLAYER;
+          ctx.fillRect(ix - 8, y - 10, 5, 8);
+          ctx.strokeStyle = C.COL_STRUCT;
+          ctx.lineWidth = 1.4;
+          ctx.strokeRect(ix + 3.5, y - 9.5, 5, 8);
+          ctx.lineWidth = C.STROKE;
+        }
+        // 글자
+        ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.62)];
+        if (n === 2) {
+          // 증원의 이름은 game 이 준다 (증원→원군→정예군). 문자열을 만들지 않고
+          // 이름과 설명을 **따로** 찍는다 — 이 파일의 규율이다
+          const nm = (game && typeof game.skillName === 'function')
+            ? (game.skillName(C.SK_RALLY) || RALLY_NAME) : RALLY_NAME;
+          ctx.fillStyle = (C.SKILL_COL && C.SKILL_COL[C.SK_RALLY]) || C.COL_BONUS;
+          ctx.fillText(nm, lx + 28, y);
+          ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.62)];
+          ctx.fillText(BR_L3, lx + 28 + nm.length * 11, y);
+        } else {
+          ctx.fillText(n === 0 ? BR_L1 : (n === 1 ? BR_L2
+            : (n === 3 ? BR_L4 : (n === 4 ? BR_L5 : BR_L6))), lx + 28, y);
+        }
+      }
     }
-    ctx.fill();
+
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
   }
@@ -4356,6 +5122,39 @@ export class Renderer {
     const t = t0 < 0 ? 0 : (t0 > 1 ? 1 : t0);
     const e = t >= 1 ? 1 : easeOutBack(t);
 
+    // ── 다 뜬 결과 카드는 **한 픽셀도 안 바뀐다.** 구워서 붙인다 ──
+    // 이 화면은 다음 입력이 올 때까지 무한히 떠 있고, 그동안 매 프레임
+    // 문양 다섯 · 통계 네 줄 · 스무 번 넘는 fillText 를 다시 그리고 있었다.
+    // 버튼 열·사령관 카드·설명 화면이 이미 쓰는 규칙을 여기에도 적용한다.
+    // 들어오는 연출(e < 1) 동안만 직접 그린다 — 그때는 매 프레임 달라지니까.
+    if (t >= 1 && typeof document !== 'undefined') {
+      const s = this.viewScale > 2 ? 2 : (this.viewScale < 0.25 ? 0.25 : this.viewScale);
+      if (!this.resCardOn || this.resCardScale !== s) {
+        const w = Math.ceil(C.VIEW_W * s), h = Math.ceil(C.VIEW_H * s);
+        if (!this.resCardCanvas) this.resCardCanvas = document.createElement('canvas');
+        if (this.resCardCanvas.width !== w || this.resCardCanvas.height !== h) {
+          this.resCardCanvas.width = w; this.resCardCanvas.height = h;
+        }
+        const octx = this.resCardCanvas.getContext('2d');
+        const prev = this.ctx;
+        this.ctx = octx;
+        octx.setTransform(s, 0, 0, s, 0, 0);
+        octx.clearRect(0, 0, C.VIEW_W, C.VIEW_H);
+        this.paintResult(game, director, 1);
+        this.ctx = prev;
+        this.resCardOn = 1; this.resCardScale = s;
+      }
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(this.resCardCanvas, 0, 0, C.VIEW_W, C.VIEW_H);
+      ctx.imageSmoothingEnabled = true;
+      return;
+    }
+    this.paintResult(game, director, e);
+  }
+
+  // 결과 카드 한 장. e 는 차오르는 정도(1 이면 다 떴다).
+  paintResult(game, director, e) {
+    const ctx = this.ctx;
     // 원정 상태 — 필드가 없으면 stage = -1 이고 예전 화면 그대로다
     const stage = (typeof game.stage === 'number') ? (game.stage | 0) : -1;
     const stageMax = (typeof game.stageMax === 'number') ? (game.stageMax | 0) : CAMP_LEN;
@@ -4492,6 +5291,18 @@ export class Renderer {
     row(LABEL_PROFILE, (x, yy) =>
       ctx.fillText(director ? director.profileName : PROFILE_UNKNOWN, x, yy));
 
+    // ── 내가 실제로 뽑은 구성 ──────────────────────────────────
+    // 상성 삼각형이 이 게임의 핵심인데, 판이 끝난 뒤에도 **내가 뭘 뽑았는지**를
+    // 볼 곳이 없었다. 색은 전장·버튼·설명 화면과 같다 — 한 번 배운 것이 여기서
+    // 다시 쓰인다. game 이 spawnedKind 를 안 주는 빌드에서는 조용히 건너뛴다.
+    //
+    // **구워서 붙인다.** 처음엔 매 프레임 그렸다가 계측기가 잡았다 —
+    // 막대 6 + 아이콘 6 + 숫자 6(fillText 12)이 결과 화면 내내 돌았고,
+    // 결과 화면은 다음 입력이 올 때까지 **얼마든지 오래** 떠 있다.
+    // 프레임 초과가 58 → 66 으로 올랐고 이 패널 하나가 그 8 전부였다.
+    // 그림은 판이 끝난 뒤로 안 바뀐다. 한 번 굽고 한 번 붙이는 것이 맞다.
+    this.paintResultMix(game.spawnedKind);
+
     ctx.textAlign = 'center';
     ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(goNext ? 0.95 : 0.6)];
     ctx.font = goNext ? FONT_MID : FONT_SMALL;
@@ -4499,6 +5310,38 @@ export class Renderer {
                  HALF_W, C.VIEW_H - C.UNIT * 4);
     ctx.textBaseline = 'top';
     ctx.textAlign = 'left';
+  }
+
+  paintResultMix(smk) {
+    const ctx = this.ctx;
+    if (!smk || smk.length < C.UNIT_KINDS) return;
+    let mx = 1;
+    for (let k = 0; k < C.UNIT_KINDS; k++) if (smk[k] > mx) mx = smk[k];
+    const MW = RMIX_W / C.UNIT_KINDS, MH = 30;
+    const my = RMIX_Y + 22;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = FONT_MICRO;
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.45)];
+    ctx.fillText(LBL_MYMIX, RMIX_X + RMIX_W * 0.5, RMIX_Y + 8);
+    // 홈은 색이 하나다 — 한 경로에 모은다
+    ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.16)];
+    ctx.beginPath();
+    for (let k = 0; k < C.UNIT_KINDS; k++) ctx.rect(RMIX_X + MW * (k + 0.5) - 11, my, 22, MH);
+    ctx.fill();
+    for (let k = 0; k < C.UNIT_KINDS; k++) {
+      const cx2 = RMIX_X + MW * (k + 0.5);
+      const fr = smk[k] / mx;
+      ctx.fillStyle = C.RAMP_UNIT[k][C.rampIndex(smk[k] > 0 ? 0.9 : 0.2)];
+      ctx.fillRect(cx2 - 11, my + MH * (1 - fr), 22, MH * fr);
+      this.drawMixIcon(k, cx2, my + MH + 11, C.RAMP_UNIT[k][C.rampIndex(smk[k] > 0 ? 0.95 : 0.3)]);
+      if (smk[k] > 0) {
+        ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.8)];
+        this.drawNumber(smk[k], cx2, my + MH + 24, 7);
+      }
+    }
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
   }
 
   // ── 디렉터 뷰 — 디버그 오버레이가 아니라 제품 기능이다 ───────
@@ -4607,8 +5450,8 @@ export class Renderer {
       ctx.fillStyle = ramp[C.rampIndex(frac > 0 ? 0.45 + frac * 0.55 : 0.2)];
       const bh = BH * (frac > 1 ? 1 : frac);
       ctx.fillRect(cx - CW * 0.30, top + BH - bh, CW * 0.60, bh);
-      // 유닛 아이콘 — 작게. 글자를 안 쓴다
-      this.drawMixIcon(k, cx, top + BH + 9, ramp[C.rampIndex(frac > 0.02 ? 0.95 : 0.35)]);
+      // 유닛 아이콘 — 작게. 글자를 안 쓰고 **병종 색으로** 말한다
+      this.drawMixIcon(k, cx, top + BH + 9, C.RAMP_UNIT[k][C.rampIndex(frac > 0.02 ? 0.95 : 0.3)]);
     }
     ctx.textAlign = 'left';
   }
