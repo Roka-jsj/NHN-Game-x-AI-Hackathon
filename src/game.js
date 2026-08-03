@@ -163,6 +163,12 @@ export class Game {
     this.uStun = new Uint8Array(N);
     // 행군 중인가 (렌더용. 시뮬은 매 프레임 다시 판단한다)
     this.uMarch = new Uint8Array(N);
+    // 시대 능력 — 자가수리(기계) 전용 타이머. 마지막으로 맞은 뒤 지난 ms.
+    // uHitFlash(렌더용, 4프레임 만에 사라진다)는 3초짜리 판정에 못 쓴다 —
+    // 그래서 전용 배열을 하나 더 둔다. damage() 가 맞을 때마다 0으로 되돌리고
+    // stepUnits() 가 매 프레임 늘린다. 시대와 무관하게 항상 잰다(승격 전에
+    // 이미 3초를 채웠으면 승격 즉시 회복이 시작된다 — 그게 승격의 값어치다).
+    this.uIdleMs = new Float32Array(N);
 
     // 화살 풀 — 연출 전용. 판정은 쏘는 순간 끝나 있다.
     const A = C.ARROW_MAX;
@@ -417,6 +423,12 @@ export class Game {
     this.goldPeak = 0;
     this.goldSum = 0;
     this.goldSamples = 0;
+    // 시대 능력 발동 횟수 — QA·밸런스 스윕이 "실제로 켜지는가"를 숫자로 볼 수
+    // 있게 하는 계측이다(다른 통계와 같은 자리, 같은 이유로 여기 둔다).
+    this.abilityUnionHits = 0;       // 연합 — 공격에 +30%가 실제로 붙은 횟수
+    this.abilityBraceHits = 0;       // 버팀 — 받는 피해가 실제로 줄어든 횟수
+    this.abilityShatterHits = 0;     // 작렬 — 관통이 두 번째 대상을 실제로 때린 횟수
+    this.abilitySelfRepairHp = 0;    // 자가수리 — 실제로 회복된 체력 총합
 
     // **특성은 지우지 않는다.** 원정에서 유지되는 것이 traits 와 towerLv 다.
     // 다만 기지 체력을 늘리는 특성은 새 기지에 다시 얹어야 한다 —
@@ -496,14 +508,43 @@ export class Game {
     if (side === SIDE_L && this.has('thick')) v *= 1.25;
     return v;
   }
-  statDmg(kind, era, side) {
+  // idx — 공격을 한 유닛의 풀 인덱스. **시대 능력(연합) 판정에만 쓴다** — 스킬·
+  // 물·포탑처럼 "공격자가 없는" 피해는 안 넘기면 -1 이라 연합이 조용히 꺼진다.
+  // 시그니처를 여기서만 늘린 이유: 시대 배수·특성이 이미 이 한 곳에서만 곱해지고
+  // 있으니(493행) 연합도 같은 자리에 모아야 흩어지지 않는다. 호출부(stepUnits)는
+  // 이미 공격자 인덱스 i 를 알고 있어 넘기기만 하면 된다.
+  statDmg(kind, era, side, idx = -1) {
     let v = C.U_DMG[kind] * C.ERA_DMG_MUL[era];
     if (side === SIDE_L && this.has('sharp')) v *= 1.2;
     // '중장' — 무거운 둘만. 값비싼 유닛을 고른 판에만 값어치가 있는 특성이다.
     // 1.35 였다. 그 값에서 siege 원형(거인+투석기 도배)이 원정을 완주했다 —
     // 이 빌드 전에는 8원형 전부 완주 0 이었다. 완주는 최대 1 까지가 계약이다.
     if (side === SIDE_L && this.has('heavy') && (kind === C.U_GIANT || kind === C.U_CATA)) v *= 1.22;
+    // 시대 능력 — 연합(청동). era 는 이 공격을 한 유닛의 **현재** 시대다(uEra[i]가
+    // 그대로 들어온다) — 능력은 배수와 달리 누적되지 않으므로 정확히 청동일 때만.
+    // 같은 종류만 모으면 hasEraUnion 이 절대 true 를 안 준다 — 도배 봇은 이 보너스를
+    // 구조적으로 못 받는다(아래 hasEraUnion 참조).
+    if (era === C.ERA_BRONZE && idx >= 0 && this.hasEraUnion(idx)) {
+      v *= (1 + C.ERA_UNION_DMG_MUL);
+      this.abilityUnionHits++;
+    }
     return v;
+  }
+
+  // 연합 판정 — idx 근처(UNIT_GAP × ERA_UNION_RANGE_GAP_MUL)에 나와 다른 종류의
+  // 살아있는 아군이 있는가. **공격이 성립하는 순간에만 불린다**(statDmg 호출부가
+  // 이미 쿨다운 게이트 뒤에 있다) — 매 프레임 전체 유닛을 도는 것과는 다르다.
+  // C.UNIT_MAX(128) 선형 순회는 이 파일의 기존 패턴(해일·상성 루프 등)과 같다.
+  hasEraUnion(idx) {
+    const side = this.uSide[idx], kind = this.uKind[idx], x = this.uX[idx];
+    const range = C.UNIT_GAP * C.ERA_UNION_RANGE_GAP_MUL;
+    for (let j = 0; j < C.UNIT_MAX; j++) {
+      if (j === idx || !this.uAlive[j] || this.uSide[j] !== side) continue;
+      if (this.uKind[j] === kind) continue;
+      const dx = this.uX[j] - x;
+      if (dx >= -range && dx <= range) return true;
+    }
+    return false;
   }
   statSpeed(kind, side) {
     let v = C.U_SPEED[kind];
@@ -923,6 +964,7 @@ export class Game {
     this.uAttack[idx] = 0;
     this.uStun[idx] = 0;
     this.uMarch[idx] = 0;
+    this.uIdleMs[idx] = 0;    // 풀 슬롯 재사용 — 이전 점유자의 자가수리 타이머를 물려받지 않는다
 
     if (side === SIDE_L) { this.aliveL++; this.spawned++; this.spawnedKind[kind]++; }
     else this.aliveR++;
@@ -1398,6 +1440,17 @@ export class Game {
       if (this.uAttack[i] > 0) this.uAttack[i]--;
       if (this.uCd[i] > 0) this.uCd[i] -= C.SIM_DT;
 
+      // 시대 능력 — 자가수리(기계). 타이머는 시대와 무관하게 항상 늘어난다
+      // (damage() 가 맞을 때마다 0으로 되돌린다). 회복 효과만 기계 시대에 켠다.
+      // 경직·전투 중에도 그대로 잰다 — "안 맞았다"가 조건이지 "쉬었다"가 아니다.
+      this.uIdleMs[i] += C.SIM_DT;
+      if (this.uEra[i] === C.ERA_MACHINE && this.uIdleMs[i] >= C.ERA_SELFREPAIR_IDLE_MS
+          && this.uHp[i] < this.uHpMax[i]) {
+        const heal = this.uHpMax[i] * C.ERA_SELFREPAIR_HEAL_PS * dt;
+        this.uHp[i] = this.uHp[i] + heal < this.uHpMax[i] ? this.uHp[i] + heal : this.uHpMax[i];
+        this.abilitySelfRepairHp += heal;
+      }
+
       const side = this.uSide[i];
       const kind = this.uKind[i];
       const dir = side === SIDE_L ? 1 : -1;
@@ -1445,7 +1498,19 @@ export class Game {
             this.uCd[i] = this.statCooldown(kind, side);
             this.uAttack[i] = 8;
             // 상성은 여기서 곱해진다. damage() 안 한 곳에서만.
-            this.damage(target, this.statDmg(kind, this.uEra[i], side), side, kind);
+            // idx(=i) 를 넘긴다 — 연합(청동) 판정이 여기서 statDmg 안으로 접힌다.
+            const dmg = this.statDmg(kind, this.uEra[i], side, i);
+            this.damage(target, dmg, side, kind);
+            // 시대 능력 — 작렬(화약). 대상 뒤의 다음 적 유닛에게도 관통 피해가
+            // 들어간다. **판정은 지금 이 순간 끝난다** — 화살(ARROW)은 연출 전용이라
+            // (config.js 참조) 두 번째 타격도 화살이 도착할 때까지 기다리지 않는다.
+            if (this.uEra[i] === C.ERA_GUNPOWDER) {
+              const behind = this.findBehind(target, side, dir);
+              if (behind >= 0) {
+                this.abilityShatterHits++;
+                this.damage(behind, dmg * C.ERA_SHATTER_PIERCE_MUL, side, kind);
+              }
+            }
             if (kind === C.U_ARCHER || kind === C.U_CATA) this.shoot(i, target, side);
             this.emit(EV.ATTACK, kind, side);
           }
@@ -1469,7 +1534,8 @@ export class Game {
           this.uCd[i] = this.statCooldown(kind, side);
           this.uAttack[i] = 8;
           // 투석기는 기지를 부수라고 있는 유닛이다. U_BASE_MUL 이 그걸 정한다.
-          let dmg = this.statDmg(kind, this.uEra[i], side) * C.BASE_DMG_MUL * C.U_BASE_MUL[kind];
+          // idx(=i) 를 넘긴다 — 기지를 때리는 것도 "이 공격"이므로 연합(청동)이 붙는다.
+          let dmg = this.statDmg(kind, this.uEra[i], side, i) * C.BASE_DMG_MUL * C.U_BASE_MUL[kind];
           if (side === SIDE_L && this.has('siege')) dmg *= 2;
           if (kind === C.U_ARCHER || kind === C.U_CATA) {
             const gy = groundAt(this.uX[i]);
@@ -1585,6 +1651,22 @@ export class Game {
     return best;
   }
 
+  // 시대 능력 — 작렬(화약) 전용. targetIdx **뒤쪽**(공격 방향 dir 기준으로 더 먼
+  // 곳)에 있는 다음 적 유닛을 찾는다. findTarget 과 규칙이 비슷하지만 targetIdx
+  // 자기 자신은 반드시 제외해야 한다 — 유닛끼리 겹칠 수 있어(blockedAhead가 항상
+  // false) d=0인 자기 자신이 최단거리로 뽑히면 무한 관통이 된다.
+  findBehind(targetIdx, side, dir) {
+    const x = this.uX[targetIdx];
+    let best = -1, bestD = 1e9;
+    for (let j = 0; j < C.UNIT_MAX; j++) {
+      if (j === targetIdx || !this.uAlive[j] || this.uSide[j] === side) continue;
+      const d = (this.uX[j] - x) * dir;
+      if (d <= 0) continue;      // 엄격히 더 뒤쪽만 — 대상과 같은 자리는 제외
+      if (d < bestD) { bestD = d; best = j; }
+    }
+    return best;
+  }
+
   // 앞에 아군이 있으면 밀지 않는다 — 다만 **공성 병기는 줄에 서지 않는다.**
   // 실측: 투석기가 자기 진영 대열의 맨 뒤에 갇혀 공성선(x=514)에 평생 못 갔다
   // (최대 도달 344·366). 대열은 전선에서부터 21px 간격으로 10~15기가 늘어서고
@@ -1633,8 +1715,19 @@ export class Game {
       }
     }
 
+    // 시대 능력 — 버팀(강철). 맞는 유닛(idx)의 **현재** 시대와 체력 비율로 정해진다
+    // — 공격 종류(atkKind)와 무관하게 여기 한 곳에서만 곱한다(상성 배수·관통
+    // 특성과 같은 자리). 조건이 체력 30% 이하라 판 길이를 늘리지 않는다.
+    if (this.uAlive[idx] && this.uEra[idx] === C.ERA_IRON && this.uHpMax[idx] > 0
+        && (this.uHp[idx] / this.uHpMax[idx]) < C.ERA_BRACE_HP_THRESHOLD) {
+      dmg *= (1 - C.ERA_BRACE_DR);
+      this.abilityBraceHits++;
+    }
+
     this.uHp[idx] -= dmg;
     this.uHitFlash[idx] = 4;
+    // 시대 능력 — 자가수리(기계) 타이머 리셋. 맞은 순간부터 다시 3초를 센다.
+    this.uIdleMs[idx] = 0;
     if (this.uHp[idx] > 0) return;
 
     const kind = this.uKind[idx];
