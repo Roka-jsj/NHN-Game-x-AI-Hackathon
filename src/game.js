@@ -66,6 +66,11 @@ export const EV = {
   // ── 진화 보상. **0~23 은 건드리지 않는다. 추가는 24부터다** ──
   SKILL_UP: 24,     // a = 스킬 번호, b = 새 등급 — 진화로 그 스킬이 바뀌었다
   ZODIAC: 25,       // a = 별자리 인덱스, b = 전투 번호 — 이 전투의 하늘이 정해졌다
+  // a = 스킬 번호, b = 예고 시간(ms) — **적이 스킬을 걸었다. 아직 안 터졌다.**
+  // 이 이벤트와 EV.SKILL(b=SIDE_R) 사이가 플레이어가 반응할 수 있는 유일한 창이다.
+  // 아트·오디오·게임필이 여기서 경고를 낸다. 게임의 상태로도 읽을 수 있다:
+  // game.aiCastSkill(스킬 번호, 없으면 -1) 과 game.aiCastMs(남은 ms).
+  AI_CAST: 26,
 };
 
 // 디렉터가 없을 때 적이 쓰는 고정 웨이브. 랜덤 0.
@@ -345,6 +350,10 @@ export class Game {
     this.aiRearmMs = 0;
     this.surgeMs = 0;
     this.aiSurgeMs = 0;
+    // 적 스킬의 연타 방지와 예고. config 의 AI_SKILL_GAP_MS / AI_CAST_MS 참조.
+    this.aiSkillGap = 0;          // 이만큼 지나야 적이 다음 스킬을 건다
+    this.aiCastSkill = -1;        // 지금 걸려 있는 적 스킬. 없으면 -1
+    this.aiCastMs = 0;            // 터지기까지 남은 시간. 렌더가 이걸로 경고를 그린다
     this.eraUps = 0;              // 이번 전투에서 진화한 횟수 (계측용)
 
     // 기지 체력은 **판 길이만** 정한다. 첫 전투가 0.45 인 이유는 그것뿐이다 —
@@ -808,6 +817,15 @@ export class Game {
     let stun = stunMs > 0 ? Math.round(stunMs / C.SIM_DT) : 0;
     if (stun > 250) stun = 250;
     const dir = side === SIDE_L ? 1 : -1;
+    // 파도는 **전선에서 부서진다.** 앞줄은 온전히 맞고, 거기서 멀수록 약해져
+    // C.TIDE_REACH 바깥은 C.TIDE_FALLOFF 만큼만 맞는다.
+    // **이게 없으면 해일은 화면 위 모든 적을 거리와 무관하게 지운다.**
+    // 뒤에 오던 증원이 살아남아야 전멸이 아니라 전선이 밀린 것이 된다.
+    // 밀어냄과 넘어뜨림은 감쇠시키지 않는다 — 그건 파도의 정체성이고,
+    // 피해와 달리 뒤쪽 적에게도 걸려야 전선이 실제로 움직인다.
+    const front = this.frontlineX();
+    const reach = C.TIDE_REACH > 0 ? C.TIDE_REACH : 1;
+    const fo = C.TIDE_FALLOFF === undefined ? 1 : C.TIDE_FALLOFF;
     for (let i = 0; i < C.UNIT_MAX; i++) {
       if (!this.uAlive[i] || this.uSide[i] !== foe) continue;
       if (push > 0) {
@@ -817,7 +835,10 @@ export class Game {
         this.uX[i] = x;
       }
       if (stun > 0 && this.uStun[i] < stun) this.uStun[i] = stun;
-      this.damage(i, dmg, side, -1);
+      let t = (this.uX[i] - front) / reach;
+      if (t < 0) t = -t;
+      if (t > 1) t = 1;
+      this.damage(i, dmg * (1 + (fo - 1) * t), side, -1);
     }
     // 물을 미는 것은 **플레이어의 해일만**이다. 적의 해일까지 물을 밀면
     // 마감 시계가 적의 스킬로 꺼져 판이 다시 늘어진다 (예전 동작 그대로 유지).
@@ -1008,6 +1029,22 @@ export class Game {
     if (this.aiRearmMs > 0) { this.aiRearmMs -= C.SIM_DT; if (this.aiRearmMs < 0) this.aiRearmMs = 0; }
     if (this.surgeMs > 0) { this.surgeMs -= C.SIM_DT; if (this.surgeMs < 0) this.surgeMs = 0; }
     if (this.aiSurgeMs > 0) { this.aiSurgeMs -= C.SIM_DT; if (this.aiSurgeMs < 0) this.aiSurgeMs = 0; }
+
+    // 걸어 둔 적 스킬의 예고와 연타 간격. **여기가 맞는 시계다** —
+    // stepAI() 는 AI_THINK_MS(620ms)마다 한 번만 돌기 때문에, 거기서 SIM_DT 씩
+    // 빼면 1초짜리 예고가 실제로는 37초가 된다. 실측에서 적 스킬 발동이
+    // 판당 5.6회 → 0회가 되어 잡았다. 그리고 경고는 화면이 읽어야 하는 것이므로
+    // 620ms 격자가 아니라 60Hz 로 흘러야 한다.
+    if (this.aiSkillGap > 0) { this.aiSkillGap -= C.SIM_DT; if (this.aiSkillGap < 0) this.aiSkillGap = 0; }
+    if (this.aiCastSkill >= 0) {
+      this.aiCastMs -= C.SIM_DT;
+      if (this.aiCastMs <= 0) {
+        const i = this.aiCastSkill;
+        this.aiCastSkill = -1;
+        this.aiCastMs = 0;
+        this.fireAiSkill(i);
+      }
+    }
 
     // 적도 같은 규칙으로 번다. 레버가 배수를 준다.
     // 레버 값이 깨져 있으면 배수를 무시한다. aiGold 가 한 번 NaN 이 되면
@@ -1201,10 +1238,15 @@ export class Game {
   //   증원   적 전선이 비었는데 플레이어가 밀고 들어온다
   stepAiSkills() {
     if (this.stage < 1) return;        // 첫 전투는 가르치는 전투다
+
+    // 예고와 간격은 **프레임 시계**가 흘린다(stepBattle). 여기는 결정만 한다.
+    // 이미 하나 걸려 있거나 간격이 안 지났으면 새로 걸지 않는다.
+    if (this.aiCastSkill >= 0) return;
+    if (this.aiSkillGap > 0) return;   // 연타 금지 — 총량이 아니라 몰림을 막는다
     if (this.aliveL <= 0) return;
 
     if (this.aiSkillCd[C.SK_TIDE] <= 0 && this.aliveL >= C.AI_TIDE_MIN) {
-      this.fireAiSkill(C.SK_TIDE);
+      this.castAiSkill(C.SK_TIDE);
       return;
     }
 
@@ -1218,21 +1260,33 @@ export class Game {
         const d = this.uX[i] - cx;
         if (d >= -r && d <= r) n++;
       }
-      if (n >= C.AI_VOLLEY_MIN) { this.fireAiSkill(C.SK_VOLLEY); return; }
+      if (n >= C.AI_VOLLEY_MIN) { this.castAiSkill(C.SK_VOLLEY); return; }
     }
 
     // 총진군 — 적도 최대 시대에 도달하면 쓴다. **규칙이 한쪽에만 있으면 특혜다.**
     // 병력이 모여 있을 때만 쓴다. 빈 전선에 쓰면 아무 일도 안 일어난다.
     if (this.aiSkillUnlocked(C.SK_SURGE) && this.aiSkillCd[C.SK_SURGE] <= 0
         && this.aiSurgeMs <= 0 && this.aliveR >= 4) {
-      this.fireAiSkill(C.SK_SURGE);
+      this.castAiSkill(C.SK_SURGE);
       return;
     }
 
     if (this.aiSkillCd[C.SK_RALLY] <= 0
         && this.aliveR <= C.AI_RALLY_MAX && this.aliveL >= C.AI_RALLY_MAX + 2) {
-      this.fireAiSkill(C.SK_RALLY);
+      this.castAiSkill(C.SK_RALLY);
     }
+  }
+
+  // 적이 스킬을 **건다.** 아직 안 터진다. 쿨다운과 연타 간격은 여기서 먼저
+  // 소모한다 — 예고 도중에 같은 스킬이 다시 결정되면 안 되기 때문이다.
+  castAiSkill(i) {
+    const ms = (C.AI_CAST_MS && C.AI_CAST_MS[i]) || 0;
+    this.aiSkillCd[i] = this.aiSkillCooldown(i);
+    this.aiSkillGap = C.AI_SKILL_GAP_MS || 0;
+    if (ms <= 0) { this.fireAiSkill(i); return; }   // 예고 0 이면 예전 그대로다
+    this.aiCastSkill = i;
+    this.aiCastMs = ms;
+    this.emit(EV.AI_CAST, i, ms);
   }
 
   // 적이 스킬 하나를 쓴다. **효과는 플레이어와 같은 코드**(applySkill)를 탄다 —
