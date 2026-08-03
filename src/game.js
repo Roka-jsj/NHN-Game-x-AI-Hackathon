@@ -1424,8 +1424,23 @@ export class Game {
           // 너무 가까우면 공격도 전진도 못 한다. 서서 얻어맞는다 —
           // 이게 "궁수는 근접에 약하다"의 실체다. 더 먼 적으로 표적을 바꾸지도
           // 않는다. 코앞에 붙은 적을 두고 뒤를 쏘는 것이 오히려 이상하다.
+          // 너무 가까우면 **물러난다.** 예전에는 여기서 그냥 멈췄고, 못 쏘고
+          // 못 가고 못 물러나는 유닛이 마지막 전투에서 병력의 21.2%(궁수만
+          // 보면 25.6%)였다. 사용자가 본 병목의 정체가 이것이다 — 막고 있던
+          // 것은 아군이 아니라 자기 자신의 규칙이었다.
           const minR = U_MIN_RANGE[kind];
-          if (minR > 0 && td < minR) { this.uMarch[i] = 0; continue; }
+          if (minR > 0 && td < minR) {
+            this.uMarch[i] = 0;
+            const bs = C.U_BACKSTEP > 0 ? C.U_BACKSTEP : 0;
+            if (bs > 0) {
+              const home = side === SIDE_L ? C.SPAWN_L_X : C.SPAWN_R_X;
+              let x = this.uX[i] - this.statSpeed(kind, side) * bs * dir * dt;
+              // 제 소환지점보다 뒤로는 안 간다. 자리를 잡는 것이지 도망이 아니다.
+              if (side === SIDE_L ? x < home : x > home) x = home;
+              this.uX[i] = x;
+            }
+            continue;
+          }
           if (this.uCd[i] <= 0) {
             this.uCd[i] = this.statCooldown(kind, side);
             this.uAttack[i] = 8;
