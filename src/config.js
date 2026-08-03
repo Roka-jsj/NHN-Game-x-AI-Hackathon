@@ -750,7 +750,7 @@ export const COMMANDER_TAUNT = [
 // 처음엔 첫 전투에서 맞춘 식(t ≈ 15 + 8.43·R^0.63)을 뒤 전투에 그대로 밀었는데
 // 전투 2 가 47초로 예측됐고 실측은 **213.9초**였다. 뒤 전투에는 병력·시대·
 // 스킬이 얹혀 있어 상수항이 완전히 다르다. 식은 첫 전투에서만 쓸 수 있다.
-export const STAGE_HP_MUL = [7.5, 0.6, 1.8, 0.9, 0.35];
+export const STAGE_HP_MUL = [4.0, 0.6, 1.8, 0.9, 0.35];
 export const STAGE_DIFF = [0.80, 1.00, 1.15, 1.30, 1.50];
 export const STAGE_WATER_MUL = [0.70, 0.95, 1.10, 1.25, 1.45];
 // 전장 변주 — 전투마다 협곡 모양이 다르다. groundAt(x) 의 서명은 안 바뀐다.

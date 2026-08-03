@@ -82,6 +82,8 @@ const LABEL_ME = '아군';
 const LABEL_FOE = '적군';
 const LABEL_WATER = '수위';
 const KEY_RALLY = 'R';
+// game 이 skillName 을 아직 안 주는 빌드에서의 대비책. 화면이 비지는 않는다
+const RALLY_NAME = (C.SKILL_NAME && C.SKILL_NAME[C.SK_RALLY]) || '증원';
 const PROFILE_UNKNOWN = '—';
 const KIND_NAME = ['공격', '방어', '경제'];
 const READY = '준비';
@@ -333,6 +335,7 @@ export class Renderer {
     this.btnCd = new Float32Array(C.BTN_COUNT);
     this.btnCost = new Int32Array(C.BTN_COUNT);
     this.btnMode = new Uint8Array(C.BTN_COUNT);
+    this.btnPoor = new Uint8Array(C.BTN_COUNT);   // 막힌 이유가 "돈"인가 (쿨다운과 갈라야 한다)
     this.bgCanvas = null;
     this.btnCanvas = null;
     this.btnSig = -1;
@@ -643,6 +646,7 @@ export class Renderer {
     this.wtX = new Float32Array(N);        // 무기 끝 — 화염·상성 타격이 여기서 난다
     this.wtY = new Float32Array(N);
     this.aliveN = 0;
+    this.maxGy = 0;                        // 살아 있는 유닛 중 가장 낮은 발밑 y
     this.bucket = new Uint8Array(BUCKET_N * 2);
 
     // 상성 마스크 — COUNTER 표를 비트로 굽는다. 표를 손으로 옮기지 않는다.
@@ -1551,6 +1555,11 @@ export class Renderer {
       list[n++] = i;
     }
     this.aliveN = n;
+    // 가장 낮은 곳에 선 유닛의 발밑. 물이 여기보다 아래면 잠긴 유닛이 하나도 없다 —
+    // 잠긴 유닛 되살리기 패스를 통째로 건너뛰는 값싼 판정이다
+    let mgy = 0;
+    for (let j = 0; j < n; j++) { const g0 = sgy[list[j]]; if (g0 > mgy) mgy = g0; }
+    this.maxGy = mgy;
     let fmx = 3;
     for (let k = 0; k < C.UNIT_KINDS; k++) if (this.foeMix[k] > fmx) fmx = this.foeMix[k];
     this.foeMax = fmx;
@@ -1605,7 +1614,10 @@ export class Renderer {
       const dir = s === SIDE_L ? 1 : -1;
       const mine = s === SIDE_L;
       const ramp = mine ? C.RAMP_PLAYER : C.RAMP_STRUCT;
-      const aHi = mine ? 1 : 0.55, aLo = mine ? 0.78 : 0.36;
+      // 같은 편끼리 갈리는 두 단계. **아군의 두 단계가 1.0 과 0.78 이었는데
+      // 그건 흰색 두 개다** — 20기가 겹치면 눈이 못 가른다 (실측: 전선의
+      // 아군 뭉치가 실루엣 하나로 읽혔다). 적군(0.55/0.36)만큼 벌린다.
+      const aHi = mine ? 1 : 0.55, aLo = mine ? 0.62 : 0.36;
 
       for (let tone = 0; tone < 2; tone++) {
         ctx.fillStyle = ramp[C.rampIndex(tone ? aLo : aHi)];
@@ -1638,7 +1650,8 @@ export class Renderer {
       for (let pass = 0; pass < 2; pass++) {
         if (pass === 1 && mine) break;
         ctx.strokeStyle = pass === 0 ? C.COL_BG : C.COL_STRUCT;
-        ctx.lineWidth = pass === 0 ? (mine ? 2.6 : 3.2) : 1.4;
+        // 아군 분리선을 2.6 → 3.1 로. 흰 몸 위의 어두운 금이 이것뿐이다
+        ctx.lineWidth = pass === 0 ? (mine ? 3.1 : 3.2) : 1.4;
         ctx.beginPath();
         for (let j = 0; j < n; j++) {
           const i = list[j];
@@ -2835,6 +2848,55 @@ export class Renderer {
     ctx.closePath();
     ctx.fill();
 
+    // 잠긴 유닛의 진영을 되살린다.
+    // **물빛이 양쪽을 같은 회색으로 만든다** (원정2 전투4, 134초에 잡혔다).
+    // 위의 어두운 막(알파 0.66)이 내 흰 몸을 회청색으로 내리고, 동시에 적의
+    // 밝은 윤곽선도 같이 내린다. 두 진영이 같은 중간 회색에서 만난다.
+    // 그래서 **수면 아래에만** 진영의 잉크를 한 번 더 얹는다. 물 위의 문법을
+    // 그대로 쓴다 — 아군은 밝은 덩어리, 적군은 테만 빛나는 덩어리.
+    // 위치는 drawUnits 가 이번 프레임에 이미 계산해 둔 것을 그대로 읽는다.
+    if (this.aliveN > 0 && wy < this.maxGy) {
+      const list = this.list, sgy = this.sgy, n = this.aliveN;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(0, C.VIEW_H);
+      for (let i = 0; i <= last; i++) ctx.lineTo(i * 24, wy + wave[i]);
+      ctx.lineTo(C.VIEW_W, C.VIEW_H);
+      ctx.closePath();
+      ctx.clip();
+      for (let pi = 0; pi < 2; pi++) {
+        const s = pi === 0 ? SIDE_R : SIDE_L;
+        const dir = s === SIDE_L ? 1 : -1;
+        const mine = s === SIDE_L;
+        if (mine) {                          // 아군 — 몸을 다시 밝힌다
+          ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.62)];
+          ctx.beginPath();
+          let anyF = 0;
+          for (let j = 0; j < n; j++) {
+            const i = list[j];
+            if (game.uSide[i] !== s || sgy[i] <= wy) continue;
+            this.addUnitFill(game, i, dir);
+            anyF = 1;
+          }
+          if (anyF) ctx.fill();
+        }
+        // 아군은 어두운 분리선, 적군은 밝은 테. 물 밖과 같은 규칙이다
+        ctx.strokeStyle = mine ? C.RAMP_BG[C.rampIndex(0.92)] : C.RAMP_STRUCT[C.rampIndex(0.70)];
+        ctx.lineWidth = mine ? 2.6 : 2.0;
+        ctx.beginPath();
+        let anyO = 0;
+        for (let j = 0; j < n; j++) {
+          const i = list[j];
+          if (game.uSide[i] !== s || sgy[i] <= wy) continue;
+          this.addUnitOutline(game, i, dir);
+          anyO = 1;
+        }
+        if (anyO) ctx.stroke();
+      }
+      ctx.restore();
+      ctx.lineWidth = C.STROKE;
+    }
+
     // 반사 — 수면 바로 아래에 세로로 늘어진 빛. 물이 거울이라는 신호다.
     // 기지·폭포처럼 밝은 것 아래에만 둔다
     ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.06)];
@@ -3430,20 +3492,27 @@ export class Renderer {
     this.drawButtonCooldowns();
   }
 
-  // 무엇이 바뀌면 다시 구워야 하는가 — 가격·구매가능·모드·남은 초·시대.
-  // 쿨다운 원호는 서명에 넣지 않는다. 그건 매 프레임 위에 따로 그린다.
+  // 무엇이 바뀌면 다시 구워야 하는가 — 가격·구매가능·**막힌 이유**·모드·남은 초·시대.
+  // 쿨다운 원호와 남은 시간 막대는 서명에 넣지 않는다. 그건 매 프레임 위에 따로 그린다.
+  //
+  // btnPoor 를 따로 든다. 예전에는 "돈이 없다" 와 "아직 못 뽑는다" 가 둘 다
+  // ok=0 하나로 뭉개져 **같은 회색**이었다 (실측: 소지금 37에 궁수 20이 회색).
+  // 화면에 이유가 없으면 플레이어는 가격표를 의심한다. 그래서 이유를 나눈다 —
+  //   돈이 없다   → 가격이 **붉어진다** (동전도 같이 죽는다)
+  //   쿨다운      → 가격은 **금색 그대로**, 대신 칸 아래 **줄어드는 막대**가 산다
   computeButtonState(game) {
     const skillCd = game.skillCd;
     const ok = this.btnOk, cd = this.btnCd, cost = this.btnCost, mode = this.btnMode;
+    const poor = this.btnPoor;
     let sig = (game.era | 0) * 7919;
     for (let i = 0; i < C.BTN_COUNT; i++) {
-      let o = 1, c = 0, price = -1, m = 0;
+      let o = 1, c = 0, price = -1, m = 0, p = 0;
       if (i < C.UNIT_KINDS) {
         price = game.cost(i);
-        o = game.gold >= price ? 1 : 0;
+        p = game.gold >= price ? 0 : 1;
         const full = game.spawnCooldown ? game.spawnCooldown(i) : C.U_SPAWN_CD[i];
         c = full > 0 ? game.spawnCd[i] / full : 0;
-        if (c > 0) o = 0;
+        o = (!p && !(c > 0)) ? 1 : 0;
         m = 0;                                     // 가격
       } else if (i === C.B_ERA) {
         o = game.eraReady() ? 1 : 0;
@@ -3451,7 +3520,7 @@ export class Renderer {
       } else if (i === C.B_TOWER) {
         price = game.towerCost ? game.towerCost() : -1;
         if (price < 0) { m = 2; o = 0; }           // 최대
-        else { m = 0; o = game.gold >= price ? 1 : 0; }
+        else { m = 0; p = game.gold >= price ? 0 : 1; o = p ? 0 : 1; }
       } else {
         const sk = i === C.B_TIDE ? C.SK_TIDE : C.SK_VOLLEY;
         const raw = skillCd ? (skillCd[sk] || 0) : (sk === C.SK_TIDE ? (game.nukeCd || 0) : 0);
@@ -3460,8 +3529,8 @@ export class Renderer {
         m = o ? 3 : 4;                             // 준비 / 남은 초
         price = o ? -1 : Math.ceil(raw / 1000);
       }
-      ok[i] = o; cd[i] = c; cost[i] = price; mode[i] = m;
-      sig = (sig * 131 + o * 3 + m * 11 + (price + 1) * 37) | 0;
+      ok[i] = o; cd[i] = c; cost[i] = price; mode[i] = m; poor[i] = p;
+      sig = (sig * 131 + o * 3 + m * 11 + p * 5 + (price + 1) * 37) | 0;
     }
     return sig;
   }
@@ -3499,12 +3568,36 @@ export class Renderer {
       if (any) ctx.stroke();
     }
     ctx.lineWidth = C.STROKE;
+
+    // 남은 시간 막대 — 칸 아래를 가로지른다. **원호만으로는 부족했다.**
+    // 아이콘 위의 얇은 호는 그림의 일부처럼 보여서, 플레이어는 회색 칸을 보고
+    // "돈이 모자란가?" 하고 소지금을 다시 셌다. 줄어드는 가로 막대는 시계다.
+    const bary = LAY.y + LAY.h - 4;
+    ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.22)];
+    ctx.beginPath();
+    for (let i = 0; i < C.BTN_COUNT; i++) {
+      if (cd[i] <= 0) continue;
+      ctx.rect(btnX(i) + 4, bary, BTN_W - 8, 3);
+    }
+    ctx.fill();
+    for (let g = 0; g < 2; g++) {
+      ctx.fillStyle = (g ? C.RAMP_BONUS : C.RAMP_PLAYER)[C.rampIndex(0.85)];
+      ctx.beginPath();
+      let any = 0;
+      for (let i = 0; i < C.BTN_COUNT; i++) {
+        if (cd[i] <= 0 || (i >= C.B_ERA) !== !!g) continue;
+        const w = cd[i] > 1 ? 1 : cd[i];
+        ctx.rect(btnX(i) + 4, bary, (BTN_W - 8) * w, 3);
+        any = 1;
+      }
+      if (any) ctx.fill();
+    }
   }
 
   // 버튼 열 한 장 — 카드 · 아이콘 · 글자. 쿨다운 원호는 여기 없다
   paintButtonStrip(game) {
     const ctx = this.ctx;
-    const ok = this.btnOk, cost = this.btnCost, mode = this.btnMode;
+    const ok = this.btnOk, cost = this.btnCost, mode = this.btnMode, poor = this.btnPoor;
     const by = LAY.y, bh = LAY.h, P = LAY.portrait;
     ctx.textBaseline = 'top';
 
@@ -3579,15 +3672,17 @@ export class Renderer {
     ctx.fill();
 
 
-    // 4) 동전 표식 — 색이 둘뿐이다. 경로를 모아 두 번에 칠한다
+    // 4) 동전 표식 — 색이 둘뿐이다. 경로를 모아 두 번에 칠한다.
+    //    **기준은 ok 가 아니라 poor 다.** 쿨다운으로 막힌 칸은 돈이 있는 칸이므로
+    //    동전이 살아 있어야 한다 — 그래야 "돈이 없다"와 눈에 갈린다.
     for (let pass = 0; pass < 3; pass++) {
       ctx.fillStyle = pass === 0 ? C.COL_BONUS
-        : (pass === 1 ? C.RAMP_BONUS[C.rampIndex(0.30)] : C.RAMP_BG[C.rampIndex(0.95)]);
+        : (pass === 1 ? C.RAMP_DANGER[C.rampIndex(0.75)] : C.RAMP_BG[C.rampIndex(0.95)]);
       ctx.beginPath();
       let any = 0;
       for (let i = 0; i < C.BTN_COUNT; i++) {
         if (mode[i] !== 0 || cost[i] < 0) continue;
-        if (pass < 2 && (ok[i] === 1) !== (pass === 0)) continue;
+        if (pass < 2 && (poor[i] === 0) !== (pass === 0)) continue;
         const x = btnX(i);
         const cyy = by + LAY.coinDY;
         this.addCircle(x + (P ? 14 : 12), cyy, pass === 2 ? (P ? 2.2 : 1.8) : (P ? 5.5 : 4.5));
@@ -3612,7 +3707,8 @@ export class Renderer {
       const x = btnX(i);
       const m = mode[i];
       if (m === 0) {
-        ctx.fillStyle = ok[i] ? C.COL_BONUS : C.RAMP_BONUS[C.rampIndex(0.34)];
+        // 돈이 모자라면 **가격이 붉어진다.** 돈은 되는데 쿨다운이면 금색 그대로다
+        ctx.fillStyle = poor[i] ? C.RAMP_DANGER[C.rampIndex(0.95)] : C.COL_BONUS;
         this.drawLeft(cost[i], x + (P ? 24 : 20), ly, P ? 13 : 9);
       } else if (m === 1) {
         ctx.fillStyle = ok[i] ? C.COL_BONUS : C.RAMP_PLAYER[C.rampIndex(0.32)];
@@ -3686,6 +3782,13 @@ export class Renderer {
     ctx.font = FONT_MICRO;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
+    // **이름을 단다.** 다른 아홉 칸은 전부 이름이 있는데 이 칸만 'R' 하나였고,
+    // 그래서 무슨 버튼인지 알 방법이 화면에 없었다. 시대가 오르면 이름이
+    // 바뀌므로(증원→원군→정예군) game 에게 묻는다 — 스킬 버튼과 같은 규칙이다.
+    const name = (game && typeof game.skillName === 'function')
+      ? (game.skillName(C.SK_RALLY) || RALLY_NAME) : RALLY_NAME;
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(ok ? 1 : 0.34)];
+    ctx.fillText(name, cx, cy - r + 3);
     ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.42)];
     ctx.fillText(KEY_RALLY, cx, cy + r - 13);
     ctx.textAlign = 'left';
