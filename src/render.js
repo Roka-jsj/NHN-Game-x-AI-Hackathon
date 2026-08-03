@@ -123,7 +123,6 @@ const CMD_TITLE = C.COMMANDER_TITLE || null;
 const CMD_LINE = C.COMMANDER_LINE || null;
 const CMD_TAUNT = C.COMMANDER_TAUNT || null;
 const CAMP_LEN = C.CAMPAIGN_LEN || 5;
-const BRIEF_KIND = Uint8Array.from([C.U_SWORD, C.U_SPEAR, C.U_CAV, C.U_ARCHER]);
 // game.js 가 S.BRIEF 를 아직 안 줬으면 -1 — 어떤 state 와도 안 같으므로 조용히 꺼진다
 const BRIEF = (typeof S.BRIEF === 'number') ? S.BRIEF : -1;
 
@@ -218,13 +217,66 @@ const FX_LINE_F = 250;                 // 전투 시작 대사가 떠 있는 렌
 const FX_TAUNT_F = 200;                // 도발
 const BUB_W_MAX = 400;
 
-// 설명 화면의 상성 고리 — 네 칸 순환 + 위성 둘. 굽는 쪽과 매 프레임 화살표를
-// 그리는 쪽이 같은 좌표를 봐야 하므로 모듈에 둔다.
+// 설명 화면의 상성도. 굽는 쪽(paintBrief)과 매 프레임 화살표를 그리는 쪽(drawBrief)이
+// 같은 좌표를 봐야 하므로 모듈에 둔다.
+//
+// **좌표를 유닛 종류로 색인한다.** 그래야 C.COUNTER 표를 그대로 그릴 수 있고,
+// 나중에 밸런스가 바뀌어 우위 한 쌍이 늘거나 줄어도 그림이 저절로 따라온다.
+// 네 칸(검사→창병→기병→궁수)은 마름모로 돌리고, 그 고리 밖에 있는 둘은
+// **자기를 이기는 유닛 옆에** 매단다.
+//   예전 배치의 실패 둘 — (1) 투석기가 (414,350) 에 있어서 그 이름표가
+//   「전투 시작」 버튼(350..610 × 380..432) 위에 겹쳤다. (2) 거인이 궁수 바로
+//   옆(158,350)이라 궁수→거인 화살표의 몸통이 24px 짜리 토막이 되어,
+//   플레이어 눈에는 "거인은 화살표가 하나도 없다" 로 보였다.
 const RING_CX = 286, RING_CY = 272, RING_R = 78;
-const RING_X = Float32Array.from([RING_CX, RING_CX + RING_R, RING_CX, RING_CX - RING_R]);
-const RING_Y = Float32Array.from([RING_CY - RING_R, RING_CY, RING_CY + RING_R, RING_CY]);
-const RING_SATX = 414, RING_SATY = 350, RING_GX = 158, RING_GY = 350;
+const RING_NX = new Float32Array(C.UNIT_KINDS);
+const RING_NY = new Float32Array(C.UNIT_KINDS);
+const RING_LDY = new Float32Array(C.UNIT_KINDS);   // 이름을 배지 위/아래 어디에 두는가
+(() => {
+  const put = (k, x, y, ldy) => { RING_NX[k] = x; RING_NY[k] = y; RING_LDY[k] = ldy; };
+  put(C.U_SWORD,  RING_CX,          RING_CY - RING_R, -44);   // 위 칸만 이름을 위에
+  put(C.U_SPEAR,  RING_CX + RING_R, RING_CY,           44);
+  put(C.U_CAV,    RING_CX,          RING_CY + RING_R,  44);
+  put(C.U_ARCHER, RING_CX - RING_R, RING_CY,           44);
+  put(C.U_GIANT,  96,  212, 44);                              // 궁수가 이긴다
+  put(C.U_CATA,   120, 350, 44);                              // 기병이 이긴다
+})();
+
+// 그릴 화살표 목록 — **C.COUNTER 를 읽어서 만든다.** 손으로 쓴 목록은 표와
+// 반드시 어긋난다 (실제로 어긋나 있었다: 표에 우위가 여섯인데 화면에는 다섯,
+// 그중 하나는 안 보이는 토막이었다).
+const CTR_A = new Uint8Array(C.UNIT_KINDS * C.UNIT_KINDS);
+const CTR_D = new Uint8Array(C.UNIT_KINDS * C.UNIT_KINDS);
+const CTR_N = (() => {
+  const seq = [C.U_SWORD, C.U_SPEAR, C.U_CAV, C.U_ARCHER];   // 고리를 읽는 순서
+  const beats = (a, d) => a !== d && C.COUNTER && C.COUNTER[a * C.UNIT_KINDS + d] > 1;
+  let n = 0;
+  const push = (a, d) => { CTR_A[n] = a; CTR_D[n] = d; n++; };
+  // 1) 고리부터 — 순서대로 이어지는 우위. 이게 "상성이 돈다"를 말한다
+  for (let i = 0; i < seq.length; i++) {
+    const a = seq[i], d = seq[(i + 1) % seq.length];
+    if (beats(a, d)) push(a, d);
+  }
+  // 2) 표에 있는데 아직 안 그린 우위 전부
+  for (let a = 0; a < C.UNIT_KINDS; a++) {
+    for (let d = 0; d < C.UNIT_KINDS; d++) {
+      if (!beats(a, d)) continue;
+      let dup = 0;
+      for (let k = 0; k < n; k++) if (CTR_A[k] === a && CTR_D[k] === d) { dup = 1; break; }
+      if (!dup) push(a, d);
+    }
+  }
+  return n;
+})();
 const BRIEF_STEP = 40;                 // 화살표 하나가 나타나는 간격 (렌더 프레임)
+
+// ── 결과 카드 (렌더 프레임) ──
+// 판이 끝난 **직후 잠깐은 전장을 그대로 보여 준다.** 기지가 터지는 순간과
+// 배너가 여기 산다. 그 다음에 결과 카드가 **불투명하게** 올라온다 —
+// 예전에는 첫 프레임부터 알파 0.55 짜리 막을 깔아서, 살아 있는 전장과
+// 배너 글자가 통계 위로 비쳐 "처치 / 프로파일" 이 안 읽혔다.
+const RESULT_HOLD_F = 16;              // 카드가 올라오기 전에 전장을 보여 주는 시간
+const RESULT_REVEAL_F = 22;            // 카드 안쪽(선·숫자)이 차오르는 시간
 
 // 상단 HUD
 const HUD_HP_W = 92, HUD_HP_H = 13;
@@ -630,6 +682,7 @@ export class Renderer {
     this.fxLine = 0;                 // 전투 시작 대사
     this.fxTaunt = 0;                // 도발
     this.overTime = -1;              // 결과 화면에 **멈춘** 시간을 찍기 위해 판이 끝난 순간을 잡는다
+    this.overFrames = 0;             // 판이 끝난 뒤 흐른 렌더 프레임. 결과 카드의 시계다
     this.foeMix = new Int32Array(C.UNIT_KINDS);   // 지금 살아 있는 적 구성
     this.foeMax = 1;
 
@@ -834,9 +887,16 @@ export class Renderer {
     this.drawHud(game, feel, director, directorView, muted);
     this.drawButtons(game);
     this.drawRally(game);
-    this.drawBanner(feel);
+    // 결과 카드가 올라오면 **배너는 안 그린다.** 둘은 같은 순간에 같은 자리에서
+    // 같은 말을 한다 — 배너 '전투를 이겼다' 와 제목 '전투 승리' 가 둘 다
+    // HALF_W 중앙정렬 · FONT_BIG · y 140 언저리다. 반투명 막 아래로 배너가
+    // 비쳐 두 글자열이 겹쳐 「전전투 승리다」·「원원정 종료다」로 읽혔다.
+    // (그래서 막을 불투명하게 만든 것과 별개로, 원인 자체를 여기서 끊는다.)
+    const showResult = game.state === S.OVER && feel.resultStep >= 0
+                    && this.overFrames > RESULT_HOLD_F;
+    if (!showResult) this.drawBanner(feel);
     if (game.state === S.DRAFT) this.drawDraft(game, feel, director);
-    if (game.state === S.OVER) this.drawResult(game, feel, director);
+    if (showResult) this.drawResult(game, feel, director);
     // 설명 화면 — game.js 가 아직 S.BRIEF 를 안 줬으면 BRIEF 가 -1 이라 절대 안 걸린다
     if (game.state === BRIEF) this.drawBrief(game, feel);
   }
@@ -881,8 +941,12 @@ export class Renderer {
     if (this.fxFoeEra > 0) this.fxFoeEra--;
 
     // 결과 화면의 시간은 **멈춰 있어야 한다.** 판이 끝난 순간을 한 번만 잡는다
-    if (game.state === S.OVER) { if (this.overTime < 0) this.overTime = game.elapsed(); }
-    else this.overTime = -1;
+    if (game.state === S.OVER) {
+      if (this.overTime < 0) this.overTime = game.elapsed();
+      // 결과 카드는 **자기 시계로** 올라온다. 히트스톱에 물리지 않아야
+      // "전장 잠깐 → 불투명한 카드" 순서가 언제나 같은 길이로 나온다.
+      if (this.overFrames < 4096) this.overFrames++;
+    } else { this.overTime = -1; this.overFrames = 0; }
 
     const front = game.frontlineX ? game.frontlineX() : HALF_W;
     for (let s = 0; s < 2; s++) {
@@ -3912,9 +3976,9 @@ export class Renderer {
 
   // ── 설명 화면 — 심사자가 이 게임을 처음 보는 2초 ────────────
   // **읽는 화면이 아니라 보는 화면이다.** 긴 문단은 아무도 안 읽는다.
-  // 좌우 기지 · 금으로 병력 · 차오르는 물, 그리고 **상성 고리**를 그림으로 말한다.
-  // 고리는 4순환(검사→창병→기병→궁수→검사)에 위성 둘(기병→투석기, 궁수→거인)이다.
-  // 전부 정적이므로 한 번 굽고, 매 프레임은 "눌러 시작"만 깜빡인다.
+  // 좌우 기지 · 금으로 병력 · 차오르는 물, 그리고 **상성도**를 그림으로 말한다.
+  // 화살표 목록은 C.COUNTER 에서 뽑는다 (CTR_A/CTR_D) — 표에 있는 우위가 전부 나온다.
+  // 전부 정적이므로 한 번 굽고, 매 프레임은 화살표와 "눌러 시작"만 얹는다.
   drawBrief(game, feel) {
     const ctx = this.ctx;
     if (typeof document !== 'undefined') {
@@ -3940,21 +4004,19 @@ export class Renderer {
     } else {
       this.paintBrief();
     }
-    // 상성 화살표 — **하나씩 순서대로** 그린다. 여섯을 한 번에 보여 주면
-    // 그림이 아니라 무늬가 된다. game.stateTick 이 BRIEF 진입 후 프레임 수다.
-    // 9초 안에 여섯이 다 나온다 (40프레임 × 6 = 4초).
+    // 상성 화살표 — **하나씩 순서대로** 그린다. 한꺼번에 보여 주면 그림이
+    // 아니라 무늬가 된다. game.stateTick 이 BRIEF 진입 후 프레임 수다.
+    // 목록은 C.COUNTER 에서 뽑은 것이라 **표에 있는 우위가 전부** 나온다.
     const tick = (typeof game.stateTick === 'number') ? game.stateTick : 600;
     ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.9)];
     ctx.beginPath();
-    for (let k = 0; k < 6; k++) {
+    for (let k = 0; k < CTR_N; k++) {
       const f = (tick - k * BRIEF_STEP) / BRIEF_STEP;
       if (f <= 0) continue;
       const g = f > 1 ? 1 : easeOutCubic(f);
-      const x0 = k < 4 ? RING_X[k] : (k === 4 ? RING_X[2] : RING_X[3]);
-      const y0 = k < 4 ? RING_Y[k] : (k === 4 ? RING_Y[2] : RING_Y[3]);
-      const x1 = k < 4 ? RING_X[(k + 1) & 3] : (k === 4 ? RING_SATX : RING_GX);
-      const y1 = k < 4 ? RING_Y[(k + 1) & 3] : (k === 4 ? RING_SATY : RING_GY);
-      this.addArrow(x0, y0, x0 + (x1 - x0) * g, y0 + (y1 - y0) * g, 30);
+      const a = CTR_A[k], d = CTR_D[k];
+      const x0 = RING_NX[a], y0 = RING_NY[a];
+      this.addArrow(x0, y0, x0 + (RING_NX[d] - x0) * g, y0 + (RING_NY[d] - y0) * g, 30);
     }
     ctx.fill();
 
@@ -4026,20 +4088,15 @@ export class Renderer {
     ctx.fillText(BR_RING, 286, 118);
 
     const cx = RING_CX, cy = RING_CY;
-    const NX = RING_X, NY = RING_Y;
-    const NK = BRIEF_KIND;
-    const SX = RING_SATX, SY = RING_SATY, GX = RING_GX, GY = RING_GY;
     // 화살표는 여기서 굽지 않는다 — **하나씩 순서대로 나타나야** 고리가 읽힌다
-    for (let k = 0; k < 4; k++) this.drawUnitBadge(NK[k], NX[k], NY[k], 1, C.COL_PLAYER);
-    this.drawUnitBadge(C.U_CATA, SX, SY, 1, C.COL_PLAYER);
-    this.drawUnitBadge(C.U_GIANT, GX, GY, 1, C.COL_PLAYER);
-
+    for (let k = 0; k < C.UNIT_KINDS; k++) {
+      this.drawUnitBadge(k, RING_NX[k], RING_NY[k], 1, C.COL_PLAYER);
+    }
     ctx.font = FONT_SMALL;
     ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.85)];
-    ctx.fillText(BTN_NAME[NK[0]], NX[0], NY[0] - 44);          // 위 칸은 이름을 위에
-    for (let k = 1; k < 4; k++) ctx.fillText(BTN_NAME[NK[k]], NX[k], NY[k] + 44);
-    ctx.fillText(BTN_NAME[C.U_CATA], SX, SY + 44);
-    ctx.fillText(BTN_NAME[C.U_GIANT], GX, GY + 44);
+    for (let k = 0; k < C.UNIT_KINDS; k++) {
+      ctx.fillText(BTN_NAME[k], RING_NX[k], RING_NY[k] + RING_LDY[k]);
+    }
     ctx.font = FONT_MICRO;
     ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.62)];
     ctx.fillText(BR_ARROW, cx, cy);
@@ -4170,7 +4227,11 @@ export class Renderer {
   drawResult(game, feel, director) {
     const ctx = this.ctx;
     if (feel.resultStep < 0) return;
-    const t = feel.resultStep / feel.resultSteps;
+    // 카드가 올라온 뒤로 흐른 시간. feel.resultStep 이 아니라 렌더 프레임을 쓴다 —
+    // resultStep 은 히트스톱 동안 멈추므로, 그걸 기준으로 삼으면 카드가 뜰 때
+    // 이미 다 차 있는 판과 아직 0 인 판이 섞인다.
+    const t0 = (this.overFrames - RESULT_HOLD_F) / RESULT_REVEAL_F;
+    const t = t0 < 0 ? 0 : (t0 > 1 ? 1 : t0);
     const e = t >= 1 ? 1 : easeOutBack(t);
 
     // 원정 상태 — 필드가 없으면 stage = -1 이고 예전 화면 그대로다
@@ -4182,7 +4243,10 @@ export class Renderer {
     const cleared = camp ? stage + (won ? 1 : 0) : 0;
     const goNext = camp && won && !campOver;
 
-    ctx.fillStyle = t >= 1 ? C.COL_BG : C.RAMP_BG[C.rampIndex(0.55 + 0.45 * t)];
+    // **막은 처음부터 불투명하다.** 예전에는 0.55 에서 시작해 420ms 에 걸쳐
+    // 덮었고, 그 동안 전장·HUD·배너가 통계 위로 비쳤다. 결과 화면은 읽는
+    // 화면이지 연출이 아니다 — 들어오는 연출은 위의 HOLD 프레임이 맡는다.
+    ctx.fillStyle = C.COL_BG;
     ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
 
     ctx.textAlign = 'center';
