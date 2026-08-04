@@ -75,6 +75,13 @@ function btnLabel(game, i) {
   if (i === C.B_ERA && !game.eraReady() && game.era >= C.ERA_COUNT - 1) {
     return game.skillName(C.SK_SURGE) || BTN_NAME[i];
   }
+  // 포탑도 다 쓰면 다른 것이 된다 — 최강병기(거신)가 다 쓴 포탑 칸을 물려받는다.
+  // towerLv 가 TOWER_MAX 에 닿은 순간부터 이 칸의 이름이 바뀐다(조건이 이미
+  // 버튼을 재활용하는 이유다) — 원정에서 이미 썼어도(wpnUsed) 이름은 그대로
+  // 남는다. "이게 무엇이었는지"는 계속 보여야 한다.
+  if (i === C.B_TOWER && game.towerLv >= C.TOWER_MAX) {
+    return C.WEAPON_NAME || BTN_NAME[i];
+  }
   return BTN_NAME[i];
 }
 const LABEL_GOLD = '금';
@@ -489,6 +496,14 @@ const BOSS_WARN_Y = 198, BOSS_WARN_W = 480, BOSS_WARN_H = 92;
 // 좁은 틈이다. 처음에 56으로 뒀더니 이름표가 전선 막대 한가운데 겹쳐 "아군 …
 // 심 연 … 적군" 처럼 글자가 섞였다(스크린샷으로 잡았다) — 그래서 아래로 뺐다.
 const BOSS_BAR_Y = 66, BOSS_BAR_W = 300, BOSS_BAR_H = 10;
+
+// ── 최강병기 — 거신. 보스의 거울이다. 다만 이건 **위협이 아니라 내 자산**이라
+// 화면 전체를 위협색으로 물들이지 않는다(규칙 2: COL_THREAT 는 적 전용) —
+// 왼쪽 위 고정 카드 하나로 충분하다. 금 표시(x=60)·특성 알약(y=68) 아래,
+// 적 예고 띠(CAST_Y=92, 폭 250, 가운데 정렬)와 x 로 안 겹치게 왼쪽에 둔다.
+const WPN_BAR_X = 56, WPN_BAR_Y = 90, WPN_BAR_W = 210, WPN_BAR_H = 40;
+const LABEL_WPN_USED = C.WEAPON_USED_LABEL || '소진';
+const LABEL_WPN_DEAD = C.WEAPON_DEAD_LABEL || '파괴됨';
 
 export class Renderer {
   constructor(canvas, ctx) {
@@ -1052,6 +1067,7 @@ export class Renderer {
     this.drawScars(game);
     // 보스는 유닛보다 먼저 — 몸집이 커서 뒤에 깔려야 몰려드는 병력이 위에서 읽힌다
     this.drawBoss(game);
+    this.drawWeapon(game);
     this.drawUnits(game, alpha);
     this.drawStun(game);
     this.drawRearm(game);
@@ -3277,6 +3293,109 @@ export class Renderer {
     }
   }
 
+  // ── 최강병기 — 거신. 실루엣. 보스(drawBoss)의 거울이지만 **위협이 아니라
+  // 내 자산**이다 — 몸 색이 COL_STRUCT(적)가 아니라 COL_PLAYER(내 것) 계열이다.
+  // 이 게임의 색 규칙("밝기로 진영을, 색상으로 병종을 말한다")을 그대로 따른다.
+  // render 는 game.wpn* 를 읽기만 한다 — 다른 모든 것과 같은 규칙이다.
+  drawWeapon(game) {
+    if (!game.wpnActive) return;
+    const ctx = this.ctx;
+    const x = game.wpnX, gy = groundAt(x);
+    const w = C.WEAPON_W, h = C.WEAPON_H;
+    const flash = game.wpnHitFlash > 0;
+    const body = C.RAMP_PLAYER[C.rampIndex(0.40)];
+    const rim = C.RAMP_PLAYER[C.rampIndex(0.80)];
+
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    // 곧게 선 두 단 몸통 — 심연의 굽은 두 단과 실루엣만으로 갈린다
+    this.addTrap(x, gy - h, gy - h * 0.55, w * 0.42, w * 0.74, 0);
+    this.addTrap(x, gy - h * 0.58, gy - h * 0.06, w * 0.86, w * 0.60, 0);
+    // 각진 어깨판 — 심연의 뒤틀린 뿔과 대비된다. 사람이 만든 것이라는 뜻이다
+    ctx.rect(x - w * 0.56, gy - h * 0.78, w * 0.20, h * 0.16);
+    ctx.rect(x + w * 0.36, gy - h * 0.78, w * 0.20, h * 0.16);
+    ctx.fill();
+
+    ctx.strokeStyle = rim;
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    this.addTrap(x, gy - h, gy - h * 0.55, w * 0.42, w * 0.74, 0);
+    this.addTrap(x, gy - h * 0.58, gy - h * 0.06, w * 0.86, w * 0.60, 0);
+    ctx.stroke();
+    ctx.lineWidth = C.STROKE;
+
+    // 가슴의 동력원 — 금색 코어. 포탑 칸에서 태어났다는 것을 색으로 잇는다
+    ctx.fillStyle = C.COL_BONUS;
+    ctx.beginPath();
+    this.addCircle(x, gy - h * 0.40, 7);
+    ctx.fill();
+
+    // 피격 — 다른 유닛과 같은 규칙(942행 참조): 몸 색은 그대로, 붉은 테두리만 켠다
+    if (flash) {
+      ctx.strokeStyle = C.COL_DANGER;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.rect(x - w * 0.5, gy - h, w, h * 0.94);
+      ctx.stroke();
+      ctx.lineWidth = C.STROKE;
+    }
+  }
+
+  // ── 최강병기 — HUD 카드. 보스처럼 화면을 위협색으로 물들이지 않는다
+  // (규칙 2: COL_THREAT 는 적 전용) — 이건 위협이 아니라 내 자산이다.
+  // 왼쪽 위 고정 카드 하나에 소환 대기·활동·파괴 세 상태를 전부 담는다.
+  drawWeaponHud(game) {
+    if (!C.WEAPON_ENABLE || !game.wpnState) return;
+    const ctx = this.ctx;
+    const bx = WPN_BAR_X, by = WPN_BAR_Y, bw = WPN_BAR_W, bh = WPN_BAR_H;
+
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.94)];
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 6);
+    ctx.fill();
+    ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(0.55)];
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(bx + 1, by + 1, bw - 2, bh - 2, 6);
+    ctx.stroke();
+    ctx.lineWidth = C.STROKE;
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.font = FONT_TINY;
+    ctx.fillStyle = C.COL_PLAYER;
+    ctx.fillText(C.WEAPON_NAME, bx + 8, by + 4);
+
+    if (game.wpnState === 3) {                    // 파괴됐다
+      ctx.font = FONT_MICRO;
+      ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.65)];
+      ctx.fillText(LABEL_WPN_DEAD, bx + 8, by + 20);
+      return;
+    }
+
+    if (game.wpnState === 1) {                    // 소환 중 — 이미 돈은 냈다
+      const total = C.WEAPON_CAST_MS > 0 ? C.WEAPON_CAST_MS : 1;
+      const left = game.wpnCastMs > 0 ? game.wpnCastMs : 0;
+      let p = 1 - left / total;
+      p = p < 0 ? 0 : (p > 1 ? 1 : p);
+      ctx.font = FONT_MICRO;
+      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.62)];
+      ctx.fillText(C.WEAPON_WARN_LINE, bx + 8, by + 18);
+      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.22)];
+      ctx.fillRect(bx + 8, by + bh - 8, bw - 16, 3);
+      ctx.fillStyle = C.COL_BONUS;
+      ctx.fillRect(bx + 8, by + bh - 8, (bw - 16) * (1 - p), 3);
+      return;
+    }
+
+    // wpnState === 2 — 활동 중. 체력바만 (문장은 소환 중에 이미 한 번 읽혔다)
+    const k = game.wpnHpMax > 0 ? game.wpnHp / game.wpnHpMax : 0;
+    ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.25)];
+    ctx.fillRect(bx + 8, by + 18, bw - 16, 7);
+    ctx.fillStyle = C.COL_PLAYER;
+    ctx.fillRect(bx + 8, by + 18, (bw - 16) * (k > 0 ? k : 0), 7);
+  }
+
   // 등장 전 예고 — 일반 스킬 예고(작은 띠 하나, CAST_Y)보다 훨씬 크다.
   // 색은 여전히 COL_THREAT 하나뿐이다(규칙 2) — 다만 화면 전체가 옅게 물들어
   // "이건 스킬 하나가 아니다"를 크기로 말한다.
@@ -3991,6 +4110,7 @@ export class Renderer {
     this.drawFrontBar(game);
     this.drawWaterGauge(game);
     this.drawBossBar(game);
+    this.drawWeaponHud(game);
 
     this.drawCommander(game, director);
     if (director && directorView) this.drawDirectorView(game, director);
@@ -4467,9 +4587,23 @@ export class Renderer {
         o = game.eraReady() ? 1 : 0;
         m = 1;                                     // 다음 시대 이름 / 준비
       } else if (i === C.B_TOWER) {
-        price = game.towerCost ? game.towerCost() : -1;
-        if (price < 0) { m = 2; o = 0; }           // 최대
-        else { m = 0; p = game.gold >= price ? 0 : 1; o = p ? 0 : 1; }
+        // 최강병기(거신) — 포탑이 다 쓴 칸을 물려받는다. towerLv 가 TOWER_MAX 에
+        // 닿기 전에는 예전 그대로(가격 또는 "최대"). 닿은 뒤에는 이 칸 전체가
+        // 병기 칸이다 — 셋 중 하나: 원정에서 이미 썼다(m=6) · 아직 시대가 안
+        // 찼다(m=7) · 값만 남았다(m=0, 보통 가격 표시와 같은 길).
+        if (game.towerLv >= C.TOWER_MAX) {
+          if (game.wpnUsed) { m = 6; o = 0; }
+          else if (game.era < C.ERA_COUNT - 1) { m = 7; o = 0; }
+          else {
+            price = C.WEAPON_COST;
+            p = game.gold >= price ? 0 : 1;
+            m = 0; o = p ? 0 : 1;
+          }
+        } else {
+          price = game.towerCost ? game.towerCost() : -1;
+          if (price < 0) { m = 2; o = 0; }           // 최대
+          else { m = 0; p = game.gold >= price ? 0 : 1; o = p ? 0 : 1; }
+        }
       } else {
         const sk = i === C.B_TIDE ? C.SK_TIDE : C.SK_VOLLEY;
         const raw = skillCd ? (skillCd[sk] || 0) : (sk === C.SK_TIDE ? (game.nukeCd || 0) : 0);
@@ -4666,6 +4800,15 @@ export class Renderer {
       } else if (m === 3) {
         ctx.fillStyle = C.COL_BONUS;
         ctx.fillText(READY, x + 10, ly);
+      } else if (m === 6) {
+        // 최강병기 — 원정에서 이미 썼다. 최대(m=2)와 같은 자리, 다른 말.
+        ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.5)];
+        ctx.fillText(LABEL_WPN_USED, x + 10, ly);
+      } else if (m === 7) {
+        // 최강병기 — towerLv 는 찼지만 이 전투의 시대가 아직 안 찼다.
+        // 진화 버튼(m=1)과 같은 말투: 준비되면 뭐가 뜰지 미리 보여 준다.
+        ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.32)];
+        ctx.fillText(C.ERA_NAME[C.ERA_COUNT - 1], x + 10, ly);
       } else {
         ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.34)];
         const wsec = this.drawLeft(cost[i], x + 10, ly, P ? 13 : 9);

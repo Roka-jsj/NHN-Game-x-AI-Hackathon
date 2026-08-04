@@ -80,6 +80,12 @@ export const EV = {
   BOSS_SLAM: 30,       // a = 맞은 내 유닛 수, b = 0 — 슬램이 터졌다
   BOSS_HIT: 31,        // a = 이 타격으로 깎인 체력(반올림), b = 0
   BOSS_KILL: 32,       // 처치했다. a = 0, b = SIDE_L
+  // ── 최강병기 — 거신. 보스(심연)의 거울이다. 원정 전체에 한 번뿐 ──
+  // **27~32 는 건드리지 않는다. 추가는 33부터다.**
+  WEAPON_WARN: 33,     // a = 소환까지 남은 ms, b = 0 — 값을 냈다. 아직 없다
+  WEAPON_SPAWN: 34,    // 전장에 섰다. a = 0, b = 0
+  WEAPON_HIT: 35,      // a = 이 타격으로 깎인 체력(반올림), b = 0 — 적이 병기를 때렸다
+  WEAPON_KILL: 36,     // 파괴됐다. a = 0, b = SIDE_R
 };
 
 // 디렉터가 없을 때 적이 쓰는 고정 웨이브. 랜덤 0.
@@ -326,6 +332,9 @@ export class Game {
     this.traits.fill(0);
     this.mastery.fill(0);
     this.towerLv = 0;
+    // 최강병기(거신) 래치 — **원정 전체에 한 번**이다. towerLv 와 같은 자리,
+    // 같은 이유로 여기서만 지운다(resetBattle() 은 안 건드린다).
+    this.wpnUsed = false;
     this.resetBattle();
   }
 
@@ -390,6 +399,18 @@ export class Game {
     this.bossExposeMs = 0;        // 슬램 직후 노출 — 이 동안 받는 피해가 커진다
     this.bossHitFlash = 0;        // 렌더 전용
 
+    // ── 최강병기 — 거신. 보스의 거울이다 ──
+    // **wpnUsed 는 여기서 지우지 않는다** — reset() 만 지운다(towerLv 와 같은 자리).
+    // wpnState: 0 없음(대기) · 1 소환 중(예고) · 2 활동 · 3 파괴됨.
+    this.wpnState = 0;
+    this.wpnCastMs = 0;
+    this.wpnActive = false;
+    this.wpnHp = 0;
+    this.wpnHpMax = 0;
+    this.wpnX = 0;
+    this.wpnCd = 0;
+    this.wpnHitFlash = 0;         // 렌더 전용
+
     // 기지 체력은 **판 길이만** 정한다. 첫 전투가 0.45 인 이유는 그것뿐이다 —
     // 짧게 끝나야 가르치는 전투가 된다. 어려움은 여기가 아니라 STAGE_DIFF 가 만든다.
     const hp0 = C.BASE_HP * this.stageHpMul();
@@ -443,6 +464,7 @@ export class Game {
     this.goldSpentUnits = 0;
     this.goldSpentEra = 0;
     this.goldSpentTower = 0;
+    this.goldSpentWeapon = 0;     // 계측 전용 — 원정에 한 번뿐이라 대개 0이다가 한 판만 560
     this.kills = 0;
     this.lost = 0;
     this.nukes = 0;
@@ -724,7 +746,16 @@ export class Game {
         if (this.era >= C.ERA_COUNT - 1) this.useSkill(C.SK_SURGE);
         else this.buyEra();
         break;
-      case ACT.TOWER: this.buyTower(); break;
+      // **포탑 버튼도 다 쓰면 다른 것이 된다.** 두 단계를 다 올리면 이 칸은
+      // 영원히 "최대"만 띄우는 죽은 칸이었다(ERA가 SURGE를 물려받은 것과
+      // 같은 병) — 조건(towerLv===TOWER_MAX)이 맞으면 이 칸이 최강병기
+      // (거신) 소환 칸이 된다. wpnEligible() 이 구조(도달)만 보고,
+      // summonWeapon() 이 값(gold)을 따로 본다 — buyEra/eraReady 와 같은
+      // 자리 나누기다.
+      case ACT.TOWER:
+        if (this.towerLv >= C.TOWER_MAX && this.wpnEligible()) this.summonWeapon();
+        else this.buyTower();
+        break;
       case ACT.TIDE: this.useSkill(C.SK_TIDE); break;
       case ACT.VOLLEY: this.useSkill(C.SK_VOLLEY); break;
       case ACT.RALLY: this.useSkill(C.SK_RALLY); break;
@@ -796,6 +827,31 @@ export class Game {
     this.towerLv++;
     this.towerCd = C.TOWER_CD;      // 사자마자 쏘지는 않는다
     this.emit(EV.TOWER_UP, this.towerLv, SIDE_L);
+  }
+
+  // ── 최강병기 — 거신. 조건(구조)만 본다. 돈은 summonWeapon() 안에서 따로
+  // 본다(buyEra/eraReady 와 같은 자리 나누기 — 조건과 지불을 한 곳에서 섞지
+  // 않는다). towerLv>=TOWER_MAX 는 호출부(input())가 이미 확인했지만 여기서도
+  // 다시 본다 — 이 함수 혼자 불려도 안전해야 한다.
+  wpnEligible() {
+    return C.WEAPON_ENABLE === 1 && !this.wpnUsed && this.wpnState === 0
+      && this.towerLv >= C.TOWER_MAX && this.era >= C.ERA_COUNT - 1;
+  }
+
+  summonWeapon() {
+    if (!this.wpnEligible()) { this.emit(EV.COOLDOWN, -1, 0); return; }
+    if (this.gold < C.WEAPON_COST) { this.emit(EV.NO_GOLD, -1, 0); return; }
+    this.gold -= C.WEAPON_COST;
+    // 포탑과 같은 이유로 병력 지출에 센다 — 안 그러면 디렉터가 "진화에 쓴
+    // 비중"을 볼 때 이 값이 분모에서 빠져 수비형이 경제형으로 오독된다.
+    this.goldSpentUnits += C.WEAPON_COST;
+    this.goldSpentWeapon += C.WEAPON_COST;
+    // **원정 전체 래치를 여기서 한 번만 켠다.** 이 뒤로는 이 판이든 다음
+    // 판이든 이 함수가 다시 성공하지 않는다 — wpnEligible() 이 막는다.
+    this.wpnUsed = true;
+    this.wpnState = 1;
+    this.wpnCastMs = C.WEAPON_CAST_MS;
+    this.emit(EV.WEAPON_WARN, C.WEAPON_CAST_MS, 0);
   }
 
   // ── 진화 = 사건 ─────────────────────────────────────────────
@@ -918,6 +974,14 @@ export class Game {
       if (tb > 1) tb = 1;
       this.damageBoss(dmg * (1 + (fo - 1) * tb));
     }
+    // 병기도 uAlive 풀 밖이라 위 루프가 못 본다 — **적의 해일만** 따로 닿는다
+    // (내 해일이 내 병기를 때리는 일은 없다). 보스 블록의 거울이다.
+    if (side === SIDE_R && this.wpnActive) {
+      let tw = (this.wpnX - front) / reach;
+      if (tw < 0) tw = -tw;
+      if (tw > 1) tw = 1;
+      this.damageWeapon(dmg * (1 + (fo - 1) * tw));
+    }
     // 물을 미는 것은 **플레이어의 해일만**이다. 적의 해일까지 물을 밀면
     // 마감 시계가 적의 스킬로 꺼져 판이 다시 늘어진다 (예전 동작 그대로 유지).
     if (side === SIDE_L) {
@@ -960,6 +1024,19 @@ export class Game {
         const gy = groundAt(x);
         this.pushArrow(x, gy - 320, x, gy - C.BOSS_H * 0.5, side);
         this.damageBoss(dmg);
+      }
+    }
+    // 병기도 화살비를 맞는다 — uAlive 풀 밖이라 위 루프가 못 봐서 따로 검사한다.
+    // **적의 화살비만** 닿는다. 보스 블록의 거울이다.
+    if (side === SIDE_R && this.wpnActive) {
+      const x = this.wpnX;
+      let hit = (x - c0 >= -r && x - c0 <= r);
+      if (!hit && zones > 1) { const d = x - c1; hit = (d >= -r * 0.75 && d <= r * 0.75); }
+      if (!hit && zones > 2) { const d = x - c2; hit = (d >= -r * 0.75 && d <= r * 0.75); }
+      if (hit) {
+        const gy = groundAt(x);
+        this.pushArrow(x, gy - 320, x, gy - C.WEAPON_H * 0.5, side);
+        this.damageWeapon(dmg);
       }
     }
   }
@@ -1051,6 +1128,7 @@ export class Game {
     this.stepArrows();
     this.stepWater();
     this.stepBoss();
+    this.stepWeapon();
     this.stepTaunt();
     this.checkEnd();
   }
@@ -1597,6 +1675,28 @@ export class Game {
         }
       }
 
+      // ── 1.6) 최강병기(거신) — 보스 블록의 거울이다. 정확히 같은 이유,
+      // 정확히 같은 구조다: uKind/uAlive 풀 밖이라 findTarget 이 못 본다.
+      // **적(SIDE_R) 유닛만** 이걸 본다 — 이 병기가 "유닛전은 평범하다"는
+      // 역할을 실제로 지키는 자리가 여기다: 소수의 방어 병력도 진짜로
+      // 이걸 죽일 수 있다(damageWeapon 에는 방어 배수가 없다).
+      if (side === SIDE_R && this.wpnActive && C.U_SIEGE[kind] !== 1) {
+        const wd = this.wpnX - this.uX[i] < 0 ? this.uX[i] - this.wpnX : this.wpnX - this.uX[i];
+        if (wd <= range) {
+          if (this.uCd[i] <= 0) {
+            this.uCd[i] = this.statCooldown(kind, side);
+            this.uAttack[i] = 8;
+            this.damageWeapon(this.statDmg(kind, this.uEra[i], side, i));
+            if (kind === C.U_ARCHER || kind === C.U_CATA) {
+              this.pushArrow(this.uX[i], groundAt(this.uX[i]) - C.U_H[kind] * 0.6,
+                             this.wpnX, groundAt(this.wpnX) - C.WEAPON_H * 0.5, side);
+            }
+            this.emit(EV.ATTACK, kind, side);
+          }
+          continue;
+        }
+      }
+
       // ── 2) 적 기지 ────────────────────────────────────────────────
       // 사거리에 하한("앞마당")을 주는 안을 재봤지만 상성 삼각형이 깨졌다.
       // 자세한 실측은 config 의 BASE_DMG_MUL 아래 주석에 있다.
@@ -2057,6 +2157,80 @@ export class Game {
     // 시간이 갈수록 작아지는 일반 킬과 똑같이 취급되면 안 된다.
     this.water += C.BOSS_WATER_PUSH;
     this.emit(EV.BOSS_KILL, 0, SIDE_L);
+  }
+
+  // ── 최강병기 — 거신. 보스의 거울이다 ────────────────────────────
+  // uKind/uAlive 풀 밖의 별도 개체다. 여기 함수들이 위치·체력·행동의
+  // 유일한 소유자다 — stepBoss() 와 정확히 같은 구조다.
+  stepWeapon() {
+    if (this.wpnState === 0 || this.wpnState === 3) return;
+    const dt = C.SIM_DT / 1000;
+
+    // ── 소환 중 — 이미 돈은 냈다. 아직 아무것도 없다 ──
+    if (this.wpnState === 1) {
+      this.wpnCastMs -= C.SIM_DT;
+      if (this.wpnCastMs <= 0) this.spawnWeapon();
+      return;
+    }
+
+    if (!this.wpnActive) return;   // 이미 파괴됐다 (wpnState===3 이 위에서 막지만 방어적으로)
+    if (this.wpnHitFlash > 0) this.wpnHitFlash--;
+    if (this.wpnCd > 0) this.wpnCd -= C.SIM_DT;
+
+    // ── 근접 — 사거리 안의 가장 가까운 적 유닛을 붙든다. 상성표는 안 탄다 ──
+    let best = -1, bestD = 1e9;
+    for (let i = 0; i < C.UNIT_MAX; i++) {
+      if (!this.uAlive[i] || this.uSide[i] !== SIDE_R) continue;
+      const d = this.uX[i] - this.wpnX < 0 ? this.wpnX - this.uX[i] : this.uX[i] - this.wpnX;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best >= 0 && bestD <= C.WEAPON_RANGE) {
+      if (this.wpnCd <= 0) {
+        this.wpnCd = C.WEAPON_ATK_CD;
+        this.damage(best, C.WEAPON_DMG, SIDE_L, -1);
+      }
+      return;      // 붙어 있는 동안은 서서 싸운다 — 전진도 기지 공격도 안 한다
+    }
+
+    // ── 기지 — 역할표의 강한 쪽. WEAPON_BASE_DMG 는 WEAPON_DMG 와 별도 상수다 ──
+    if (Math.abs(this.wpnX - C.BASE_R_X) <= C.BASE_W * 0.5 + C.WEAPON_RANGE) {
+      if (this.wpnCd <= 0) {
+        this.wpnCd = C.WEAPON_BASE_ATK_CD;
+        this.hitBase(SIDE_R, C.WEAPON_BASE_DMG);
+      }
+      return;
+    }
+
+    // ── 전진 — 아무도 안 막으면 느리게 적 기지로 걸어간다 ──
+    this.wpnX += C.WEAPON_SPEED * dt;
+    if (this.wpnX > C.BASE_R_X) this.wpnX = C.BASE_R_X;
+  }
+
+  spawnWeapon() {
+    this.wpnState = 2;
+    this.wpnActive = true;
+    this.wpnHpMax = C.WEAPON_HP;
+    this.wpnHp = C.WEAPON_HP;
+    this.wpnX = C.SPAWN_L_X;      // 다른 병력과 같은 소환지점에서 걸어 나간다
+    this.wpnCd = 0;
+    this.emit(EV.WEAPON_SPAWN, 0, 0);
+  }
+
+  // 병기가 받는 피해의 유일한 입구. 상성표를 안 탄다(atkKind 개념 자체가 없다).
+  // 보스의 damageBoss() 와 달리 방어 배수가 없다 — "소환하기 어렵다"의 대가를
+  // 값·도달·소환속도 셋에 이미 걸었으므로, 전투 중 방어까지 얹으면 축이 겹친다.
+  damageWeapon(dmg) {
+    if (!this.wpnActive || this.wpnHp <= 0) return;
+    this.wpnHp -= dmg;
+    this.wpnHitFlash = 4;
+    this.emit(EV.WEAPON_HIT, Math.round(dmg), 0);
+    if (this.wpnHp <= 0) { this.wpnHp = 0; this.killWeapon(); }
+  }
+
+  killWeapon() {
+    this.wpnActive = false;
+    this.wpnState = 3;
+    this.emit(EV.WEAPON_KILL, 0, SIDE_R);
   }
 
   checkEnd() {
