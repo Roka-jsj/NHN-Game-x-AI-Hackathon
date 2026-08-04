@@ -32,6 +32,14 @@ const E_STAGE_CLEAR  = EV.STAGE_CLEAR  !== undefined ? EV.STAGE_CLEAR  : 21;
 const E_TAUNT        = EV.TAUNT        !== undefined ? EV.TAUNT        : 22;
 const E_CAMPAIGN_END = EV.CAMPAIGN_END !== undefined ? EV.CAMPAIGN_END : 23;
 const E_SKILL_UP     = EV.SKILL_UP     !== undefined ? EV.SKILL_UP     : 24;
+// v4 보스 「심연」. 다섯 번째 전투(거울)에만, 조건부로 한 번 나온다.
+// 보스는 항상 SIDE_R 소유라 진영 분기가 필요 없다 — game.js 의 계약 그대로다.
+const E_BOSS_WARN      = EV.BOSS_WARN      !== undefined ? EV.BOSS_WARN      : 27;
+const E_BOSS_SPAWN     = EV.BOSS_SPAWN     !== undefined ? EV.BOSS_SPAWN     : 28;
+const E_BOSS_SLAM_CAST = EV.BOSS_SLAM_CAST !== undefined ? EV.BOSS_SLAM_CAST : 29;
+const E_BOSS_SLAM      = EV.BOSS_SLAM      !== undefined ? EV.BOSS_SLAM      : 30;
+const E_BOSS_HIT       = EV.BOSS_HIT       !== undefined ? EV.BOSS_HIT       : 31;
+const E_BOSS_KILL      = EV.BOSS_KILL      !== undefined ? EV.BOSS_KILL      : 32;
 
 // 스킬 번호. config 가 아직 총진군을 모를 수도 있다 — 없으면 3 으로 둔다.
 const SK_TIDE   = (typeof C.SK_TIDE   === 'number') ? C.SK_TIDE   : 0;
@@ -148,6 +156,14 @@ const CAMP_WIN_SEQ = Float32Array.of(164.81, 246.94, 329.63, 415.30, 493.88, 659
 // 상성 타격이 초당 몇 번씩 터지면 소리가 기관총이 된다.
 // 이 간격 안에 겹치면 짧은 판(版)으로 대체한다 — 타격감은 남기고 비용만 줄인다.
 const COUNTER_DENSE = 0.085;
+// 보스 타격도 자동공격이라 여러 유닛이 겹칠 수 있다. 같은 문제, 같은 해법.
+const BOSS_HIT_DENSE = 0.09;
+
+// 보스 예고(2.6초) — 심장박동 간격이 좁아진다("다가온다"). 정규화된 0..1 지점.
+// RALLY_DRUM(모여든다)과 같은 언어의 가속이지만, 처음부터 끝까지 한 번에 간다.
+const BOSS_WARN_BEAT = Float32Array.of(0, 0.34, 0.56, 0.71, 0.82, 0.90, 0.96);
+// 슬램 예고(1.4초) — 더 짧고 급하다. 발밑 균열 고리가 조여드는 것과 같은 가속.
+const BOSS_TENSE_BEAT = Float32Array.of(0, 0.40, 0.66, 0.84, 0.95);
 
 // 구간별 층 게인 배수 — 판 안에서 곡이 자라야 한다.
 // 도입을 35초로 뒀더니 판의 앞 3분의 1이 베이스만 남아 비었다.
@@ -239,6 +255,8 @@ export class Audio {
     // 항상 "촘촘함"으로 오판되어, 이벤트 하나만 재생하는 오프라인 검증에서
     // 계열별 소리가 영영 안 들리는 문제가 생긴다)
     this.tAttack = -1e9;
+    // 마지막 보스 타격음 시각. 같은 이유로 -1e9 — 첫 타격이 밀도 문턱에 안 걸린다.
+    this.tBossHit = -1e9;
 
     // ── 원정 상태. game.js 가 아직 안 보내면 전부 기본값에 머문다 ──
     this.cmdSeen = false;   // STAGE_START 나 game.commander 를 한 번이라도 봤는가
@@ -1334,6 +1352,107 @@ export class Audio {
     }
   }
 
+  // ── 보스 「심연」의 소리 ─────────────────────────────────────
+  // 다섯 번째 전투(거울)에만, 조건부로 한 번 나온다. 여섯 사건이 서로
+  // 절대 헷갈리면 안 된다:
+  //   예고     다가온다 — 리저 + 좁아지는 심장박동. 아직 아무 일도 없다
+  //   등장     왔다 — 서늘하고 무겁다. eraVoice 의 팡파르 재료를 안 쓴다
+  //   슬램 예고 조여든다 — 더 짧고 급하다. 발밑 균열 고리와 같은 언어
+  //   슬램     맞았다 — 손해. 낮고 넓다. 방향이 없다
+  //   타격     때렸다 — 성과. 자동공격이라 겹칠 수 있어 밀도 제어가 있다
+  //   처치     가장 크다. WIN 급 무게이되 "끝"의 재료(해결되는 옥타브)는
+  //            안 쓴다 — 판은 계속된다
+  // 보스는 항상 SIDE_R 소유라 어디에도 side 분기가 없다.
+
+  // 예고 2.6초. **리저가 먼저 들려야 한다** — eraVoice 의 "앞머리"와 같은
+  // 문법이다(오는 것이 먼저 들린다). 노이즈 버퍼가 2초라 한 장으로 못 채워
+  // 두 장을 이어 붙인다. 심장박동은 간격이 좁아지며 다가온다 — render 의
+  // 카운트다운(drawBossWarn)과 같은 시간축을 쓴다. 화면 전체 사건이라
+  // WATER_WARN 처럼 진영 버스를 안 쓰고 master 로 바로 간다.
+  bossWarnVoice(ms) {
+    if (!this.ready) return;
+    const dur = Math.max(0.4, (ms || C.BOSS_CAST_MS || 2600) / 1000);
+    this.nz(Math.min(1900, dur * 620), 0.055, 55, 220, 'lowpass', 0, 0);
+    this.nz(Math.min(1900, dur * 420), 0.060, 200, 480, 'lowpass', dur * 0.55, 0);
+    this.blip('sine', 30, 92, dur * 940, 0.075, 0, 0);
+    for (let i = 0; i < BOSS_WARN_BEAT.length; i++) {
+      const t0 = BOSS_WARN_BEAT[i] * dur;
+      this.blip('sine', 60, 40, 85, 0.045 + 0.010 * i, t0, 0);
+      this.nz(45, 0.028 + 0.006 * i, 190, 85, 'lowpass', t0, 0);
+    }
+  }
+
+  // 등장. **서늘하지만 무겁다** — 축제가 아니라 위협이다. 낮은 신음과
+  // 물이 갈라지는 소리뿐, 장음계 팡파르(eraVoice)는 안 쓴다.
+  // 진영 버스(적, 고정)로 보낸다 — 이제부터 화면에 있는 실체의 소리다.
+  bossSpawnVoice() {
+    if (!this.ready) return;
+    const d = this.sideIn(1, false);
+    this.nz(700, 0.150, 2600, 85, 'lowpass', 0, 0, d);
+    this.blip('sawtooth', 46, 28, 900, 0.125, 0, 0, d);
+    this.blip('sine', 30, 21, 1100, 0.115, 0.04, 0, d);
+    this.nz(280, 0.065, 900, 220, 'bandpass', 0.05, 1.3, d);
+    this.blip('sine', 620, 460, 260, 0.045, 0.10, 2000, d);
+  }
+
+  // 슬램 예고 1.4초. render 가 발밑 균열 고리를 조인다 — 대역이 좁아지며
+  // 위로 오르고, 째깍임이 가속한다. BOSS_WARN 보다 훨씬 짧고 급해서
+  // 둘이 안 헷갈린다. 화면 전체 사건이라 master 로 바로 간다.
+  bossSlamCastVoice(ms) {
+    if (!this.ready) return;
+    const dur = Math.max(0.2, (ms || C.BOSS_SLAM_CAST_MS || 1400) / 1000);
+    this.nz(dur * 1000, 0.080, 1700, 4400, 'bandpass', 0, 2.4);
+    this.blip('sawtooth', 78, 250, dur * 1000, 0.050, 0, 1500);
+    for (let i = 0; i < BOSS_TENSE_BEAT.length; i++) {
+      const t0 = BOSS_TENSE_BEAT[i] * dur;
+      this.nz(24, 0.040 + 0.010 * i, 3200, 1300, 'bandpass', t0, 3);
+    }
+  }
+
+  // 슬램이 터졌다 — 내가 맞은 것, 손해다. 낮고 넓게, 방향이 없다
+  // (COUNTER_HIT 의 "내가 맞았다" 계와 같은 언어). a = 맞은 유닛 수만큼
+  // 조금씩 커지되 상한을 둔다. WATER_HIT 처럼 환경 피해라 진영 버스를 안 쓴다.
+  bossSlamVoice(n) {
+    if (!this.ready) return;
+    const s = Math.min(4, Math.max(0, n | 0));
+    this.nz(220, 0.130 + 0.015 * s, 1400, 70, 'lowpass', 0, 0);
+    this.blip('sine', 52, 24, 420, 0.100 + 0.012 * s, 0, 0);
+    this.blip('triangle', 104, 48, 300, 0.055, 0, 350);
+    this.nz(140, 0.050, 3000, 900, 'bandpass', 0.02, 1.4);
+  }
+
+  // 내가 때렸다 — 성과. 자동공격이라 여러 유닛이 겹치면 자주 난다.
+  // attackVoice·E_COUNTER_HIT 과 같은 문제, 같은 해법: 촘촘하면 짧은 판으로.
+  // 목표(보스=적)가 자리이므로 BASE_HIT 의 관례를 따라 적 진영 버스로 보낸다.
+  bossHitVoice() {
+    if (!this.ready) return;
+    const d = this.sideIn(1, false);
+    const now = this.ctx.currentTime;
+    const dense = now - this.tBossHit < BOSS_HIT_DENSE;
+    this.tBossHit = now;
+    if (dense) {
+      this.nz(28, 0.045, 3000, 1100, 'bandpass', 0, 2, d);
+      return;
+    }
+    this.nz(55, 0.085, 3600, 900, 'bandpass', 0, 1.6, d);
+    this.blip('square', 900, 260, 50, 0.055, 0, 0, d);
+    this.nz(90, 0.045, 650, 150, 'lowpass', 0.02, 0, d);
+  }
+
+  // 처치. 이 판의 가장 큰 처치이지만 **판은 안 끝났다** — WIN 의 재료를
+  // 그대로 안 쓴다(장조로 해결되는 옥타브는 "끝"의 문법이다). 짧게 솟구치고
+  // 곧바로 무너지는 붕괴음을 더한다 — "쓰러뜨렸다"이지 "이겼다"가 아니다.
+  // 판을 통째로 채우는 사건이라 WIN/LOSE 처럼 진영 버스 없이 master 로 간다.
+  bossKillVoice() {
+    if (!this.ready) return;
+    this.blip('square', 220, 90, 90, 0.115, 0);
+    this.blip('sine', 659.25, 659.25, 140, 0.100, 0.05);
+    this.blip('sine', 783.99, 783.99, 160, 0.105, 0.15);
+    this.nz(900, 0.150, 2200, 85, 'lowpass', 0.05, 0);
+    this.blip('sawtooth', 58, 22, 900, 0.120, 0.05, 480);
+    this.blip('sine', 1046.5, 1046.5, 340, 0.095, 0.30);
+  }
+
   // ── 상태 전이에 붙는다. 전이 타이밍을 바꾸지 않는다 ──────────
   onEvent(type, a, b, game) {
     if (this.failed) return;
@@ -1527,6 +1646,31 @@ export class Audio {
       case E_CAMPAIGN_END:
         // a = 클리어 수, b = 1 이면 완주
         if (this.ready) this.campaignVoice((b | 0) === 1);
+        break;
+
+      // ── v4 보스 「심연」 ──────────────────────────────────
+      case E_BOSS_WARN:
+        this.bossWarnVoice(a);
+        break;
+
+      case E_BOSS_SPAWN:
+        this.bossSpawnVoice();
+        break;
+
+      case E_BOSS_SLAM_CAST:
+        this.bossSlamCastVoice(a);
+        break;
+
+      case E_BOSS_SLAM:
+        this.bossSlamVoice(a);
+        break;
+
+      case E_BOSS_HIT:
+        this.bossHitVoice();
+        break;
+
+      case E_BOSS_KILL:
+        this.bossKillVoice();
         break;
 
       case EV.RESET:

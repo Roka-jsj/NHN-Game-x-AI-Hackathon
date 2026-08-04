@@ -77,6 +77,9 @@ const FREEZE_LOAD_HI  = num(C.FREEZE_LOAD_MAX_HI, 0.14);
 const LOAD_K = 1 / 90;                                // 부하 추정 창 ≈ 1.5초
 
 const HITSTOP_COUNTER = num(C.HITSTOP_COUNTER, 3);
+// config 에 이미 있던 이름인데(HITSTOP_HIT) 이 파일에서 여태 아무도 안 썼다 —
+// BOSS_HIT 의 freeze() 거버너 문턱으로 그대로 가져다 쓴다.
+const HITSTOP_HIT     = num(C.HITSTOP_HIT, 2);
 const SHAKE_COUNTER   = num(C.SHAKE_COUNTER, 2.6);
 const STREAK_HOLD     = num(C.STREAK_HOLD, 45);       // 연쇄가 끊기는 시간
 const FOE_HIT_GAP     = num(C.FOE_HIT_GAP, 20);       // 적에게 당한 상성 타격의 최소 간격
@@ -172,6 +175,16 @@ const E_SKILL_UP     = num(EV.SKILL_UP, 24);
 // EV.ZODIAC(25) 는 **일부러 비워 둔다.** 그 전투의 하늘이 정해진 것은 충격이
 // 아니다 — 배경이 바뀌는 것이고 render 의 몫이다. 여기서 화면을 흔들면
 // 전투 시작마다 이유 없는 진동이 하나 늘 뿐이다.
+
+// v4 보스 — 다섯 번째 전투(거울)에만, 조건부로 한 번. 보스는 항상 SIDE_R 소유라
+// 진영 분기가 필요 없다(TOWER_UP 의 "적 진영에서는 안 온다"류 가드와 달리,
+// BOSS_HIT·BOSS_KILL 은 "내가 적에게 좋은 일을 하는 사건"으로 항상 고정이다).
+const E_BOSS_WARN      = num(EV.BOSS_WARN, 27);
+const E_BOSS_SPAWN     = num(EV.BOSS_SPAWN, 28);
+const E_BOSS_SLAM_CAST = num(EV.BOSS_SLAM_CAST, 29);
+const E_BOSS_SLAM      = num(EV.BOSS_SLAM, 30);
+const E_BOSS_HIT       = num(EV.BOSS_HIT, 31);
+const E_BOSS_KILL      = num(EV.BOSS_KILL, 32);
 
 // 지면 높이 — 협곡은 V자라 가운데가 78px 낮다.
 // 고치기 전에는 타격 파편이 전부 C.GROUND_Y 기준이라 **전선 위 100px 허공**에서
@@ -1133,6 +1146,93 @@ export class Feel {
           this.spray(lx, gy(lx) - C.BASE_H - 18, (C.PART_NUKE * 0.6) | 0, 2,
                      3.0, -1.4, C.PART_LIFE, 4.2);
         }
+        break;
+      }
+
+      // ── v4 보스 「심연」 ──────────────────────────────────────
+      case E_BOSS_WARN: {
+        // 예고 2.6초. render 가 화면 전체를 옅게 물들이고 카운트다운을 그린다
+        // (drawBossWarn) — 여기서 그걸 다시 흔들면 중복이다. **아직 아무 일도
+        // 일어나지 않았다**(적 사건이다) — 히트스톱도 셰이크도 안 쓴다.
+        // 물 밑에서 거품만 뜬다. "떠오른다"의 낌새를 미리 눈에 남기는 정도다.
+        const bx = C.VIEW_W * 0.5;
+        this.ring(bx, gy(bx) - 4);
+        this.spray(bx, gy(bx) - 2, 5, 2, 0.8, 1.6, 42, 2.4);
+        break;
+      }
+
+      case E_BOSS_SPAWN: {
+        // 등장의 순간. **ERA_UP(내 진화)급의 축제는 과하다** — 이건 위협이지
+        // 성과가 아니다. 그래서 히트스톱도 flash 도 안 쓴다(적이 세지는 순간에
+        // 내 화면이 멈추거나 번쩍이면 그건 내 성과의 문법이다 — ERA_UP 의 계약
+        // 그대로). 대신 세기가 아니라 **결로** 무게를 낸다: 굵은 결(5)로 짧게
+        // 짓누르고, 화면이 적 쪽에서 내 쪽으로 밀린다 — "이제부터 저게 온다".
+        const bx = num(game && game.bossX, C.VIEW_W * 0.5);
+        const top = gy(bx) - C.BOSS_H;
+        this.addShake(C.SHAKE_NUKE * 0.55, 0, AX_Y, 5);
+        this.kick(-3.0, 1.6);
+        this.ring(bx, gy(bx) - 6);
+        this.spray(bx, top + C.BOSS_H * 0.3, (C.PART_NUKE * 0.5) | 0, 2, 3.2, 2.0, C.PART_LIFE, 4);
+        break;
+      }
+
+      case E_BOSS_SLAM_CAST:
+        // **비워 둔다.** render 는 이미 발밑에 조여드는 균열 고리를 그리고 있고
+        // (drawBoss, bossSlamCasting) 오디오가 그 1.4초를 리저로 채운다.
+        // 이 게임의 다른 모든 예고(EV.AI_CAST)도 feel 은 손대지 않는다 —
+        // 예고에서 흔들면 진짜 슬램(BOSS_SLAM)이 왔을 때 대비가 안 산다.
+        break;
+
+      case E_BOSS_SLAM: {
+        // 내가 맞았다 — 손해. **히트스톱 없음**(손해에 구두점을 찍지 않는다,
+        // BASE_HIT·SLAM 공통 규칙). 세로 축(맞은 것에는 방향이 없다 — 적의
+        // COUNTER_HIT 과 같은 언어). a = 맞은 내 유닛 수, 많이 맞을수록 커지되
+        // 문턱을 둔다(화면이 안 날아가야 한다). 반경 안에서 터지는 것이므로
+        // 방사형 burst 를 쓴다 — 방향 있는 spray 가 아니라 사방으로 밀린 것이다.
+        const bx = num(game && game.bossX, C.VIEW_W * 0.5);
+        const n = Math.max(0, a | 0);
+        const s = Math.min(4, n);
+        this.addShake(C.SHAKE_BASE * (0.55 + 0.25 * s), 0, AX_Y, 4);
+        this.ring(bx, gy(bx) - 2);
+        this.burst(bx, gy(bx) - 30, 6 + s * 2, 2);
+        break;
+      }
+
+      case E_BOSS_HIT: {
+        // 내가 때렸다 — 성과. a = 이 타격으로 깎인 체력. 자주 나는 사건이라
+        // (자동공격이라 여러 유닛이 겹칠 수 있다) COUNTER_HIT 과 같은 처방을
+        // 쓴다: **매번 숫자+파편, 예산이 허락할 때만 진짜 충격.** 가로 축
+        // (때리는 방향이 있다). 노출(EXPOSE) 여부는 이벤트에 안 실려 오므로
+        // 여기서 구분하지 않는다 — 있는 정보로만 푼다.
+        const bx = num(game && game.bossX, C.VIEW_W * 0.5);
+        const top = gy(bx) - C.BOSS_H;
+        const dmg = Math.max(0, a | 0);
+        this.float(bx, top - 10 - Math.random() * 16, dmg, 0);
+        this.spray(bx + (Math.random() * 2 - 1) * 18, top + C.BOSS_H * 0.42,
+                   2, 1, 2.0, 0.8, 18, 2.8);
+        // freeze() 의 간격·부하 거버너를 그대로 빌린다 — 새 쿨다운을 만들지 않는다.
+        if (this.freeze(HITSTOP_HIT, PR_LOW)) {
+          this.addShake(C.SHAKE_HIT * 0.7, 0, AX_X, 2);
+          this.spray(bx, top + C.BOSS_H * 0.42, 4, 1, 2.6, 1.2, 22, 3.2);
+        }
+        break;
+      }
+
+      case E_BOSS_KILL: {
+        // 이 판의 가장 큰 처치다(한 판에 한 번뿐 — evaluate.mjs 로 확인).
+        // WIN/LOSE 급 무게를 받을 자격이 있다. **다만 판은 안 끝났다** — 그래서
+        // resultStep 을 세우지 않고 banner()(BAN_* 5칸은 결말·진화 전용)도
+        // 건드리지 않는다. 위로 솟는다(승리의 방향), 가로 축(내가 잡은 것 —
+        // 때린 방향이 있다, EV.KILL 의 mine 계와 같은 언어). 보스가 서 있던
+        // 자리(중앙, 물 위)가 곧 어두운 배경이라 금빛 파편이 거기서 읽힌다.
+        const bx = num(game && game.bossX, C.VIEW_W * 0.5);
+        const top = gy(bx) - C.BOSS_H;
+        this.freeze(9, PR_ALWAYS);
+        this.addShake(C.SHAKE_NUKE * 0.75, 0, AX_X, 2);
+        this.kick(0, -4.0);
+        this.flash((C.FLASH_FRAMES * 1.5) | 0);
+        this.ring(bx, top + C.BOSS_H * 0.5);
+        this.spray(bx, top + C.BOSS_H * 0.4, (C.PART_NUKE * 0.9) | 0, 1, 3.6, 3.2, C.PART_LIFE, 4.2);
         break;
       }
 
