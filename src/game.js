@@ -71,6 +71,15 @@ export const EV = {
   // 아트·오디오·게임필이 여기서 경고를 낸다. 게임의 상태로도 읽을 수 있다:
   // game.aiCastSkill(스킬 번호, 없으면 -1) 과 game.aiCastMs(남은 ms).
   AI_CAST: 26,
+  // ── 보스 — 심연. 다섯 번째 전투(거울)에만, 조건부로 한 번 ──
+  // **0~26 은 건드리지 않는다. 추가는 27부터다.** 상성표(6×6)에는 안 들어간다 —
+  // 보스는 uKind/uAlive 풀 밖의 별도 개체다(game.js 의 bossX·bossHp 등 전용 필드).
+  BOSS_WARN: 27,       // a = 예고 시간(ms), b = 0 — 곧 떠오른다. 아직 없다
+  BOSS_SPAWN: 28,      // 지금 등장했다. a = 0, b = 0
+  BOSS_SLAM_CAST: 29,  // a = 슬램까지 남은 ms — 보스 자신의 예고. AI_CAST 와 별도 번호다
+  BOSS_SLAM: 30,       // a = 맞은 내 유닛 수, b = 0 — 슬램이 터졌다
+  BOSS_HIT: 31,        // a = 이 타격으로 깎인 체력(반올림), b = 0
+  BOSS_KILL: 32,       // 처치했다. a = 0, b = SIDE_L
 };
 
 // 디렉터가 없을 때 적이 쓰는 고정 웨이브. 랜덤 0.
@@ -361,6 +370,25 @@ export class Game {
     this.aiCastSkill = -1;        // 지금 걸려 있는 적 스킬. 없으면 -1
     this.aiCastMs = 0;            // 터지기까지 남은 시간. 렌더가 이걸로 경고를 그린다
     this.eraUps = 0;              // 이번 전투에서 진화한 횟수 (계측용)
+
+    // ── 보스 — 심연. 다섯 번째 전투(거울)에만 조건부로 한 번 ──
+    // uKind/uAlive/uSide 풀에 안 들어간다 — 여기 전용 필드로만 존재한다.
+    // bossState: 0 없음(조건 대기) · 1 예고 · 2 등장 · 3 처치.
+    this.bossOn = (C.BOSS_ENABLE === 1) && (this.stage === C.BOSS_STAGE);
+    this.bossState = 0;
+    this.bossWarnMs = 0;
+    this.bossSpawned = false;     // 한 번 등장하면 조건이 다시 맞아도 재등장하지 않는다
+    this.bossActive = false;
+    this.bossDefeated = false;
+    this.bossHp = 0;
+    this.bossHpMax = 0;
+    this.bossX = 0;
+    this.bossCd = 0;
+    this.bossSlamCd = 0;
+    this.bossSlamCasting = false;
+    this.bossSlamCastMs = 0;
+    this.bossExposeMs = 0;        // 슬램 직후 노출 — 이 동안 받는 피해가 커진다
+    this.bossHitFlash = 0;        // 렌더 전용
 
     // 기지 체력은 **판 길이만** 정한다. 첫 전투가 0.45 인 이유는 그것뿐이다 —
     // 짧게 끝나야 가르치는 전투가 된다. 어려움은 여기가 아니라 STAGE_DIFF 가 만든다.
@@ -881,6 +909,15 @@ export class Game {
       if (t > 1) t = 1;
       this.damage(i, dmg * (1 + (fo - 1) * t), side, -1);
     }
+    // 보스는 uAlive 풀에 없어 위 루프가 못 본다 — **플레이어의 해일만** 따로 닿는다
+    // (적의 해일이 자기 편 보스를 때리는 일은 없다). 밀어냄·기절은 안 준다 —
+    // 거대한 것은 파도로 안 밀린다는 것도 실루엣 없이 "무겁다"를 말하는 방법이다.
+    if (side === SIDE_L && this.bossActive) {
+      let tb = (this.bossX - front) / reach;
+      if (tb < 0) tb = -tb;
+      if (tb > 1) tb = 1;
+      this.damageBoss(dmg * (1 + (fo - 1) * tb));
+    }
     // 물을 미는 것은 **플레이어의 해일만**이다. 적의 해일까지 물을 밀면
     // 마감 시계가 적의 스킬로 꺼져 판이 다시 늘어진다 (예전 동작 그대로 유지).
     if (side === SIDE_L) {
@@ -912,6 +949,18 @@ export class Game {
       const gy = groundAt(x);
       this.pushArrow(x, gy - 320, x, gy - C.U_H[this.uKind[i]] * 0.5, side);
       this.damage(i, dmg, side, -1);
+    }
+    // 보스도 화살비를 맞는다 — uAlive 풀 밖이라 위 루프가 못 봐서 따로 검사한다.
+    if (side === SIDE_L && this.bossActive) {
+      const x = this.bossX;
+      let hit = (x - c0 >= -r && x - c0 <= r);
+      if (!hit && zones > 1) { const d = x - c1; hit = (d >= -r * 0.75 && d <= r * 0.75); }
+      if (!hit && zones > 2) { const d = x - c2; hit = (d >= -r * 0.75 && d <= r * 0.75); }
+      if (hit) {
+        const gy = groundAt(x);
+        this.pushArrow(x, gy - 320, x, gy - C.BOSS_H * 0.5, side);
+        this.damageBoss(dmg);
+      }
     }
   }
 
@@ -1001,6 +1050,7 @@ export class Game {
     this.stepAiTower();
     this.stepArrows();
     this.stepWater();
+    this.stepBoss();
     this.stepTaunt();
     this.checkEnd();
   }
@@ -1525,6 +1575,28 @@ export class Game {
         if (t2 >= 0) nearFoe = (this.uX[t2] - this.uX[i]) * dir;
       }
 
+      // ── 1.5) 보스 — 별도 개체다. uKind/uAlive 풀에 없으므로 findTarget 이
+      // 못 본다. **실제 적 유닛이 사거리 안에 없을 때만** 대신 붙는다(위에서
+      // 이미 target 이 있었으면 continue 로 여기 안 온다) — 상성표를 안 타고
+      // (statDmg 는 부르되 damage() 가 아니라 damageBoss() 로 간다), 공성
+      // 병기는 유닛을 안 보는 기존 규칙 그대로 여기도 건너뛴다.
+      if (side === SIDE_L && this.bossActive && C.U_SIEGE[kind] !== 1) {
+        const bd = this.bossX - this.uX[i] < 0 ? this.uX[i] - this.bossX : this.bossX - this.uX[i];
+        if (bd <= range) {
+          if (this.uCd[i] <= 0) {
+            this.uCd[i] = this.statCooldown(kind, side);
+            this.uAttack[i] = 8;
+            this.damageBoss(this.statDmg(kind, this.uEra[i], side, i));
+            if (kind === C.U_ARCHER || kind === C.U_CATA) {
+              this.pushArrow(this.uX[i], groundAt(this.uX[i]) - C.U_H[kind] * 0.6,
+                             this.bossX, groundAt(this.bossX) - C.BOSS_H * 0.5, side);
+            }
+            this.emit(EV.ATTACK, kind, side);
+          }
+          continue;
+        }
+      }
+
       // ── 2) 적 기지 ────────────────────────────────────────────────
       // 사거리에 하한("앞마당")을 주는 안을 재봤지만 상성 삼각형이 깨졌다.
       // 자세한 실측은 config 의 BASE_DMG_MUL 아래 주석에 있다.
@@ -1842,6 +1914,149 @@ export class Game {
       }
       if (this.tick % 30 === 0) this.emit(EV.WATER_HIT, 0, 0);
     }
+  }
+
+  // ── 보스 — 심연 ─────────────────────────────────────────────
+  // 다섯 번째 전투(거울)에만, 그 판의 물이 BOSS_TRIGGER_WATER_K 만큼 찼을 때
+  // 딱 한 번 떠오른다. uKind/uAlive 풀에 없다 — 상성표(6×6)를 절대 안 탄다.
+  // 여기 함수들이 보스의 위치·체력·행동의 유일한 소유자다.
+  stepBoss() {
+    if (!this.bossOn || this.bossDefeated) return;
+    const dt = C.SIM_DT / 1000;
+
+    // ── 예고 대기 → 예고 중 ──────────────────────────────────
+    if (!this.bossSpawned) {
+      if (this.bossState === 0) {
+        if (this.simTime >= C.BOSS_TRIGGER_MIN_MS && this.waterK() >= C.BOSS_TRIGGER_WATER_K) {
+          this.bossState = 1;
+          this.bossWarnMs = C.BOSS_CAST_MS;
+          this.emit(EV.BOSS_WARN, C.BOSS_CAST_MS, 0);
+        }
+        return;
+      }
+      // bossState === 1: 예고가 흐르는 중
+      this.bossWarnMs -= C.SIM_DT;
+      if (this.bossWarnMs <= 0) this.spawnBoss();
+      return;
+    }
+
+    if (!this.bossActive) return;   // 이미 처치됐다 (bossDefeated 가 위에서 막지만 방어적으로)
+
+    if (this.bossExposeMs > 0) { this.bossExposeMs -= C.SIM_DT; if (this.bossExposeMs < 0) this.bossExposeMs = 0; }
+    if (this.bossHitFlash > 0) this.bossHitFlash--;
+
+    // ── 슬램 — 예고 있는 광역기. 준비 중엔 서서 아무것도 안 한다 ──
+    if (this.bossSlamCasting) {
+      this.bossSlamCastMs -= C.SIM_DT;
+      if (this.bossSlamCastMs <= 0) this.fireBossSlam();
+      return;
+    }
+    if (this.bossSlamCd > 0) {
+      this.bossSlamCd -= C.SIM_DT;
+    } else {
+      this.bossSlamCasting = true;
+      this.bossSlamCastMs = C.BOSS_SLAM_CAST_MS;
+      this.bossSlamCd = C.BOSS_SLAM_CD;
+      this.emit(EV.BOSS_SLAM_CAST, C.BOSS_SLAM_CAST_MS, 0);
+      return;
+    }
+
+    if (this.bossCd > 0) this.bossCd -= C.SIM_DT;
+
+    // ── 근접 — 사거리 안의 가장 가까운 내 유닛을 붙든다 ─────────
+    let best = -1, bestD = 1e9;
+    for (let i = 0; i < C.UNIT_MAX; i++) {
+      if (!this.uAlive[i] || this.uSide[i] !== SIDE_L) continue;
+      const d = this.uX[i] - this.bossX < 0 ? this.bossX - this.uX[i] : this.uX[i] - this.bossX;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best >= 0 && bestD <= C.BOSS_RANGE) {
+      if (this.bossCd <= 0) {
+        this.bossCd = C.BOSS_ATK_CD;
+        this.damage(best, C.BOSS_DMG, SIDE_R, -1);
+      }
+      return;      // 붙어 있는 동안은 서서 싸운다 — 전진도 기지 공격도 안 한다
+    }
+
+    // ── 기지 ──────────────────────────────────────────────────
+    if (Math.abs(this.bossX - C.BASE_L_X) <= C.BASE_W * 0.5 + C.BOSS_RANGE) {
+      if (this.bossCd <= 0) {
+        this.bossCd = C.BOSS_ATK_CD;
+        this.hitBase(SIDE_L, C.BOSS_DMG * C.BOSS_BASE_DMG_MUL);
+      }
+      return;
+    }
+
+    // ── 전진 — 아무도 안 막으면 느리게 기지로 걸어간다 ──────────
+    this.bossX -= C.BOSS_SPEED * dt;
+    if (this.bossX < C.BASE_L_X) this.bossX = C.BASE_L_X;
+  }
+
+  spawnBoss() {
+    this.bossState = 2;
+    this.bossSpawned = true;
+    this.bossActive = true;
+    this.bossHpMax = C.BOSS_HP;
+    this.bossHp = C.BOSS_HP;
+    this.bossX = C.VIEW_W * 0.5;         // 협곡의 가장 낮은 자리 — 물이 가장 먼저 닿는 곳
+    this.bossCd = 0;
+    this.bossSlamCd = C.BOSS_SLAM_CD;
+    this.bossSlamCasting = false;
+    this.bossSlamCastMs = 0;
+    this.bossExposeMs = 0;
+    this.emit(EV.BOSS_SPAWN, 0, 0);
+  }
+
+  // 슬램 발동. 반경 안의 내 병력을 밀어내고 잠깐 기절시킨다 — 해일(doTide) 2·3등급과
+  // 같은 재료(uX 오프셋 · uStun)를 쓴다. 죽었으면 밀지 않는다.
+  fireBossSlam() {
+    this.bossSlamCasting = false;
+    let hit = 0;
+    let stun = Math.round(C.BOSS_SLAM_STUN_MS / C.SIM_DT);
+    if (stun > 250) stun = 250;
+    for (let i = 0; i < C.UNIT_MAX; i++) {
+      if (!this.uAlive[i] || this.uSide[i] !== SIDE_L) continue;
+      const dx = this.uX[i] - this.bossX;
+      if (dx < -C.BOSS_SLAM_RADIUS || dx > C.BOSS_SLAM_RADIUS) continue;
+      this.damage(i, C.BOSS_SLAM_DMG, SIDE_R, -1);
+      hit++;
+      if (!this.uAlive[i]) continue;
+      let nx = this.uX[i] + (dx >= 0 ? 1 : -1) * C.BOSS_SLAM_PUSH;
+      if (nx < C.BASE_L_X) nx = C.BASE_L_X;
+      if (nx > C.BASE_R_X) nx = C.BASE_R_X;
+      this.uX[i] = nx;
+      if (this.uStun[i] < stun) this.uStun[i] = stun;
+    }
+    this.bossExposeMs = C.BOSS_EXPOSE_MS;
+    this.emit(EV.BOSS_SLAM, hit, 0);
+  }
+
+  // 보스가 받는 피해의 유일한 입구. 상성표를 안 탄다(atkKind 개념 자체가 없다) —
+  // 대신 그 자리를 물과 타이밍이 대신한다: 물이 높을수록 덜 맞고(방어),
+  // 슬램 직후에는 더 맞는다(노출). 두 배수는 곱해진다 — 물이 낮을 때 슬램
+  // 직후를 노리는 것이 이론상 최댓값이고, 그게 이 보스의 "정답"이다.
+  damageBoss(dmg) {
+    if (!this.bossActive || this.bossHp <= 0) return;
+    const dr = C.BOSS_WATER_DR_MAX * this.waterK();
+    let d = dmg * (1 - dr);
+    if (this.bossExposeMs > 0) d *= C.BOSS_EXPOSE_DMG_MUL;
+    this.bossHp -= d;
+    this.bossHitFlash = 4;
+    this.emit(EV.BOSS_HIT, Math.round(d), 0);
+    if (this.bossHp <= 0) { this.bossHp = 0; this.killBoss(); }
+  }
+
+  killBoss() {
+    this.bossActive = false;
+    this.bossDefeated = true;
+    this.bossState = 3;
+    this.bossSlamCasting = false;
+    this.gold += C.BOSS_BOUNTY_GOLD;
+    this.xp += C.BOSS_BOUNTY_XP;
+    // 감쇠(waterPushK)를 안 받는다 — 원정 마지막 전투의 가장 큰 사건이
+    // 시간이 갈수록 작아지는 일반 킬과 똑같이 취급되면 안 된다.
+    this.water += C.BOSS_WATER_PUSH;
+    this.emit(EV.BOSS_KILL, 0, SIDE_L);
   }
 
   checkEnd() {

@@ -478,6 +478,18 @@ const LBL_REARM = '재무장';
 const CAST_Y = 92;                     // 예고 띠 — HUD 아래, 하늘 안
 const CAST_W = 250, CAST_H = 34;
 
+// ── 보스 — 심연. render 는 game.boss* 필드를 읽기만 한다(다른 예고·HUD와 같은
+// 규칙 — 이벤트를 안 듣는다). 일반 AI_CAST 띠(CAST_Y=92, 폭 250)와 자리·크기를
+// 달리해서 헷갈리지 않게 한다: 보스 예고는 훨씬 크고 화면 전체가 물든다.
+// y=198 — 사령관 말풍선(CMD_Y+CMD_H=124 에서 자라 최대 y=190까지 내려온다,
+// drawCommander/drawBubble 참조)과 겹치면 도발 대사가 예고 글자를 덮는다.
+// 그 아래로 내려서 둘이 같은 순간에 떠도 서로 안 가린다.
+const BOSS_WARN_Y = 198, BOSS_WARN_W = 480, BOSS_WARN_H = 92;
+// y=66 — 전선 막대(HUD_BAR_Y=30, 높이 17 → 47까지)와 적 예고 띠(CAST_Y=92) 사이의
+// 좁은 틈이다. 처음에 56으로 뒀더니 이름표가 전선 막대 한가운데 겹쳐 "아군 …
+// 심 연 … 적군" 처럼 글자가 섞였다(스크린샷으로 잡았다) — 그래서 아래로 뺐다.
+const BOSS_BAR_Y = 66, BOSS_BAR_W = 300, BOSS_BAR_H = 10;
+
 export class Renderer {
   constructor(canvas, ctx) {
     this.canvas = canvas;
@@ -1038,6 +1050,8 @@ export class Renderer {
     this.drawBase(game, SIDE_L);
     // 흉터는 **지면에 남은 것**이라 유닛보다 먼저다. 유닛이 그 위를 밟고 지나가야 한다
     this.drawScars(game);
+    // 보스는 유닛보다 먼저 — 몸집이 커서 뒤에 깔려야 몰려드는 병력이 위에서 읽힌다
+    this.drawBoss(game);
     this.drawUnits(game, alpha);
     this.drawStun(game);
     this.drawRearm(game);
@@ -1046,6 +1060,8 @@ export class Renderer {
     // 적 예고는 **스킬 연출보다 위**다. 지금 터지고 있는 것보다 다음에 올 것이
     // 더 급한 정보다 — 플레이어가 원정 6판을 진 이유가 정확히 이것이었다.
     this.drawAiCast(game);
+    // 보스 예고는 그 위다 — 한 판에 한 번뿐인 사건이 스킬 하나보다 급하다
+    this.drawBossWarn(game);
     this.drawParticles(feel);
     this.drawRings(feel);
     this.drawWater(game, alpha);
@@ -3200,6 +3216,170 @@ export class Renderer {
     return z === 1 ? rear : (front + rear) * 0.5;
   }
 
+  // ── 보스 — 심연. 실루엣 · 예고 · 체력바 ────────────────────
+  // render 는 game.boss* 를 읽기만 한다 — 다른 모든 것과 같은 규칙이다.
+  // uKind 풀 밖의 존재라 drawUnits 의 시대별 분기를 하나도 안 탄다.
+  // **루프 안 할당 0** — addTrap/addSpike/addCircle 은 현재 경로에 점만
+  // 더한다(Path2D 를 새로 안 만든다), 다른 유닛 실루엣과 같은 방식이다.
+  drawBoss(game) {
+    if (!game.bossActive) return;
+    const ctx = this.ctx;
+    const x = game.bossX, gy = groundAt(x);
+    const w = C.BOSS_W, h = C.BOSS_H;
+    const exposed = game.bossExposeMs > 0;
+    const flash = game.bossHitFlash > 0;
+    // 물이 높을수록 짙어진다 — 방어가 늘어난 것이 몸 색에도 보인다(팔레트는 그대로,
+    // 램프의 위치만 옮긴다). 노출 중에는 테두리가 COL_BONUS로 바뀐다 —
+    // "지금 쳐라"는 기회의 뜻이라 위협색(COL_THREAT, 규칙 2)을 쓰면 안 된다.
+    const wk = (typeof game.waterK === 'function') ? game.waterK() : 0;
+    const body = C.RAMP_STRUCT[C.rampIndex(0.30 + 0.30 * wk)];
+    const rim = exposed ? C.COL_BONUS : C.RAMP_STRUCT[C.rampIndex(0.62)];
+
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    // 육중한 두 단 몸통 — 유닛보다 훨씬 크다는 것이 실루엣만으로 읽혀야 한다
+    this.addTrap(x, gy - h, gy - h * 0.40, w * 0.60, w, 0);
+    this.addTrap(x, gy - h * 0.46, gy - h * 0.08, w * 0.98, w * 0.68, 0);
+    // 어깨의 뒤틀린 뿔 둘 — 굳은 파도 모양
+    this.addSpike(x - w * 0.30, gy - h * 0.84, -0.4, -1, 30, 9);
+    this.addSpike(x + w * 0.30, gy - h * 0.84, 0.4, -1, 30, 9);
+    ctx.fill();
+
+    ctx.strokeStyle = rim;
+    ctx.lineWidth = exposed ? 3.4 : 2.2;
+    ctx.beginPath();
+    this.addTrap(x, gy - h, gy - h * 0.40, w * 0.60, w, 0);
+    this.addTrap(x, gy - h * 0.46, gy - h * 0.08, w * 0.98, w * 0.68, 0);
+    ctx.stroke();
+    ctx.lineWidth = C.STROKE;
+
+    // 균열 — 물·피해의 색(COL_DANGER)이다. 맞은 순간만 흰 섬광
+    ctx.fillStyle = flash ? C.COL_PLAYER : C.COL_DANGER;
+    ctx.beginPath();
+    this.addSpike(x - w * 0.14, gy - h * 0.64, 0, -1, 18, 4);
+    this.addSpike(x + w * 0.14, gy - h * 0.64, 0, -1, 18, 4);
+    ctx.fill();
+
+    // 슬램 예고 중 — 발밑에 균열 고리가 조여든다. 위협색 하나만 쓴다(규칙 2)
+    if (game.bossSlamCasting) {
+      const total = C.BOSS_SLAM_CAST_MS > 0 ? C.BOSS_SLAM_CAST_MS : 1;
+      const left = game.bossSlamCastMs > 0 ? game.bossSlamCastMs : 0;
+      let p = 1 - left / total;
+      p = p < 0 ? 0 : (p > 1 ? 1 : p);
+      ctx.strokeStyle = C.RAMP_THREAT[C.rampIndex(0.5 + 0.4 * p)];
+      ctx.lineWidth = 2 + 3 * p;
+      ctx.beginPath();
+      const rr = C.BOSS_SLAM_RADIUS * (1 - 0.55 * p);
+      ctx.moveTo(x + rr, gy - 2);
+      ctx.ellipse(x, gy - 2, rr, 16, 0, 0, TAU);
+      ctx.stroke();
+      ctx.lineWidth = C.STROKE;
+    }
+  }
+
+  // 등장 전 예고 — 일반 스킬 예고(작은 띠 하나, CAST_Y)보다 훨씬 크다.
+  // 색은 여전히 COL_THREAT 하나뿐이다(규칙 2) — 다만 화면 전체가 옅게 물들어
+  // "이건 스킬 하나가 아니다"를 크기로 말한다.
+  drawBossWarn(game) {
+    if (game.bossState !== 1) return;
+    const ctx = this.ctx;
+    const total = C.BOSS_CAST_MS > 0 ? C.BOSS_CAST_MS : 1;
+    const left = game.bossWarnMs > 0 ? game.bossWarnMs : 0;
+    let p = 1 - left / total;
+    p = p < 0 ? 0 : (p > 1 ? 1 : p);
+    const R = C.RAMP_THREAT;
+    const beat = 0.55 + 0.45 * Math.sin(game.simTime * (0.006 + 0.02 * p));
+
+    ctx.fillStyle = R[C.rampIndex(0.045 + 0.045 * beat)];
+    ctx.fillRect(0, 0, C.VIEW_W, C.VIEW_H);
+
+    const bx0 = HALF_W - BOSS_WARN_W * 0.5, by0 = BOSS_WARN_Y;
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.94)];
+    ctx.beginPath();
+    ctx.roundRect(bx0, by0, BOSS_WARN_W, BOSS_WARN_H, 8);
+    ctx.fill();
+    ctx.strokeStyle = R[C.rampIndex(0.55 + 0.4 * beat)];
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(bx0 + 2, by0 + 2, BOSS_WARN_W - 4, BOSS_WARN_H - 4, 8);
+    ctx.stroke();
+    ctx.lineWidth = C.STROKE;
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.font = FONT_MID;
+    ctx.fillStyle = R[C.rampIndex(0.7)];
+    ctx.fillText(C.BOSS_WARN_LINE, HALF_W, by0 + 10);
+    ctx.font = FONT_BIG;
+    ctx.fillStyle = C.COL_THREAT;
+    ctx.fillText(C.BOSS_NAME, HALF_W, by0 + 32);
+    ctx.font = FONT_TINY;
+    ctx.fillStyle = R[C.rampIndex(0.62)];
+    ctx.fillText(C.BOSS_HINT, HALF_W, by0 + BOSS_WARN_H - 20);
+
+    // 남은 시간 막대
+    ctx.fillStyle = R[C.rampIndex(0.22)];
+    ctx.fillRect(bx0 + 12, by0 + BOSS_WARN_H - 8, BOSS_WARN_W - 24, 3);
+    ctx.fillStyle = C.COL_THREAT;
+    ctx.fillRect(bx0 + 12, by0 + BOSS_WARN_H - 8, (BOSS_WARN_W - 24) * (1 - p), 3);
+    ctx.textAlign = 'left';
+  }
+
+  // 보스 체력바 — 상단 중앙, 일반 유닛엔 아예 없는 UI다. 등장 전(예고)에도
+  // 빈 틀만 보여 "곧 여기에 뭔가 채워진다"를 미리 알린다. 처치 후에는
+  // 바 대신 처치 표식 하나만 남긴다.
+  drawBossBar(game) {
+    if (!game.bossOn || game.bossState === 0) return;
+    const ctx = this.ctx;
+    const bx = HALF_W - BOSS_BAR_W * 0.5, by = BOSS_BAR_Y;
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.font = FONT_SMALL;
+    ctx.fillStyle = C.COL_STRUCT;
+    ctx.fillText(C.BOSS_NAME, HALF_W, by - 15);
+
+    if (game.bossDefeated) {
+      ctx.font = FONT_TINY;
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.68)];
+      ctx.fillText(C.BOSS_DEFEATED_LABEL, HALF_W, by);
+      ctx.textAlign = 'left';
+      return;
+    }
+
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.95)];
+    ctx.fillRect(bx - 2, by - 2, BOSS_BAR_W + 4, BOSS_BAR_H + 4);
+    ctx.fillStyle = C.RAMP_STRUCT[C.rampIndex(0.25)];
+    ctx.fillRect(bx, by, BOSS_BAR_W, BOSS_BAR_H);
+    if (game.bossActive) {
+      const k = game.bossHpMax > 0 ? game.bossHp / game.bossHpMax : 0;
+      const exposed = game.bossExposeMs > 0;
+      ctx.fillStyle = exposed ? C.COL_BONUS : C.COL_STRUCT;
+      ctx.fillRect(bx, by, BOSS_BAR_W * (k > 0 ? k : 0), BOSS_BAR_H);
+      // 물의 방어 — 얇은 표식 하나. 지금 얼마나 덜 맞는지가 눈에 보인다
+      const wk = (typeof game.waterK === 'function') ? game.waterK() : 0;
+      if (wk > 0.02) {
+        ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(0.55)];
+        ctx.fillRect(bx, by + BOSS_BAR_H + 2, BOSS_BAR_W * wk, 2);
+      }
+    }
+    ctx.textAlign = 'left';
+
+    // 슬램 예고 — 보스 바 테두리에 끼워 넣는다. 일반 스킬 예고(화면 위쪽 띠)와
+    // 자리를 달리해서 헷갈리지 않는다 — 이미 보스를 보고 있는 눈이 여기도 본다.
+    if (game.bossSlamCasting) {
+      ctx.strokeStyle = C.RAMP_THREAT[C.rampIndex(0.5 + 0.45 * Math.sin(game.simTime * 0.02))];
+      ctx.lineWidth = 2;
+      ctx.strokeRect(bx - 4, by - 4, BOSS_BAR_W + 8, BOSS_BAR_H + 8);
+      ctx.lineWidth = C.STROKE;
+      ctx.textAlign = 'center';
+      ctx.font = FONT_MICRO;
+      ctx.fillStyle = C.COL_THREAT;
+      ctx.fillText(C.BOSS_SLAM_NAME, HALF_W, by + BOSS_BAR_H + 12);
+      ctx.textAlign = 'left';
+    }
+  }
+
   // ── 적의 예고 (EV.AI_CAST) ─────────────────────────────────
   // **이 화면이 통째로 비어 있었다.** 적 스킬은 걸린 뒤 0.7~1초 뜸을 들이는데
   // 그 창에 아무것도 안 그려서, 플레이어에게는 그냥 군대가 사라져 있었다.
@@ -3810,6 +3990,7 @@ export class Renderer {
 
     this.drawFrontBar(game);
     this.drawWaterGauge(game);
+    this.drawBossBar(game);
 
     this.drawCommander(game, director);
     if (director && directorView) this.drawDirectorView(game, director);
