@@ -484,6 +484,7 @@ const LBL_INBOUND = '온다';
 const LBL_REARM = '재무장';
 const CAST_Y = 92;                     // 예고 띠 — HUD 아래, 하늘 안
 const CAST_W = 250, CAST_H = 34;
+const CAST_H_FIRST = 54;               // "첫 조우" — 이름만이 아니라 효과 한 줄도 보여준다
 
 // ── 보스 — 심연. render 는 game.boss* 필드를 읽기만 한다(다른 예고·HUD와 같은
 // 규칙 — 이벤트를 안 듣는다). 일반 AI_CAST 띠(CAST_Y=92, 폭 250)와 자리·크기를
@@ -501,9 +502,19 @@ const BOSS_BAR_Y = 66, BOSS_BAR_W = 300, BOSS_BAR_H = 10;
 // 화면 전체를 위협색으로 물들이지 않는다(규칙 2: COL_THREAT 는 적 전용) —
 // 왼쪽 위 고정 카드 하나로 충분하다. 금 표시(x=60)·특성 알약(y=68) 아래,
 // 적 예고 띠(CAST_Y=92, 폭 250, 가운데 정렬)와 x 로 안 겹치게 왼쪽에 둔다.
-const WPN_BAR_X = 56, WPN_BAR_Y = 90, WPN_BAR_W = 210, WPN_BAR_H = 40;
+// WPN_BAR_W 는 210 → 280. WEAPON_HINT 실측 폭이 FONT_MICRO 에서 약 252px 라
+// 210 폭 카드 밖으로 텍스트가 흘러넘쳤다(스크린샷으로 확인) — 카드가 자기
+// 안의 문장을 못 담으면 카드가 아니다. 오른쪽으로 56→336 까지, 다음 HUD
+// 요소(별자리 칩 x=375~, 예고 띠 x=355~)와는 여전히 안 겹친다.
+const WPN_BAR_X = 56, WPN_BAR_Y = 90, WPN_BAR_W = 280, WPN_BAR_H = 54;
 const LABEL_WPN_USED = C.WEAPON_USED_LABEL || '소진';
 const LABEL_WPN_DEAD = C.WEAPON_DEAD_LABEL || '파괴됨';
+
+// ── 별자리 — x=300~700, y=8~48 이 상시 비어 있는 유일한 HUD 여백이다
+// (트레잇 알약은 x=300 에서 자르고(4090행), 사령관 카드는 x=706 부터 시작한다).
+// 매 전투 다시 뽑히는 규칙이라 상시 칩 하나 + 전투 시작 직후 잠깐의 리빌로 다룬다.
+const ZOD_CHIP_X = HALF_W, ZOD_CHIP_Y = 8, ZOD_CHIP_W = 210, ZOD_CHIP_H = 26;
+const ZOD_REVEAL_F = 170;      // ~2.8초. 일반 스킬 예고보다 길고 보스 예고보다 짧다
 
 export class Renderer {
   constructor(canvas, ctx) {
@@ -865,6 +876,10 @@ export class Renderer {
     this.fxEra = new Int16Array(2);
     this.prevEra = new Int8Array(2);
     this.prevTick = -1;
+    // 증원 기둥 개수 — doRally() 가 RALLY_TIER_MIX[tier] 합만큼 유닛을 내므로
+    // (3/4/5기) 기둥도 그 합만큼 서야 한다. 스킬이 **터지는 순간(1회)**에만
+    // 계산해 여기 저장한다 — drawSkillFxSide 에서 매 프레임 reduce 하지 않는다.
+    this.fxRallyN = new Uint8Array(2).fill(C.RALLY_COUNT);
 
     // 원정·사령관 — 상태의 변화만 본다. 필드가 없으면 전부 -1 로 남아 아무 일도 안 난다
     this.prevStage = -2;
@@ -872,6 +887,11 @@ export class Renderer {
     this.prevObserving = 1;
     this.fxFoeEra = 0;               // 적이 진화한 순간
     this.fxLine = 0;                 // 전투 시작 대사
+    this.prevZodiac = -1;
+    this.fxZodiac = 0;               // 별자리 리빌 — 전투가 바뀌어 별자리가 다시 뽑힌 순간
+    this.seenSkill = new Uint8Array(C.SKILL_COUNT);  // 원정 전체 기준 "첫 조우" — 한 번만 효과를 크게 보여준다
+    this.prevCastSk = -1;             // 예고가 새로 시작된 프레임만 "첫 조우" 여부를 다시 판정한다
+    this.castIsFirst = 0;             // 그 판정을 캐스팅 내내(여러 프레임) 그대로 들고 있는다
     this.fxTaunt = 0;                // 도발
     this.overTime = -1;              // 결과 화면에 **멈춘** 시간을 찍기 위해 판이 끝난 순간을 잡는다
     this.overFrames = 0;             // 판이 끝난 뒤 흐른 렌더 프레임. 결과 카드의 시계다
@@ -1120,6 +1140,12 @@ export class Renderer {
       this.prevEra.fill(0);
       this.prevProfile = -1;
       this.prevObserving = 1;
+      this.prevZodiac = -1;
+      this.fxZodiac = 0;
+      this.seenSkill.fill(0);        // 새 원정에서는 다시 처음부터 가르친다
+      this.prevCastSk = -1;
+      this.castIsFirst = 0;
+      this.fxRallyN.fill(C.RALLY_COUNT);
     }
     this.prevTick = game.tick;
 
@@ -1130,6 +1156,13 @@ export class Renderer {
     if (cmd >= 0 && (stage !== this.prevStage || restart)) this.fxLine = FX_LINE_F;
     this.prevStage = stage;
     if (this.fxLine > 0) this.fxLine--;
+
+    // ── 별자리 — 매 resetBattle() 마다 다시 뽑힌다(game.js 는 안 건드린다,
+    // game.zodiac 은 이미 공개돼 있다). 값이 바뀐 프레임을 리빌 시작으로 잡는다.
+    const zod = (typeof game.zodiac === 'number') ? (game.zodiac | 0) : -1;
+    if (zod !== this.prevZodiac) this.fxZodiac = ZOD_REVEAL_F;
+    this.prevZodiac = zod;
+    if (this.fxZodiac > 0) this.fxZodiac--;
 
     // ── 도발 — **디렉터가 플레이어를 새로 판정한 순간**이 곧 이 기능이다 ──
     // 이벤트 배선 없이 판정값의 변화만 본다. 디렉터가 없으면 조용히 지나간다.
@@ -1165,6 +1198,14 @@ export class Renderer {
           // 여기서 갈린다. game 이 tier 를 안 주는 빌드에서는 조용히 0 이다
           const tf = s === SIDE_L ? game.skillTier : game.aiSkillTier;
           this.fxTier[k] = (typeof tf === 'function' ? (tf.call(game, i) | 0) : 0) & 3;
+          // 증원 기둥 개수 — doRally() 의 실제 소환 수(RALLY_TIER_MIX 합)로 맞춘다.
+          // 기능(3/4/5기)과 화면(기둥 3개 고정)이 어긋나 있던 자리(spec-map-base-skill §4.1).
+          if (i === C.SK_RALLY) {
+            const mix = C.RALLY_TIER_MIX && C.RALLY_TIER_MIX[this.fxTier[k]];
+            let n = C.RALLY_COUNT;
+            if (mix) { n = 0; for (let u = 0; u < mix.length; u++) n += mix[u]; }
+            this.fxRallyN[s] = n;
+          }
           // 증원은 **쏜 쪽 기지 앞**에서 솟는다. 화살비만 전선에 떨어진다.
           this.fxSkillX[k] = i === C.SK_VOLLEY ? front : (s === SIDE_L ? C.SPAWN_L_X : C.SPAWN_R_X);
           // 흉터도 같은 순간에 예약한다. 연출보다 오래 산다 — 그게 "판이 바뀌었다"는 증거다.
@@ -3126,7 +3167,11 @@ export class Renderer {
       const t = 1 - f / FX_RALLY_F;
       const bx = this.fxSkillX[base + C.SK_RALLY];
       const g = groundAt(bx);
-      const SPREAD = 30;
+      // 기둥 개수는 실제 소환 수(doRally() 가 RALLY_TIER_MIX[tier] 합만큼 내는 수)를
+      // 따라간다 — 3기일 때 30px 그대로, 5기일 때 18px 로 좁아져 겹치지 않는다.
+      const n = this.fxRallyN[side] || C.RALLY_COUNT;
+      const SPREAD = 30 * 3 / n;
+      const mid = (n - 1) * 0.5;
       const RY = SC[base + C.SK_RALLY];      // 증원의 색 (내 것 = 연둣빛 / 적 것 = 자홍)
 
       // ── 1막 예고 ── 땅이 먼저 갈라진다. 뭔가 올라온다는 것을 지면이 말한다
@@ -3137,8 +3182,8 @@ export class Renderer {
         ctx.strokeStyle = RY[C.rampIndex(0.9 * aa)];
         ctx.lineWidth = 1.5 + 3 * aa;
         ctx.beginPath();
-        for (let i = 0; i < C.RALLY_COUNT; i++) {
-          const px = bx + (i - 1) * SPREAD;
+        for (let i = 0; i < n; i++) {
+          const px = bx + (i - mid) * SPREAD;
           const w = 16 * easeOutCubic(tt < 1 ? tt : 1);
           ctx.moveTo(px - w, groundAt(px - w));
           ctx.lineTo(px - w * 0.3, groundAt(px) - 5);
@@ -3165,9 +3210,9 @@ export class Renderer {
         const hgt = 122 * easeOutCubic(rt < 1 ? rt : 1);
         ctx.fillStyle = RY[C.rampIndex(0.95 * fa)];
         ctx.beginPath();
-        for (let i = 0; i < C.RALLY_COUNT; i++) {
-          const px = bx + (i - 1) * SPREAD;
-          const h = hgt * (i === 1 ? 1 : 0.84);
+        for (let i = 0; i < n; i++) {
+          const px = bx + (i - mid) * SPREAD;
+          const h = hgt * (Math.abs(i - mid) < 0.6 ? 1 : 0.84);
           ctx.rect(px - 6, g - h, 12, h);
           this.addSpike(px, g - h - 20, 0, -1, 22, 8);
           // 기치 — 기둥 꼭대기에 걸린 깃발. 진영 방향으로 날린다
@@ -3188,9 +3233,9 @@ export class Renderer {
         // 기둥 심 — 안쪽이 더 밝으면 빛으로 읽힌다
         ctx.fillStyle = RB[C.rampIndex(0.85 * fa)];
         ctx.beginPath();
-        for (let i = 0; i < C.RALLY_COUNT; i++) {
-          const px = bx + (i - 1) * SPREAD;
-          const h = hgt * (i === 1 ? 1 : 0.84);
+        for (let i = 0; i < n; i++) {
+          const px = bx + (i - mid) * SPREAD;
+          const h = hgt * (Math.abs(i - mid) < 0.6 ? 1 : 0.84);
           ctx.rect(px - 2, g - h + 6, 4, h - 6);
         }
         ctx.fill();
@@ -3381,6 +3426,8 @@ export class Renderer {
       ctx.font = FONT_MICRO;
       ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.62)];
       ctx.fillText(C.WEAPON_WARN_LINE, bx + 8, by + 18);
+      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.5)];
+      ctx.fillText(C.WEAPON_HINT, bx + 8, by + 32);
       ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.22)];
       ctx.fillRect(bx + 8, by + bh - 8, bw - 16, 3);
       ctx.fillStyle = C.COL_BONUS;
@@ -3394,6 +3441,62 @@ export class Renderer {
     ctx.fillRect(bx + 8, by + 18, bw - 16, 7);
     ctx.fillStyle = C.COL_PLAYER;
     ctx.fillRect(bx + 8, by + 18, (bw - 16) * (k > 0 ? k : 0), 7);
+  }
+
+  // ── 별자리 — 상시 칩 + 전투 시작 리빌. 0건 → 신설(spec-explain-ui §4).
+  // 매 전투 바뀌는 "그날의 규칙" 이라 위협도 자산도 아니다 — 중립 톤(RAMP_BONUS)을
+  // 쓴다. game.zodiac* 은 game.js 가 이미 공개해 뒀다 — 여긴 읽기만 한다.
+  drawZodiacHud(game) {
+    if (typeof game.zodiac !== 'number') return;
+    const ctx = this.ctx;
+    const name = game.zodiacName, desc = game.zodiacDesc;
+    if (!name) return;
+    const title = (C.ZODIAC_TITLE && C.ZODIAC_TITLE[game.zodiac]) || '';
+    const reveal = this.fxZodiac > 0;
+    const beat = reveal ? 0.55 + 0.45 * Math.sin(game.simTime * 0.02) : 0;
+
+    const cx = ZOD_CHIP_X, cy = ZOD_CHIP_Y, w = ZOD_CHIP_W, h = ZOD_CHIP_H;
+    const bx = cx - w * 0.5;
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.85)];
+    ctx.beginPath();
+    ctx.roundRect(bx, cy, w, h, 13);
+    ctx.fill();
+    ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(reveal ? 0.5 + 0.4 * beat : 0.5)];
+    ctx.lineWidth = reveal ? 2 : 1.2;
+    ctx.beginPath();
+    ctx.roundRect(bx + 0.5, cy + 0.5, w - 1, h - 1, 13);
+    ctx.stroke();
+    ctx.lineWidth = C.STROKE;
+
+    // 배지 — 12분할 중 하나를 가리키는 작은 링(유닛 종류가 아니라 별자리이므로
+    // drawUnitBadge 는 재사용하지 않는다. 원 하나 + 눈금 하나로 충분하다)
+    const bcx = bx + 16, bcy = cy + h * 0.5, br = 8;
+    ctx.strokeStyle = C.RAMP_BONUS[C.rampIndex(0.7)];
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    this.addCircle(bcx, bcy, br);
+    ctx.stroke();
+    ctx.lineWidth = C.STROKE;
+    const ang = -Math.PI / 2 + (game.zodiac / C.ZODIAC_COUNT) * Math.PI * 2;
+    ctx.fillStyle = C.COL_BONUS;
+    ctx.beginPath();
+    this.addCircle(bcx + Math.cos(ang) * br, bcy + Math.sin(ang) * br, 2.2);
+    ctx.fill();
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = FONT_TINY;
+    ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.85)];
+    ctx.fillText(name + ' · ' + title, bcx + br + 8, bcy);
+    ctx.textBaseline = 'top';
+
+    if (reveal && desc) {
+      ctx.textAlign = 'center';
+      ctx.font = FONT_MICRO;
+      ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.62)];
+      ctx.fillText(desc, cx, cy + h + 2);
+      ctx.textAlign = 'left';
+    }
   }
 
   // 등장 전 예고 — 일반 스킬 예고(작은 띠 하나, CAST_Y)보다 훨씬 크다.
@@ -3506,7 +3609,21 @@ export class Renderer {
   // 색은 COL_THREAT 하나만 쓴다 (규칙 2). 이 색이 뜨면 뜻은 하나여야 한다.
   drawAiCast(game) {
     const sk = (typeof game.aiCastSkill === 'number') ? (game.aiCastSkill | 0) : -1;
+    // prevCastSk 는 **캐스팅이 없는 프레임(sk<0)에도** 갱신해야 한다 — 아래
+    // early return 뒤에서 갱신하면 "캐스팅 없음" 구간 내내 이전 값이 그대로
+    // 남아, 같은 스킬이 다시 걸릴 때 sk === prevCastSk 가 되어 "새로 시작된
+    // 프레임"을 영영 못 잡는다(같은 스킬이 반복 조우해도 첫 조우 배너가
+    // 계속 뜨는 버그였다 — 스크린샷으로 잡았다).
+    const prevSk = this.prevCastSk;
+    this.prevCastSk = sk;
     if (sk < 0 || sk >= C.SKILL_COUNT) return;
+    // "첫 조우" 판정은 이 예고가 **새로 시작된 프레임에만** 다시 한다 — 캐스팅은
+    // 여러 프레임에 걸쳐 그려지므로, 매 프레임 다시 판정하면 다음 프레임에
+    // 이미 seenSkill 이 켜져 있어 밴드가 1프레임 만에 다시 쪼그라든다.
+    if (sk !== prevSk) {
+      this.castIsFirst = this.seenSkill[sk] ? 0 : 1;
+      if (this.castIsFirst) this.seenSkill[sk] = 1;
+    }
     const ctx = this.ctx;
     const total = (C.AI_CAST_MS && C.AI_CAST_MS[sk]) || 900;
     const left = game.aiCastMs > 0 ? game.aiCastMs : 0;
@@ -3669,15 +3786,18 @@ export class Renderer {
     }
 
     // ── 언제 — 하늘에 뜬 띠 하나. 이름과 남은 시간이 같이 읽힌다 ──
+    // 원정 전체 기준 "첫 조우"에만 띠를 키워 효과 한 줄을 더 보여준다.
+    // 두 번째부터는 다시 원래 크기(이미 배운 사람에게는 소음이라 안 키운다).
+    const castH = this.castIsFirst ? CAST_H_FIRST : CAST_H;
     const bx0 = HALF_W - CAST_W * 0.5;
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.93)];
     ctx.beginPath();
-    ctx.roundRect(bx0, CAST_Y, CAST_W, CAST_H, 6);
+    ctx.roundRect(bx0, CAST_Y, CAST_W, castH, 6);
     ctx.fill();
     ctx.strokeStyle = R[C.rampIndex(0.5 + 0.5 * beat)];
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.roundRect(bx0 + 1, CAST_Y + 1, CAST_W - 2, CAST_H - 2, 6);
+    ctx.roundRect(bx0 + 1, CAST_Y + 1, CAST_W - 2, castH - 2, 6);
     ctx.stroke();
     ctx.lineWidth = C.STROKE;
     // 경고 세모 — 글자를 못 읽어도 이 모양은 읽힌다
@@ -3691,11 +3811,11 @@ export class Renderer {
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(1)];
     ctx.fillRect(bx0 + 16, CAST_Y + 13, 2, 6);
     ctx.fillRect(bx0 + 16, CAST_Y + 21, 2, 2);
-    // 남은 시간 막대 — 줄어드는 것이 시계다
+    // 남은 시간 막대 — 줄어드는 것이 시계다. castH 를 따라가므로 좌표식은 안 바뀐다
     ctx.fillStyle = R[C.rampIndex(0.22)];
-    ctx.fillRect(bx0 + 6, CAST_Y + CAST_H - 6, CAST_W - 12, 3);
+    ctx.fillRect(bx0 + 6, CAST_Y + castH - 6, CAST_W - 12, 3);
     ctx.fillStyle = C.COL_THREAT;
-    ctx.fillRect(bx0 + 6, CAST_Y + CAST_H - 6, (CAST_W - 12) * (1 - p), 3);
+    ctx.fillRect(bx0 + 6, CAST_Y + castH - 6, (CAST_W - 12) * (1 - p), 3);
 
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
@@ -3710,6 +3830,12 @@ export class Renderer {
     ctx.fillStyle = R[C.rampIndex(0.62)];
     ctx.fillText(LBL_INBOUND, bx0 + CAST_W - 12, CAST_Y + 10);
     ctx.textAlign = 'left';
+
+    if (this.castIsFirst) {
+      ctx.font = FONT_MICRO;
+      ctx.fillStyle = R[C.rampIndex(0.6)];
+      ctx.fillText(C.SKILL_DESC[sk] || '', bx0 + 50, CAST_Y + 22);
+    }
   }
 
   // ── 재무장 — 진화 직후 1.25초, 병력이 굳는다 ────────────────
@@ -3768,21 +3894,37 @@ export class Renderer {
         csum += this.sx[i]; cn++;
       }
       if (cn > 0) cx = csum / cn;
-      if (cx < 70) cx = 70; else if (cx > C.VIEW_W - 70) cx = C.VIEW_W - 70;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
+      const eraClamped = era < C.ERA_COUNT ? era : C.ERA_COUNT - 1;
+      const nameTxt = C.ERA_NAME[eraClamped] + ' · ' + C.ERA_ABILITY_NAME[eraClamped];
+      const descTxt = C.ERA_ABILITY_DESC[eraClamped];
+      // 능력 설명(항목 B)이 시대에 따라 길이가 크게 다르다 — 예:
+      // '연합'(청동) 한 줄이 '버팀'(강철)의 세 배 가깝다. 좌우 기지 근처(BASE_L_X=92)
+      // 에서 고정 70px 여백만 두면 긴 줄이 캔버스 밖으로 잘린다. 실측 폭으로
+      // 여백을 잡아 **어떤 시대·어느 쪽 기지든** 화면 안에 들어오게 한다.
+      ctx.font = FONT_TINY;
+      const nameHalfW = ctx.measureText(nameTxt).width * 0.5;
+      ctx.font = FONT_MICRO;
+      const descHalfW = ctx.measureText(descTxt).width * 0.5;
+      const half = Math.max(70, nameHalfW, descHalfW) + 6;
+      if (cx < half) cx = half; else if (cx > C.VIEW_W - half) cx = C.VIEW_W - half;
       const ty = groundAt(cx) - 132;
       ctx.font = FONT_SMALL;
       ctx.fillStyle = RL[C.rampIndex(0.95)];
       ctx.fillText(LBL_REARM, cx, ty);
       ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.9)];
       ctx.font = FONT_TINY;
-      ctx.fillText(C.ERA_NAME[era < C.ERA_COUNT ? era : C.ERA_COUNT - 1], cx, ty + 16);
+      ctx.fillText(nameTxt, cx, ty + 16);
+      // 시대 능력 효과 한 줄 — 항목 A(드래프트 머리말)와 같은 상수를 재사용
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.62)];
+      ctx.font = FONT_MICRO;
+      ctx.fillText(descTxt, cx, ty + 30);
       // 남은 시간 — 짧은 막대 하나. 언제 풀리는지가 숫자 없이 읽힌다
       ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.9)];
-      ctx.fillRect(cx - 27, ty + 26, 54, 4);
+      ctx.fillRect(cx - 27, ty + 42, 54, 4);
       ctx.fillStyle = RL[C.rampIndex(0.95)];
-      ctx.fillRect(cx - 27, ty + 26, 54 * q, 4);
+      ctx.fillRect(cx - 27, ty + 42, 54 * q, 4);
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
     }
@@ -4111,6 +4253,7 @@ export class Renderer {
     this.drawWaterGauge(game);
     this.drawBossBar(game);
     this.drawWeaponHud(game);
+    this.drawZodiacHud(game);
 
     this.drawCommander(game, director);
     if (director && directorView) this.drawDirectorView(game, director);
@@ -5082,6 +5225,17 @@ export class Renderer {
     ctx.beginPath();
     ctx.moveTo(HALF_W - 90, C.UNIT * 9.6); ctx.lineTo(HALF_W + 90, C.UNIT * 9.6);
     ctx.stroke();
+
+    // 진화 직후에만 열리는 화면이다(buyEra() 가 openDraft() 를 곧장 부른다) —
+    // era 는 항상 ≥1. "방금 뭐가 바뀌었는지"를 카드보다 먼저 두 줄로 박는다.
+    if (game.era > 0) {
+      ctx.font = FONT_SMALL;
+      ctx.fillStyle = C.COL_BONUS;
+      ctx.fillText('◈ ' + C.ERA_NAME[game.era] + ' 시대 진입 — ' + C.ERA_ABILITY_NAME[game.era], HALF_W, 94);
+      ctx.font = FONT_MICRO;
+      ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.62)];
+      ctx.fillText(C.ERA_ABILITY_DESC[game.era], HALF_W, 112);
+    }
 
     const cw = C.VIEW_W * 0.66;
     for (let i = 0; i < C.TRAIT_OFFER; i++) {

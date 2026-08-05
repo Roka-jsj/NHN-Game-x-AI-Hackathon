@@ -161,6 +161,17 @@ export const ERA_SHATTER_PIERCE_MUL = 0.40;
 export const ERA_SELFREPAIR_IDLE_MS = 3000;
 export const ERA_SELFREPAIR_HEAL_PS = 0.04;
 
+// 인게임 설명용 — ZODIAC_DESC · BOSS_HINT · WEAPON_HINT 와 같은 규칙:
+// "한 줄로 안 읽히면 없는 기능이다". 위 네 능력의 수치를 그대로 문장으로
+// 옮긴 것뿐이라 밸런스 판단은 없다. ERA_ABILITY_NAME 과 순서가 같다.
+export const ERA_ABILITY_DESC = [
+  '',                                          // 돌 — 없음(설계다)
+  '근처에 다른 종류 아군이 있으면 이 공격 피해 +30%',   // 청동 · 연합
+  '체력이 30% 아래면 받는 피해 −40%',                // 강철 · 버팀
+  '대상 뒤쪽 유닛에게도 40% 관통 피해',                // 화약 · 작렬
+  '3초간 안 맞으면 초당 최대체력 4% 회복',             // 기계 · 자가수리
+];
+
 // ── 값표는 **가격으로 맞춘다.** 왜 그런지 ────────────────────────
 // 예전 표는 검사가 체력/금·DPS/금 **두 축 모두에서 1위**였다 (강한 지배 11건,
 // DPS/금 최대·최소 비 6.80배). 상성 배수 1.75 로는 6.8배를 산술적으로 못 메우므로
@@ -489,6 +500,15 @@ export const TOWER_CD = 1400;                 // ms
 export const SK_TIDE = 0, SK_VOLLEY = 1, SK_RALLY = 2, SK_SURGE = 3;
 export const SKILL_COUNT = 4;
 export const SKILL_NAME = ['해일', '화살비', '증원', '총진군'];
+// 인게임 설명용 — "첫 조우" 예고 밴드에만 뜬다(render.js drawAiCast, seenSkill).
+// 총진군은 다른 셋과 결이 다르다: 효과를 말하기 전에 **"이게 뭔지"**부터 말해야
+// 한다 — 같은 버튼(진화)이 최대 시대에서 다른 기능이 되는 것 자체가 낯설다.
+export const SKILL_DESC = [
+  '전선을 쓸고 기절시킨다. 전선에서 멀수록 덜 맞는다',
+  '세 구역 중 하나에 쏟아진다',
+  '병력을 공짜로 세운다',
+  '진화 칸이 바뀐 것이다 — 최대 시대에서만 열린다',
+];
 export const SKILL_CD = [42000, 26000, 34000, 30000];
 export const SKILL_DMG = [260, 150, 0, 0];
 export const VOLLEY_RADIUS = 190;             // 전선 중심 반경
