@@ -26,7 +26,7 @@
 // 게임이 "한 판"에서 "원정"으로 커졌다. 계측기가 새로 재는 것:
 //
 //   9.  원정 — 완주율 · 스테이지별 승률 · 첫 전투 길이 · 도발 · 총 길이
-//       그리고 **승계 규칙**(특성·포탑 유지 / 금·시대·병력 초기화)이 지켜지는가
+//       그리고 **승계 규칙**(특성·포탑·시대 유지 / 금·병력 초기화)이 지켜지는가
 //   10. 난이도 격차 — **상성을 쓰는 봇이 실제로 더 잘하는가.**
 //       같은 껍데기(진화·스킬·드래프트 동일)에 **유닛 선택만 다른** 세 봇을
 //       같은 상대 다섯에게 붙인다. 격차가 작으면 상성 삼각형은 장식이다.
@@ -980,7 +980,9 @@ async function run() {
   //
   // 재는 것: 완주율 · 스테이지별 승률(곡선이 오르는가) · 첫 전투 길이(40~60초)
   //          도발 발생률과 시점 · 원정 총 길이 · **승계 규칙**
-  // 승계 규칙(§2)은 계약이다: 특성·포탑은 유지, 금·시대·병력은 초기화.
+  // 승계 규칙(§2, 시대 승계 이후 개정)은 계약이다: 특성·포탑·시대는 유지, 금·병력은 초기화.
+  // 시대가 towerLv 와 같은 자리로 옮겨진 이유는 game.js reset()/resetBattle() 주석 참조 —
+  // 사용자 요구 "진화하는게 다음 라운드에도 이어졌으면 좋겠어" 를 반영한 것이지 완화가 아니다.
   // 이걸 안 재면 "다음 전투가 그냥 리셋"인 것을 못 잡는다.
   const CAMP_BOTS = [
     { name: 'counter', arche: 'counter', pref: 0 },
@@ -1459,14 +1461,16 @@ async function run() {
     const f = CR.map((r) => (r.taunts && r.taunts.length ? r.taunts[0].sec : null)).filter((v) => v !== null);
     return f.length ? med(f) : -1;
   })();
-  // 승계 규칙 (§2): 특성·포탑 유지 / 금·시대·병력 초기화. 위반 건수를 센다.
+  // 승계 규칙 (§2, 시대 승계 이후): 특성·포탑·시대 유지 / 금·병력 초기화. 위반 건수를 센다.
+  // 시대는 towerLv 와 같은 규칙이다 — 내려가면 위반, 그대로거나 오르면(다음 전투 중
+  // 다시 진화) 정상이다. **0 으로 되돌아가는 것 자체가 이제는 위반이다.**
   const carryBad = [];
   for (const r of CR) for (const st of r.stages) {
     const c = st.carry;
     if (!c) continue;
     if (c.post.traits < c.pre.traits) carryBad.push(r.name + ' s' + st.stage + ': 특성이 사라졌다 ' + c.pre.traits + '→' + c.post.traits);
     if (c.post.tower < c.pre.tower) carryBad.push(r.name + ' s' + st.stage + ': 포탑 단계가 내려갔다 ' + c.pre.tower + '→' + c.post.tower);
-    if (c.post.era !== 0) carryBad.push(r.name + ' s' + st.stage + ': 시대가 초기화되지 않았다 (' + c.post.era + ')');
+    if (c.post.era < c.pre.era) carryBad.push(r.name + ' s' + st.stage + ': 시대가 내려갔다 ' + c.pre.era + '→' + c.post.era);
     if (c.post.alive !== 0) carryBad.push(r.name + ' s' + st.stage + ': 병력이 남았다 (' + c.post.alive + ')');
     if (c.goldStart !== undefined && c.post.gold !== c.goldStart) {
       carryBad.push(r.name + ' s' + st.stage + ': 금이 초기화되지 않았다 (' + c.post.gold + ' ≠ GOLD_START ' + c.goldStart + ')');
@@ -1817,10 +1821,10 @@ async function run() {
     console.log('  도발/판정변화  ' + CR.map((r) => r.name + ' ' + r.tauntTotal + '/' + r.profSwitches).join('  ') +
       '   (도발이 판정 변화와 맞물려야 한다. 분모가 0인데 도발이 나오면 장식이다)');
     if (carryBad.length) {
-      console.log('  ✖ 승계 규칙 위반 ' + carryBad.length + '건 (§2: 특성·포탑 유지 / 금·시대·병력 초기화)');
+      console.log('  ✖ 승계 규칙 위반 ' + carryBad.length + '건 (§2: 특성·포탑·시대 유지 / 금·병력 초기화)');
       for (const s of carryBad.slice(0, 6)) console.log('     · ' + s);
     } else if (CR.some((r) => r.stages.some((s) => s.carry))) {
-      console.log('  ○ 승계 규칙 준수 — 특성·포탑 유지, 시대·병력 초기화');
+      console.log('  ○ 승계 규칙 준수 — 특성·포탑·시대 유지, 병력 초기화');
     }
   }
 

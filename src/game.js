@@ -335,6 +335,16 @@ export class Game {
     // 최강병기(거신) 래치 — **원정 전체에 한 번**이다. towerLv 와 같은 자리,
     // 같은 이유로 여기서만 지운다(resetBattle() 은 안 건드린다).
     this.wpnUsed = false;
+    // 시대(era/aiEra) — **원정 전체에 걸쳐 이어진다.** towerLv 와 정확히 같은
+    // 자리다: 원정을 처음부터 다시 시작할 때만(reset()) 0으로 되돌리고,
+    // 다음 사령관으로 넘어갈 때(resetBattle())는 안 건드린다. 사용자 요구
+    // "진화하는게 다음 라운드에도 이어졌으면 좋겠어 — 나도 적도" 를 그대로
+    // 반영한다. 병력·금·경험치·물은 여전히 전투마다 초기화된다 — 이어지는
+    // 것은 "도달한 시대"라는 레벨 하나뿐이고, 그 레벨을 향한 진행치(xp/aiXp)는
+    // resetBattle() 이 계속 0으로 되돌린다(towerLv 를 사되 towerCost 누적을
+    // 안 남기는 것과 같은 결).
+    this.era = 0;
+    this.aiEra = 0;
     this.resetBattle();
   }
 
@@ -413,9 +423,12 @@ export class Game {
 
     // 기지 체력은 **판 길이만** 정한다. 첫 전투가 0.45 인 이유는 그것뿐이다 —
     // 짧게 끝나야 가르치는 전투가 된다. 어려움은 여기가 아니라 STAGE_DIFF 가 만든다.
+    // 시대가 이월되므로(위) 그 전투가 시작하는 시점부터 ERA_BASE_HP_MUL 이
+    // 반영돼야 한다 — 안 그러면 시대 2로 시작한 전투의 기지가 시대 0짜리
+    // 체력으로 열렸다가 다음 진화에서야(eraScaleBase) 갑자기 튄다.
     const hp0 = C.BASE_HP * this.stageHpMul();
-    this.baseHp = [hp0, hp0];
-    this.baseMax = [hp0, hp0];
+    this.baseHp = [hp0 * C.ERA_BASE_HP_MUL[this.era], hp0 * C.ERA_BASE_HP_MUL[this.aiEra]];
+    this.baseMax = [hp0 * C.ERA_BASE_HP_MUL[this.era], hp0 * C.ERA_BASE_HP_MUL[this.aiEra]];
     this.baseFlash = [0, 0];
     // 무엇이 기지를 무너뜨렸는가. 0=아직 1=병력 2=물.
     // 물과 병력이 같은 프레임에 기지를 0으로 만들면 무승부로 끝나 버린다.
@@ -423,10 +436,12 @@ export class Game {
     this.baseDownBy = [0, 0];
 
     this.gold = C.GOLD_START;
-    // 첫 전투만 경험치를 안고 시작한다. **온보딩이다** —
-    // 시대 진화와 드래프트가 21초에 처음 나오면 심사자는 이미 판단을 끝냈다.
-    this.xp = idxOf(C.STAGE_XP_HEAD, this.stage, 0);
-    this.era = 0;
+    // 시대는 원정 전체에 걸쳐 이어진다 — reset() 만 지운다(위 주석 참조).
+    // STAGE_XP_HEAD 는 "아직 한 번도 진화 못 한" 플레이어를 그 전투 수준까지
+    // 끌어올리는 온보딩 값이다. 이미 시대를 들고 들어온 플레이어에게 또
+    // 얹으면 이월 위에 이중으로 얹는 것이 되어 승계가 그대로 스노볼이 된다 —
+    // 그래서 era===0 일 때만 준다.
+    this.xp = this.era === 0 ? idxOf(C.STAGE_XP_HEAD, this.stage, 0) : 0;
     this.spawnCd.fill(0);
 
     // 스킬 셋. 첫 판에도 한 번은 쓸 수 있게 절반만 채워 시작한다.
@@ -440,7 +455,8 @@ export class Game {
 
     this.aiGold = C.AI_GOLD_START * stageOf(C.STAGE_AI_GOLD, this.stage, 1);
     this.aiXp = 0;
-    this.aiEra = 0;
+    // aiEra 도 원정 전체에 걸쳐 이어진다 — era 와 정확히 같은 자리(위 주석),
+    // 여기서는 지우지 않는다.
     this.aiThink = 0;
     this.aiHold = 0;
     this.aiWait = 0;
