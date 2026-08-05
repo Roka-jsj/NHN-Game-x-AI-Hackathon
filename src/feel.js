@@ -64,6 +64,7 @@ export function easeOutCubic(t) {
 // config 에 아직 없는 수치는 여기 기본값으로 돈다. 메인이 상수를 넣어 주면
 // **코드를 안 고쳐도** 그쪽이 정본이 된다 (보고서의 "메인에게 요청" 목록).
 function num(v, d) { return (typeof v === 'number' && Number.isFinite(v)) ? v : d; }
+function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 // 히트스톱 예산
 const FREEZE_GAP      = num(C.FREEZE_GAP, 12);        // 흔한 이벤트의 최소 간격(시뮬 프레임)
@@ -150,6 +151,14 @@ const REARM_HUM   = num(C.REARM_HUM, 1.7);    // 굳어 있는 동안의 망치�
 const REARM_BEAT  = num(C.REARM_BEAT, 24);    // 망치질 간격(프레임). 1.25초에 세 번
 const REARM_EVERY = num(C.REARM_EVERY, 4);    // 몇 프레임마다 빛이 하나 오르는가
 
+// ── 긴장도 ── 위기가 사건이 아니라 상태로 지속될 때 쓰는 채널.
+// 다른 상수들과 이유가 같다: config 가 아직 안 주면 여기 기본값으로 돈다.
+const TENSION_BASE_LOW    = num(C.TENSION_BASE_LOW, 0.35);
+const TENSION_EMA         = num(C.TENSION_EMA, 0.035);
+const TENSION_ON          = num(C.TENSION_ON, 0.12);
+const TENSION_VIB_MAX     = num(C.TENSION_VIB_MAX, 0.55);
+const TENSION_PULSE_HZ    = num(C.TENSION_PULSE_HZ, 0.045);
+
 // 접근성 — 흔들림과 번쩍임을 줄인다. DOM 이 없는 헤드리스에서는 항상 false 다.
 // **끄는 것이 아니라 줄이는 것이다.** 셰이크가 0 이 되면 큰 사건이 아예 안 읽힌다.
 const REDUCED = (() => {
@@ -218,6 +227,15 @@ export class Feel {
     // 밀림 — 진동과 별개의 채널. 이것만 있고 진동이 0 인 연출이 증원이다.
     this.pushX = 0; this.pushY = 0; this.pushVX = 0; this.pushVY = 0;
     this.reduceMotion = REDUCED;
+
+    // ── 긴장도 ── 물이 가깝거나 기지가 낮을 때 "지속되는" 위기 신호.
+    // 0~1 로 스무딩된 상태값이다. render 는 이 값만 읽고 vignette·펄스를 그린다.
+    // tensionVibX/Y 는 shakeX/Y 에 더해지는 상시 진동(임펄스 채널과 별개),
+    // tensionPulse 는 vignette 알파가 숨쉬는 리듬이다. 셋 다 decayShake 에서
+    // 매 프레임(얼어 있어도) 갱신된다 — render.js 의 fx* 필드처럼 지속 상태다.
+    this.tension = 0;
+    this.tensionVibX = 0; this.tensionVibY = 0;
+    this.tensionPulse = 0;
 
     // 시간에 걸쳐 쏟아지는 연출. 스칼라뿐이라 프레임마다 할당이 없다.
     // 0 화살비 1 증원 2 총진군 — 셋이 동시에 겹치는 판은 없다(쿨다운이 26초 이상).
@@ -333,6 +351,9 @@ export class Feel {
     this.streak = 0; this.streakGap = 0;
     this.denyCd = 0; this.baseRingCd = 0; this.foeHitCd = 0; this.selfHitCd = 0;
     this.tideAt = -1e6;
+    // 탭에서 돌아온 순간 옛 위기 값이 그대로 튀어나오면 안 된다 —
+    // 다음 프레임에 updateTension() 이 실제 게임 상태에서 다시 채운다.
+    this.tension = 0; this.tensionVibX = 0; this.tensionVibY = 0; this.tensionPulse = 0;
   }
 
   reset() {
@@ -483,6 +504,29 @@ export class Feel {
     if (this.streakGap > 0) { this.streakGap--; if (this.streakGap === 0) this.streak = 0; }
   }
 
+  // ── 긴장도 갱신 — 사건이 아니라 상태를 잰다 ─────────────────────
+  // game.js 가 이미 계약해 둔 두 조회를 그대로 쓴다: waterNear()(물이 지면에
+  // 얼마나 가까운가, EV.WATER_WARN 과 같은 기준선)와 baseK(내 기지 체력비).
+  // 새 계산식을 만들지 않는다 — 메인이 이미 "위기"를 이 두 숫자로 정의해
+  // 뒀으므로 여기서 또 다른 기준을 만들면 화면과 판정이 서로 다른 위기를
+  // 말하게 된다. 더 급한 쪽(max)이 이긴다 — 물이 안전해도 기지가 위태로우면
+  // 여전히 위기다.
+  //
+  // EMA 로 스무딩하는 이유: waterNear() 는 해일 한 방으로 프레임 안에 훅
+  // 뛰기도 한다. 순간값을 그대로 쓰면 긴장도가 다른 셰이크 채널처럼
+  // 사건마다 깜빡였다가 꺼진다 — 그러면 "지속되는 압력"이라는 이 채널의
+  // 존재 이유가 없어진다. 드래프트·결과 화면에서는 0으로 가라앉는다
+  // (state !== PLAY) — 위기는 전투 중에만 뜻이 있다.
+  updateTension(game) {
+    if (!game) return;
+    const live = game.state === S.PLAY;
+    const waterSig = live && typeof game.waterNear === 'function' ? game.waterNear() : 0;
+    const baseK = live && typeof game.baseK === 'function' ? game.baseK(SIDE_L) : 1;
+    const baseSig = live ? clamp((TENSION_BASE_LOW - baseK) / TENSION_BASE_LOW, 0, 1) : 0;
+    const raw = waterSig > baseSig ? waterSig : baseSig;
+    this.tension += (raw - this.tension) * TENSION_EMA;
+  }
+
   decayShake() {
     // ── 밀림 ── 용수철이라 밀렸다가 되돌아온다. 진동과 더해져 나간다.
     if (this.pushX !== 0 || this.pushY !== 0 || this.pushVX !== 0 || this.pushVY !== 0) {
@@ -518,8 +562,28 @@ export class Feel {
       this.vibX = 0; this.vibY = 0; this.shakeA = 0;
     }
 
-    this.shakeX = this.vibX + this.pushX;
-    this.shakeY = this.vibY + this.pushY;
+    // ── 긴장도 진동 ── 임펄스(vibX/Y)·밀림(pushX/Y)과 별개의 세 번째 채널.
+    // 감쇠하지 않는다 — tension 이 유지되는 한 계속 산다. 그래서 addShake 의
+    // 상한 로직(더 센 쪽이 가져간다)을 안 거친다. sin 조합을 쓰는 이유는
+    // Math.random 매 프레임 재추첨은 SHAKE_FLOOR 를 만든 이유(눈에 안 보이는
+    // 소수점 진동이 매 프레임 캔버스를 다시 래스터한다)를 그대로 재현하기
+    // 때문이다 — 결정론적 sin 은 같은 문제를 안 만들면서도 "잔물결"로 읽힌다.
+    // TENSION_ON 문턱 아래에서는 아예 0 — 안 보이는 떨림은 렉일 뿐이다.
+    if (this.tension > TENSION_ON) {
+      const tv = (this.tension - TENSION_ON) / (1 - TENSION_ON) * TENSION_VIB_MAX;
+      const vx = Math.sin(this.t * 0.19) * tv;
+      const vy = Math.sin(this.t * 0.13 + 1.7) * tv * 0.55;
+      this.tensionVibX = Math.abs(vx) > SHAKE_FLOOR ? vx : 0;
+      this.tensionVibY = Math.abs(vy) > SHAKE_FLOOR ? vy : 0;
+    } else {
+      this.tensionVibX = 0; this.tensionVibY = 0;
+    }
+    // 비네트가 숨쉬는 리듬. 0.65~1.00 사이에서 진동해 트로프에서도 완전히
+    // 안 꺼진다 — 위기가 깜빡이는 것이 아니라 "계속 있다"고 읽혀야 한다.
+    this.tensionPulse = this.tension * (0.65 + 0.35 * Math.sin(this.t * TENSION_PULSE_HZ));
+
+    this.shakeX = this.vibX + this.pushX + this.tensionVibX;
+    this.shakeY = this.vibY + this.pushY + this.tensionVibY;
     if (this.reduceMotion) {
       // 줄이되 없애지는 않는다. 회전만 완전히 뺀다 — 기울어지는 화면이 가장 나쁘다.
       this.shakeX *= RM_SHAKE; this.shakeY *= RM_SHAKE; this.shakeA = 0;
@@ -527,6 +591,7 @@ export class Feel {
   }
 
   step(game) {
+    this.updateTension(game);
     this.tickTimers();
     this.decayShake();
     if (this.flashFrames > 0) this.flashFrames--;

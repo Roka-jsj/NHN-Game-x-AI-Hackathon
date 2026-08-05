@@ -426,7 +426,7 @@ export class Audio {
   // 음이 끊겨 들리고, 그게 곧 리듬이다. 노드는 unlock 에서 한 번 만들고 끝이며
   // 이후로는 주파수와 게인만 연속 제어한다. 매 프레임 할당이 0이다.
   //
-  // 층은 아홉이다. **음악이 곧 상태 표시가 된다** — 눈으로 보기 전에 귀로 안다.
+  // 층은 열하나다. **음악이 곧 상태 표시가 된다** — 눈으로 보기 전에 귀로 안다.
   //   bass  항상. 템포가 전장 밀도를 따라간다
   //   harm  배음층. **시대가 오를수록 열린다** (돌 0 → 기계 최대)
   //   arp   화음 분산. 구간 1부터, 전선을 밀수록 두꺼워진다
@@ -436,6 +436,18 @@ export class Audio {
   //   hat   하이햇. 구간이 오르면 8분 → 16분
   //   ind   산업 타악. 화약·기계 시대와 포탑에서 열린다
   //   sonar 물속 링잉. 물이 가까울 때만
+  //   kick  박마다 때리는 저역 펄스. **처음부터 끝까지 항상 있다** — 이게
+  //         "곡"과 "패드/드론"을 가르는 축이다. 사용자가 "재미없다"고 한 건
+  //         지속음 여섯 층이 전부 스웰(열리고 닫히기)만 할 뿐 **때리는 소리가
+  //         하나도 없어서**였다 — hat·ind·sonar 는 필터를 여닫는 트레몰로일
+  //         뿐, 타격 후 감쇠(어택+디케이)가 없다. kick 은 다르다: 톱니 LFO를
+  //         음수 게인으로 먹여(사령관 층이 이미 쓰는 "타격 후 감쇠" 관용구,
+  //         applyCommander 의 CMD_LAMP 음수 참고) 매 박 정확히 한 번, 순간
+  //         피크에서 선형으로 죽는 펄스를 만든다 — 진짜 킥드럼의 포락선이다
+  //   snare 반박마다 때리는 노이즈 크랙. kick 과 같은 감쇠 관용구를 밴드패스
+  //         노이즈에 얹는다 — 하이햇(트레몰로)과 다르게 **각 타격의 경계가
+  //         선명하다.** 둘 다 시대·구간과 무관하게 항상 켜져 있다 — 리듬은
+  //         상태 표시가 아니라 "곡이 곡답게 들리는" 바닥이어야 한다
   buildMusic() {
     const ctx = this.ctx;
     const bus = ctx.createGain();
@@ -444,18 +456,20 @@ export class Audio {
     const outs = [];
 
     // 음정층 — osc → 게이트(LFO) → 로우패스 → 출력
-    const layer = (type, freq, cut, lfoHz) => {
+    // lfoType/lfoAmp 를 생략하면 예전과 완전히 같다(square, 0.5 = 50% 듀티
+    // 트레몰로). 값을 주면 다른 포락선을 쓸 수 있다 — kick 이 그 용도다.
+    const layer = (type, freq, cut, lfoHz, lfoType, lfoAmp) => {
       const osc = ctx.createOscillator();
       osc.type = type;
       osc.frequency.value = freq;
       const lfo = ctx.createOscillator();     // 박자를 만드는 저주파
-      lfo.type = 'square';
+      lfo.type = lfoType || 'square';
       lfo.frequency.value = lfoHz;
-      const lfoAmp = ctx.createGain();
-      lfoAmp.gain.value = 0.5;
+      const lfoAmpNode = ctx.createGain();
+      lfoAmpNode.gain.value = lfoAmp !== undefined ? lfoAmp : 0.5;
       const gate = ctx.createGain();
       gate.gain.value = 0.5;                  // LFO 가 ±0.5 로 흔들어 0~1 이 된다
-      lfo.connect(lfoAmp); lfoAmp.connect(gate.gain);
+      lfo.connect(lfoAmpNode); lfoAmpNode.connect(gate.gain);
       const lp = ctx.createBiquadFilter();
       lp.type = 'lowpass';
       lp.frequency.value = cut;
@@ -469,14 +483,16 @@ export class Audio {
 
     // 타악층 — 노이즈를 밴드패스로 좁혀 LFO 로 여닫으면 타악기가 된다.
     // 드럼 샘플이 없어도 박자가 몸으로 느껴진다.
-    const perc = (freq, q, lfoHz, type) => {
+    // lfoType/lfoAmp 생략 시 예전과 완전히 같다(square, 0.5). snare 는
+    // sawtooth + 음수 amp 로 "타격 후 감쇠" 포락선을 만든다.
+    const perc = (freq, q, lfoHz, type, lfoType, lfoAmp) => {
       const src = ctx.createBufferSource();
       src.buffer = this.noiseBuf; src.loop = true;
       const bp = ctx.createBiquadFilter();
       bp.type = type || 'bandpass'; bp.frequency.value = freq; bp.Q.value = q;
       const lfo = ctx.createOscillator();
-      lfo.type = 'square'; lfo.frequency.value = lfoHz;
-      const amp = ctx.createGain(); amp.gain.value = 0.5;
+      lfo.type = lfoType || 'square'; lfo.frequency.value = lfoHz;
+      const amp = ctx.createGain(); amp.gain.value = lfoAmp !== undefined ? lfoAmp : 0.5;
       const gate = ctx.createGain(); gate.gain.value = 0.5;
       lfo.connect(amp); amp.connect(gate.gain);
       const out = ctx.createGain(); out.gain.value = 0;
@@ -497,6 +513,13 @@ export class Audio {
       hat:   perc(7200, 1.4, 8),
       ind:   perc(190, 2.2, 4),
       sonar: perc(1350, 12, 0.45),
+      // 킥 — 매 박 한 번, 순간 피크에서 선형 감쇠. 사인파라 배음이 없고
+      // 로우패스를 낮게 걸어 "쿵"만 남긴다. 화성을 안 탄다 — 드럼은 조성이 없다
+      kick:  layer('sine', 58, 170, 2, 'sawtooth', -0.5),
+      // 스네어 — 킥의 절반 속도로, 밴드패스 노이즈에 같은 감쇠 포락선.
+      // 대역을 hat(7200Hz, 아주 밝다)·ind(190Hz, 아주 어둡다)와 겹치지
+      // 않게 중역(2200Hz)에 둬서 셋이 서로 가리지 않는다
+      snare: perc(2200, 2.4, 1, 'bandpass', 'sawtooth', -0.5),
 
       era: -1,          // -1 이면 다음 update 에서 음색을 굽는다
       prog: PROG[0],
@@ -728,6 +751,18 @@ export class Audio {
     m.ind.lfo.frequency.setTargetAtTime(beat * (fillBar ? 2 : 1), t, 0.3);
     const indOn = (era >= 3 ? 0.045 : 0) + (era >= 4 ? 0.030 : 0) + 0.012 * towerLv;
     m.ind.out.gain.setTargetAtTime(dead || draft ? 0 : indOn * S_PERC[sec], t, 0.4);
+
+    // 킥 — 매 박 한 번. bass 처럼 **항상** 있다. 이게 "곡"의 바닥이다.
+    // 구간이 올라가고 판이 붐빌수록 조금씩 세진다 — 그래도 절대 사라지지 않는다
+    m.kick.lfo.frequency.setTargetAtTime(beat, t, 0.1);
+    m.kick.out.gain.setTargetAtTime(
+      dead ? 0 : (0.115 + 0.05 * spd) * (draft ? 0.5 : 1) * S_PERC[sec], t, 0.15);
+    m.kick.lp.frequency.setTargetAtTime(150 + 60 * spd, t, 0.3);
+
+    // 스네어 — 킥의 절반 속도. 채움 마디에서는 킥과 같은 속도로 촘촘해진다
+    m.snare.lfo.frequency.setTargetAtTime(beat * 0.5 * (fillBar ? 2 : 1), t, 0.1);
+    m.snare.out.gain.setTargetAtTime(
+      dead || draft ? 0 : (0.030 + 0.020 * spd) * S_PERC[sec], t, 0.2);
 
     // 층 arp — 전선을 밀수록 열린다. 이기고 있으면 음악이 두꺼워진다
     const tier = clamp(Math.round(front * 4), 0, 4);

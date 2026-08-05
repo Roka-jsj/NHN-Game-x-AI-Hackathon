@@ -200,6 +200,12 @@ const BUCKET_N = (C.VIEW_W / BUCKET_W | 0) + 2;
 const FX_TIDE_F = 64, FX_VOLLEY_F = 66, FX_RALLY_F = 54;
 const FX_TOWER_F = 10;
 const FX_ERA_F = 88;
+// 화면 전환 스윕 — 내 진화 순간에만 켜진다. 사용자: "진화하면 배경도
+// 바뀌었으면 좋겠다" — 배경은 이미(paintBackground) 그 프레임에 바로 다시
+// 굽히지만, 그 전환 자체가 눈에 안 띄었다. 그 순간에 새 시대색이 화면을
+// 훑고 지나가 "지금 세계가 바뀌었다"를 한 번 크게 말해 준다.
+const FX_ERA_SWEEP_F = 42;
+const SWEEP_BANDS = 7;
 const VOLLEY_N = 26;
 
 // 막 경계 — 예고가 끝나는 시점 / 발동이 끝나는 시점
@@ -875,6 +881,8 @@ export class Renderer {
     this.prevTowerLv = new Int8Array(2);
     this.fxEra = new Int16Array(2);
     this.prevEra = new Int8Array(2);
+    this.fxEraSweep = 0;             // 내 진화 순간의 화면 스윕 (SIDE_L 전용)
+    this.fxEraSweepEra = 0;          // 스윕이 물들 새 시대 — 색은 여기서 정한다
     this.prevTick = -1;
     // 증원 기둥 개수 — doRally() 가 RALLY_TIER_MIX[tier] 합만큼 유닛을 내므로
     // (3/4/5기) 기둥도 그 합만큼 서야 한다. 스킬이 **터지는 순간(1회)**에만
@@ -1092,6 +1100,7 @@ export class Renderer {
     this.drawStun(game);
     this.drawRearm(game);
     this.drawEraFx(game);
+    this.drawEraSweep();
     this.drawSkillFx(game);
     // 적 예고는 **스킬 연출보다 위**다. 지금 터지고 있는 것보다 다음에 올 것이
     // 더 급한 정보다 — 플레이어가 원정 6판을 진 이유가 정확히 이것이었다.
@@ -1106,6 +1115,8 @@ export class Renderer {
     this.drawFloats(feel);
 
     ctx.setTransform(s, 0, 0, s, 0, 0);
+    // 화면 좌표계다 — 셰이크 변환 밖이라 비네트는 흔들리지 않고 가장자리에 붙어 있다.
+    this.drawTension(feel);
     this.drawHud(game, feel, director, directorView, muted);
     this.drawButtons(game);
     this.drawRally(game);
@@ -1134,6 +1145,7 @@ export class Renderer {
       this.scarLife.fill(0);                  // 지난 판의 자국이 새 판에 남지 않는다
       this.fxTower.fill(0);
       this.fxEra.fill(0);
+      this.fxEraSweep = 0;
       this.prevSkillCd.fill(0);
       this.prevTowerCd.fill(0);
       this.prevTowerLv.fill(0);
@@ -1236,10 +1248,13 @@ export class Renderer {
         this.fxEra[s] = FX_ERA_F;
         // 적 진화는 **내 진화와 다른 방식으로** 알린다. 배너를 뺏지 않되 놓치지도 않게
         if (s === SIDE_R) this.fxFoeEra = FX_FOE_ERA_F;
+        // 내 진화만 화면 전체를 훑는다 — "배경이 바뀌었다"를 느껴야 할 사람은 나다
+        else { this.fxEraSweep = FX_ERA_SWEEP_F; this.fxEraSweepEra = era; }
       }
       this.prevEra[s] = era;
       if (this.fxEra[s] > 0) this.fxEra[s]--;
     }
+    if (this.fxEraSweep > 0) this.fxEraSweep--;
   }
 
   // ── 배경 굽기 ───────────────────────────────────────────────
@@ -1291,17 +1306,18 @@ export class Renderer {
       ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.32 + t * t * 0.46)];
       ctx.fillRect(0, bh * i, C.VIEW_W, bh + 1);
     }
-    // ── 시대의 공기 ── 사용자: "진화해도 이미지 바뀌는 것도 없다."
+    // ── 시대의 공기 ── 사용자: "진화하면 배경도 바뀌었으면 좋겠다."
     // 실루엣은 이미 시대마다 커지지만 그건 확대해야 보인다. **하늘부터 바뀐다.**
     // 위로 갈수록 짙게 깔아 시대마다 다른 하늘색이 되게 한다.
+    // 예전 알파(0.06~0.40)는 인프라만 있고 눈에는 안 남았다 — 실측 뒤 크게 올렸다.
     // 배경은 한 번 굽는 그림이므로 이 스무 번의 채우기는 매 프레임 비용이 0 이다.
     for (let i = 0; i < SKY_BANDS; i++) {
       const t = i / (SKY_BANDS - 1);
-      ctx.fillStyle = RE[C.rampIndex(0.34 * (1 - t) * (1 - t) + 0.06)];
+      ctx.fillStyle = RE[C.rampIndex(0.52 * (1 - t) * (1 - t) + 0.16)];
       ctx.fillRect(0, bh * i, C.VIEW_W, bh + 1);
     }
     // 시대의 구름 — 위쪽의 빈 하늘을 메운다. 다섯 시대가 다른 결을 가진다
-    ctx.fillStyle = RL[C.rampIndex(0.06 + era * 0.012)];
+    ctx.fillStyle = RL[C.rampIndex(0.08 + era * 0.035)];
     ctx.beginPath();
     for (let i = 0; i < 7; i++) {
       const cx = 40 + this.rn(this.stageSeed + 90 + i * 7) * (C.VIEW_W - 80);
@@ -1334,6 +1350,9 @@ export class Renderer {
     ctx.fill(this.ridgeFar);
     ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.86)];
     ctx.fill(this.skyline[era]);
+    // 랜드마크에 시대색을 한 겹 더 — 모양만이 아니라 색으로도 시대가 읽히게
+    ctx.fillStyle = RL[C.rampIndex(0.32 + era * 0.05)];
+    ctx.fill(this.skyline[era]);
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.55)];
     ctx.fill(this.ridgeMid);
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.86)];
@@ -1356,7 +1375,7 @@ export class Renderer {
     for (let i = 0; i < 7; i++) {
       const k = 0.78 - i * 0.10;                   // 위로 갈수록 얕아진다 (원근)
       const off = 12 + i * 26;
-      ctx.strokeStyle = (i < 3 ? C.RAMP_STRUCT : RE)[C.rampIndex(0.13 - i * 0.012)];
+      ctx.strokeStyle = (i < 3 ? C.RAMP_STRUCT : RE)[C.rampIndex(0.24 - i * 0.022)];
       ctx.lineWidth = i < 3 ? 1.4 : 1;
       ctx.beginPath();
       for (let x = 0; x <= C.VIEW_W; x += 24) {
@@ -1367,7 +1386,7 @@ export class Renderer {
     }
     ctx.lineWidth = C.STROKE;
     // 층 사이의 그늘 — 선만 있으면 종이가 되고, 이 띠가 있어야 벽이 된다
-    ctx.fillStyle = RE[C.rampIndex(0.28)];
+    ctx.fillStyle = RE[C.rampIndex(0.42)];
     ctx.beginPath();
     for (let x = 0; x <= C.VIEW_W; x += 24) {
       ctx.lineTo(x, C.GROUND_Y - 12 + (groundAt(x) - C.GROUND_Y) * 0.78);
@@ -1384,8 +1403,10 @@ export class Renderer {
       ctx.fillRect(0, C.GROUND_Y - 58 + i * 15, C.VIEW_W, 15);
     }
     // 시대의 지평선 빛 — 안개 위에 얇게. 다섯 시대가 여기서 가장 크게 갈린다
+    // (예전엔 이 말과 값(0.03~0.098)이 안 맞았다 — 가장 크게 갈려야 할 자리가
+    // 가장 옅었다. 여기부터 올렸다.)
     for (let i = 0; i < 5; i++) {
-      ctx.fillStyle = RL[C.rampIndex(0.03 + i * 0.017)];
+      ctx.fillStyle = RL[C.rampIndex(0.10 + i * 0.07)];
       ctx.fillRect(0, C.GROUND_Y - 66 + i * 13, C.VIEW_W, 13);
     }
   }
@@ -1440,13 +1461,14 @@ export class Renderer {
     ctx.fillStyle = C.RAMP_GRID[C.rampIndex(0.95)];
     ctx.fill(this.floorFill);
     // 시대의 땅 — 얇게 얹는다. **유닛보다 뒤에 있으므로 병종 색을 덮지 않는다**
-    ctx.fillStyle = RE[C.rampIndex(0.42)];
+    // (예전 0.42는 실측상 안 느껴졌다 — 올렸다)
+    ctx.fillStyle = RE[C.rampIndex(0.62)];
     ctx.fill(this.floorFill);
 
     // 지층 띠 — 물때처럼 쌓였다. 이 깊이가 있어야 물이 무섭다
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.5)];
     ctx.fill(this.strataFill);
-    ctx.fillStyle = RE[C.rampIndex(0.30)];
+    ctx.fillStyle = RE[C.rampIndex(0.48)];
     ctx.fill(this.strataFill);
     ctx.strokeStyle = C.RAMP_STRUCT[C.rampIndex(0.10)];
     ctx.lineWidth = 1;
@@ -1466,7 +1488,7 @@ export class Renderer {
     // 협곡 벽
     ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.75)];
     ctx.fill(this.cliffPath);
-    ctx.fillStyle = RE[C.rampIndex(0.34)];
+    ctx.fillStyle = RE[C.rampIndex(0.52)];
     ctx.fill(this.cliffPath);
     ctx.strokeStyle = RL[C.rampIndex(0.22)];
     ctx.lineWidth = C.STROKE;
@@ -1844,6 +1866,32 @@ export class Renderer {
       }
       ctx.fill();
       ctx.lineWidth = C.STROKE;
+    }
+  }
+
+  // ── 시대 전환 스윕 — 내 기지에서 화면 끝까지 새 시대색이 훑고 지나간다 ──
+  // 사용자: "진화하면 배경도 바뀌었으면 좋겠다." paintBackground 는 era가
+  // 오른 그 프레임에 이미 새 하늘·지층으로 다시 굽지만(bakedEra 비교),
+  // **전환 자체**가 순간이라 눈이 못 따라갔다. 여기서 그 순간을 한 번
+  // 크게 말해 준다. 띠 몇 장뿐이라 값싸다 — 전면 fillRect 한 장(위 drawEraFx
+  // 주석의 그 교훈)과 달리 화면의 일부 폭만, 그것도 아주 드문 순간에만 그린다.
+  drawEraSweep() {
+    const f = this.fxEraSweep;
+    if (f <= 0) return;
+    const ctx = this.ctx;
+    const t = 1 - f / FX_ERA_SWEEP_F;
+    const RL = eraLit(this.fxEraSweepEra);
+    // 내 기지(왼쪽)에서 시작해 화면 오른쪽 끝까지 — 진화가 세계로 번져 나간다
+    const bandW = 210;
+    const head = -bandW + (C.VIEW_W + bandW * 2) * easeOutCubic(t);
+    for (let i = 0; i < SWEEP_BANDS; i++) {
+      const bt = i / (SWEEP_BANDS - 1);
+      const x = head - bandW * 0.5 + bandW * bt;
+      const fall = 1 - Math.abs(bt - 0.5) * 2;             // 가운데가 가장 밝다
+      const a = fall * (1 - t) * 0.6;
+      if (a <= 0.01) continue;
+      ctx.fillStyle = RL[C.rampIndex(a)];
+      ctx.fillRect(x, 0, bandW / SWEEP_BANDS + 2, C.VIEW_H);
     }
   }
 
@@ -4045,11 +4093,24 @@ export class Renderer {
     }
     const last = (C.VIEW_W / 24) | 0;
 
-    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.66)];
+    // 물 몸통 — 예전엔 COL_BG 한 겹이라 물이 배경으로 위장했다. 이제 전용
+    // 색(WATER_COL)을 쓴다. 깊이는 여전히 COL_BG 급으로 어두워 아군 흰 몸·
+    // 적 밝은 테와의 대비를 그대로 지킨다 — 바뀐 건 색상이지 밝기가 아니다.
+    ctx.fillStyle = C.RAMP_WATER[1][C.rampIndex(0.66)];
     ctx.beginPath();
     ctx.moveTo(0, C.VIEW_H);
     for (let i = 0; i <= last; i++) ctx.lineTo(i * 24, wy + wave[i]);
     ctx.lineTo(C.VIEW_W, C.VIEW_H);
+    ctx.closePath();
+    ctx.fill();
+
+    // 표면 — 얕은 층에만 청록빛을 얹는다. 깊은 곳과 갈라야 "물"이 된다
+    ctx.fillStyle = C.RAMP_WATER[0][C.rampIndex(0.30)];
+    ctx.beginPath();
+    ctx.moveTo(0, wy + wave[0]);
+    for (let i = 0; i <= last; i++) ctx.lineTo(i * 24, wy + wave[i]);
+    ctx.lineTo(C.VIEW_W, wy + wave[last]);
+    for (let i = last; i >= 0; i--) ctx.lineTo(i * 24, wy + wave[i] + 46);
     ctx.closePath();
     ctx.fill();
 
@@ -4145,6 +4206,36 @@ export class Renderer {
       if (cur > 2.5) ctx.rect(i * 24, wy + cur - 3, 12, 2);
     }
     ctx.fill();
+  }
+
+  // ── 긴장도 비네트 — 위기가 "계속" 화면에 남아 있다는 신호 ──────
+  // 사용자: "게임이 너무 긴장감이 없다". feel.tension 은 사건이 아니라 상태라
+  // (feel.js 의 updateTension 참고) 여기서도 한 번 반짝이고 끝나면 안 된다.
+  // 그래서 히트플래시(fillRect 한 장)와 달리 **가장자리에서 안쪽으로 갈수록
+  // 옅어지는 밴드를 여러 겹 쌓아** 그라디언트를 흉내낸다 — 이 파일은
+  // createRadialGradient 를 안 쓴다(리사이즈마다 다시 굽거나 매 프레임 새로
+  // 만들어야 한다, paintBackground 주석과 같은 이유). RAMP_DANGER 는 이미
+  // 16단계 알파로 구워져 있으므로 새 fillStyle 문자열을 만들지 않는다.
+  // 화면 중앙(전장)은 절대 안 가린다 — 밴드는 가장자리에만 쌓인다.
+  //
+  // feel 은 여기서도 **읽기만** 한다. tension·tensionPulse 는 feel.step() 이
+  // game 을 읽어 이미 계산해 둔 값이다 — render 는 game 을 직접 보지 않는다.
+  drawTension(feel) {
+    const p = feel.tensionPulse;
+    if (!(p > 0.004)) return;
+    const ctx = this.ctx;
+    const maxA = C.TENSION_VIGNETTE_MAX * p;
+    const BANDS = 4;
+    for (let i = 0; i < BANDS; i++) {
+      const a = maxA * (1 - i / BANDS);
+      if (!(a > 0.004)) continue;
+      ctx.fillStyle = C.RAMP_DANGER[C.rampIndex(a)];
+      const w = 10 + i * 16;
+      ctx.fillRect(0, 0, C.VIEW_W, w);              // 위
+      ctx.fillRect(0, C.VIEW_H - w, C.VIEW_W, w);   // 아래
+      ctx.fillRect(0, 0, w, C.VIEW_H);              // 왼쪽
+      ctx.fillRect(C.VIEW_W - w, 0, w, C.VIEW_H);   // 오른쪽
+    }
   }
 
   // ── HUD — 여섯 개가 항상 보여야 한다 ────────────────────────
