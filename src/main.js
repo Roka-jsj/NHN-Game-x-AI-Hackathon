@@ -88,6 +88,17 @@ function toLocal(clientX, clientY) {
 }
 function localXY(e) { return toLocal(e.clientX, e.clientY); }
 let ptrLX = 0, ptrLY = 0;
+// 툴팁 전용 — 게임 입력 큐와 무관하다. 마우스는 눌리지 않아도 계속 갱신되고
+// (그래서 호버가 된다), 터치는 pointerdown~pointerup 사이에서만 의미가 있다
+// (그래서 꾹 누르기가 된다). ptrDownWall 은 e.timeStamp 와 같은 시간축이다.
+let ptrDown = false, ptrDownWall = 0, ptrIsMouse = false;
+
+// 마우스 호버 — 어떤 액션도 큐에 안 넣는다. 좌표만 갱신한다.
+stage.addEventListener('pointermove', (e) => {
+  ptrIsMouse = e.pointerType === 'mouse';
+  toLocal(e.clientX, e.clientY);
+}, { passive: true });
+window.addEventListener('pointerup', () => { ptrDown = false; }, { passive: true });
 
 stage.addEventListener('pointerdown', (e) => {
   e.preventDefault();
@@ -98,6 +109,9 @@ stage.addEventListener('pointerdown', (e) => {
   // (멀티터치는 손가락마다 pointerdown 이 따로 오므로 여기서 전부 큐에 들어간다).
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   if (!localXY(e)) return;
+  // 꾹 누르기 시작 — 아래 로직(구매·스킬 발동)은 **하나도 안 바꾼다.**
+  // 툴팁은 이 누름이 이미 발동시킨 동작 위에 덧붙는 정보일 뿐이다.
+  ptrDown = true; ptrDownWall = e.timeStamp; ptrIsMouse = e.pointerType === 'mouse';
 
   // 설명 화면은 **아무 데나 눌러도** 즉시 열린다 (계약 §4: 붙잡아 두는 화면 금지).
   // 토글보다 먼저 본다 — 설명 중의 탭은 전부 "닫아라"라는 뜻이다.
@@ -124,7 +138,7 @@ stage.addEventListener('pointerdown', (e) => {
   if (b >= 0) enqueue(b, e.timeStamp);
 }, { passive: false });
 
-window.addEventListener('pointercancel', () => {});
+window.addEventListener('pointercancel', () => { ptrDown = false; });
 
 // ─────────────────────────────────────────────────────────────
 // 키보드 — 심사자가 PC로 열 가능성이 높다. 1~5 가 버튼 다섯 개다.
@@ -304,6 +318,7 @@ function frame(nowWall) {
     lastSteps = 0;
     firstFrame = false;
     needsTimeReset = false;
+    renderer.updateHover(game, ptrLX, ptrLY, ptrIsMouse, ptrDown, ptrDownWall, nowWall);
     renderer.draw(game, feel, 0, director, directorView, muted);
     return;
   }
@@ -346,6 +361,7 @@ function frame(nowWall) {
   lastSteps = steps;
 
   audio.update(game);   // 연속 파라미터만 만진다. 노드를 만들지 않는다
+  renderer.updateHover(game, ptrLX, ptrLY, ptrIsMouse, ptrDown, ptrDownWall, nowWall);
   renderer.draw(game, feel, accumulator / C.SIM_DT, director, directorView, muted);
 }
 

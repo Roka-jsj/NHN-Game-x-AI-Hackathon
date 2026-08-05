@@ -522,6 +522,26 @@ const LABEL_WPN_DEAD = C.WEAPON_DEAD_LABEL || '파괴됨';
 const ZOD_CHIP_X = HALF_W, ZOD_CHIP_Y = 8, ZOD_CHIP_W = 210, ZOD_CHIP_H = 26;
 const ZOD_REVEAL_F = 170;      // ~2.8초. 일반 스킬 예고보다 길고 보스 예고보다 짧다
 
+// ── 툴팁 — 포탑 버튼은 SKILL_DESC 같은 데이터 배열이 없다(진화/포탑은
+// "사는 것"이지 "쓰는 스킬"이 아니라서 애초에 그 배열에 안 들어 있었다).
+// 여기 문장 하나만 새로 쓴다 — 나머지(유닛·스킬·특성·별자리)는 전부 이미
+// 있는 config 문자열을 그대로 읽는다.
+const TT_TOWER_DESC = '사거리 안 적을 자동 공격한다 — 최대 단계에서 최강병기 소환 칸이 된다';
+
+// 유닛 하나가 무엇에 강하고 무엇에 약한지 한 줄로 — C.COUNTER(공격자×방어자
+// 행렬)를 그대로 읽는다. 새 데이터를 안 만든다. era 행이 없으면(방어 시대
+// 데이터 없음) 조용히 빈 문자열을 반환한다 — 툴팁 한 줄이 없어질 뿐 죽지 않는다.
+function unitCounterHint(kind, eraNames) {
+  if (!eraNames) return '';
+  let beats = -1, beatenBy = -1;
+  for (let d = 0; d < C.UNIT_KINDS; d++) if (C.COUNTER[kind * C.UNIT_KINDS + d] > 1) { beats = d; break; }
+  for (let a = 0; a < C.UNIT_KINDS; a++) if (C.COUNTER[a * C.UNIT_KINDS + kind] > 1) { beatenBy = a; break; }
+  const parts = [];
+  if (beats >= 0) parts.push(eraNames[beats] + '에게 강하다');
+  if (beatenBy >= 0) parts.push(eraNames[beatenBy] + '에게 약하다');
+  return parts.join(' · ');
+}
+
 export class Renderer {
   constructor(canvas, ctx) {
     this.canvas = canvas;
@@ -883,6 +903,21 @@ export class Renderer {
     this.prevEra = new Int8Array(2);
     this.fxEraSweep = 0;             // 내 진화 순간의 화면 스윕 (SIDE_L 전용)
     this.fxEraSweepEra = 0;          // 스윕이 물들 새 시대 — 색은 여기서 정한다
+
+    // ── 툴팁 상태 — 전부 렌더러 자신의 UI 상태다(게임을 안 건드린다) ──
+    // hoverKind: 0 없음 · 1 버튼(유닛·진화·포탑·해일·화살비, hoverIdx=버튼번호)
+    //            2 증원 원형 · 3 별자리 칩 · 4 특성 알약(hoverIdx) · 5 숙련 알약(hoverIdx)
+    this.hoverKind = 0; this.hoverIdx = -1;
+    this.hoverSig = -1;               // (kind,idx,era) 서명 — 바뀔 때만 문장을 다시 짓는다
+    this.hoverL1 = ''; this.hoverL2 = ''; this.hoverL3 = '';
+    this.hoverAX = 0; this.hoverAY = 0;   // 툴팁이 붙을 화면 좌표(그 요소의 자리)
+    // 특성·숙련 알약의 자리 — drawHud 가 그리면서 채운다(같은 프레임, 같은 계산을
+    // 두 번 안 한다). 폭만 있으면 된다 — y·h는 알약 줄 하나뿐이라 상수다.
+    this.chipX = new Float32Array(24);
+    this.chipW = new Float32Array(24);
+    this.chipKind = new Int8Array(24);   // 1=특성 2=숙련
+    this.chipIdx = new Int16Array(24);
+    this.chipN = 0;
     this.prevTick = -1;
     // 증원 기둥 개수 — doRally() 가 RALLY_TIER_MIX[tier] 합만큼 유닛을 내므로
     // (3/4/5기) 기둥도 그 합만큼 서야 한다. 스킬이 **터지는 순간(1회)**에만
@@ -1065,6 +1100,12 @@ export class Renderer {
     }
     return -1;
   }
+  // 별자리 칩 — 툴팁 전용 히트테스트다(구매·입력용이 아니다). drawZodiacHud 와
+  // 정확히 같은 사각형(ZOD_CHIP_X 는 중심 x).
+  static hitZodiac(lx, ly) {
+    const bx = ZOD_CHIP_X - ZOD_CHIP_W * 0.5;
+    return lx >= bx && lx <= bx + ZOD_CHIP_W && ly >= ZOD_CHIP_Y && ly <= ZOD_CHIP_Y + ZOD_CHIP_H;
+  }
 
   // ── 한 프레임 ───────────────────────────────────────────────
   draw(game, feel, alpha, director, directorView, muted) {
@@ -1120,6 +1161,7 @@ export class Renderer {
     this.drawHud(game, feel, director, directorView, muted);
     this.drawButtons(game);
     this.drawRally(game);
+    this.drawTooltip(game);
     // 결과 카드가 올라오면 **배너는 안 그린다.** 둘은 같은 순간에 같은 자리에서
     // 같은 말을 한다 — 배너 '전투를 이겼다' 와 제목 '전투 승리' 가 둘 다
     // HALF_W 중앙정렬 · FONT_BIG · y 140 언저리다. 반투명 막 아래로 배너가
@@ -1146,6 +1188,7 @@ export class Renderer {
       this.fxTower.fill(0);
       this.fxEra.fill(0);
       this.fxEraSweep = 0;
+      this.hoverKind = 0; this.hoverSig = -1;   // 지난 판의 툴팁이 새 판에 안 남는다
       this.prevSkillCd.fill(0);
       this.prevTowerCd.fill(0);
       this.prevTowerLv.fill(0);
@@ -4238,6 +4281,151 @@ export class Renderer {
     }
   }
 
+  // ── 툴팁 — 무엇이 가리켜졌는가 ───────────────────────────────
+  // 특성·숙련 알약 — drawHud 가 이번 프레임에 채워 둔 chipX/chipW 를 본다.
+  // y·h 는 알약 줄 하나뿐이라 상수(68, 15)다 — drawHud 의 그 자리와 같다.
+  hitChip(lx, ly) {
+    if (ly < 68 || ly > 83) return -1;
+    for (let i = 0; i < this.chipN; i++) {
+      if (lx >= this.chipX[i] && lx <= this.chipX[i] + this.chipW[i]) return i;
+    }
+    return -1;
+  }
+
+  // 포인터 아래에 무엇이 있는가 — hoverKind/hoverIdx 를 쓴다(반환값 없음,
+  // 새 객체를 안 만든다). 우선순위는 화면에서 좁고 겹치기 쉬운 것부터다.
+  pickHover(game, lx, ly) {
+    const ci = this.hitChip(lx, ly);
+    // chipKind 는 1=특성 2=숙련이지만 hoverKind 의 1·2 는 이미 버튼·증원이 쓴다 —
+    // +3 만큼 밀어 4=특성 5=숙련으로 옮긴다(버그였다: 처음엔 그대로 대입해서
+    // 특성 알약을 가리켜도 버튼 0번(검사 유닛) 툴팁이 뜨는 충돌이 있었다).
+    if (ci >= 0) { this.hoverKind = this.chipKind[ci] + 3; this.hoverIdx = this.chipIdx[ci]; return; }
+    if (Renderer.hitZodiac(lx, ly)) { this.hoverKind = 3; this.hoverIdx = -1; return; }
+    if (Renderer.hitRally && Renderer.hitRally(lx, ly)) { this.hoverKind = 2; this.hoverIdx = -1; return; }
+    const b = Renderer.hitButton(lx, ly);
+    if (b >= 0) { this.hoverKind = 1; this.hoverIdx = b; return; }
+    this.hoverKind = 0; this.hoverIdx = -1;
+  }
+
+  // 매 프레임 불린다(main.js 의 두 draw 호출 지점 앞). 마우스는 누르지 않아도
+  // 뜬다(호버) — 어떤 액션도 큐에 안 넣으므로 클릭 계약을 안 건드린다. 터치는
+  // TOOLTIP_HOLD_MS 이상 눌려 있을 때만 뜬다 — 그 전까지는 pointerdown 이 이미
+  // 발동시킨 동작(구매·스킬)만 있고 툴팁은 없다.
+  updateHover(game, lx, ly, ptrIsMouse, ptrDown, ptrDownWall, nowWall) {
+    if (!game || game.state !== S.PLAY) { this.hoverKind = 0; this.hoverSig = -1; return; }
+    const show = ptrIsMouse ? true : (ptrDown && (nowWall - ptrDownWall) >= C.TOOLTIP_HOLD_MS);
+    if (!show) { this.hoverKind = 0; return; }
+    this.pickHover(game, lx, ly);
+    this.hoverAX = lx; this.hoverAY = ly;
+    if (this.hoverKind === 0) { this.hoverSig = -1; return; }
+    // era 를 서명에 넣는다 — 유닛·스킬 이름과 등급이 시대에 따라 바뀐다.
+    const sig = this.hoverKind * 100000 + (this.hoverIdx + 1) * 10 + (game.era | 0);
+    if (sig === this.hoverSig) return;         // 같은 것을 계속 가리키는 중 — 문장 재조립 없음
+    this.hoverSig = sig;
+    this.buildHoverText(game);
+  }
+
+  // 문장을 짓는다 — hoverSig 가 바뀔 때만 불린다(위 updateHover). 여기서만
+  // 문자열을 조립한다 — 그 외 어디서도 툴팁이 새 문자열을 안 만든다.
+  buildHoverText(game) {
+    this.hoverL2 = ''; this.hoverL3 = '';
+    if (this.hoverKind === 1) {                 // 버튼 — 유닛 0~5, 진화 6, 포탑 7, 해일 8, 화살비 9
+      const idx = this.hoverIdx;
+      if (idx < C.UNIT_KINDS) {
+        const era = game.era | 0;
+        const row = C.ERA_UNIT_NAME && C.ERA_UNIT_NAME[era];
+        this.hoverL1 = (row && row[idx]) || '';
+        this.hoverL2 = '체력' + C.U_HP[idx] + ' · 공격' + C.U_DMG[idx]
+          + ' · 사거리' + Math.round(game.statRange(idx)) + ' · ' + game.cost(idx) + '금';
+        this.hoverL3 = unitCounterHint(idx, row);
+      } else if (idx === C.B_ERA) {
+        if (game.era >= C.ERA_COUNT - 1) {
+          this.hoverL1 = C.SKILL_NAME[C.SK_SURGE]; this.hoverL2 = C.SKILL_DESC[C.SK_SURGE];
+        } else {
+          const next = game.era + 1;
+          this.hoverL1 = '진화 (' + game.eraNeed() + ' 경험치)';
+          this.hoverL2 = C.ERA_NAME[next] + ' 시대 · ' + C.ERA_ABILITY_NAME[next];
+          this.hoverL3 = C.ERA_ABILITY_DESC[next];
+        }
+      } else if (idx === C.B_TOWER) {
+        if (game.towerLv >= C.TOWER_MAX && game.wpnEligible()) {
+          this.hoverL1 = C.WEAPON_NAME; this.hoverL2 = C.WEAPON_HINT;
+        } else {
+          const cost = game.towerCost();
+          this.hoverL1 = '포탑 강화' + (cost > 0 ? ' (' + cost + '금)' : ' (최대)');
+          this.hoverL2 = TT_TOWER_DESC;
+        }
+      } else if (idx === C.B_TIDE) {
+        this.hoverL1 = C.SKILL_NAME[C.SK_TIDE]; this.hoverL2 = C.SKILL_DESC[C.SK_TIDE];
+      } else if (idx === C.B_VOLLEY) {
+        this.hoverL1 = C.SKILL_NAME[C.SK_VOLLEY]; this.hoverL2 = C.SKILL_DESC[C.SK_VOLLEY];
+      }
+    } else if (this.hoverKind === 2) {           // 증원
+      this.hoverL1 = C.SKILL_NAME[C.SK_RALLY]; this.hoverL2 = C.SKILL_DESC[C.SK_RALLY];
+    } else if (this.hoverKind === 3) {           // 별자리
+      const title = (C.ZODIAC_TITLE && C.ZODIAC_TITLE[game.zodiac]) || '';
+      this.hoverL1 = (game.zodiacName || '') + (title ? ' · ' + title : '');
+      this.hoverL2 = game.zodiacDesc || '';
+    } else if (this.hoverKind === 4) {           // 특성
+      const tr = C.TRAITS[this.hoverIdx];
+      this.hoverL1 = tr.name; this.hoverL2 = tr.desc;
+    } else if (this.hoverKind === 5) {           // 숙련
+      const m = C.MASTERY[this.hoverIdx];
+      this.hoverL1 = m.name + '×' + game.mastery[this.hoverIdx]; this.hoverL2 = m.desc;
+    }
+  }
+
+  // 작은 카드 하나 — 드래프트 카드·재무장 표와 같은 재료(RAMP_BG 바탕,
+  // RAMP_PLAYER 테두리, COL_BONUS 제목)로 짓는다. 화면 밖으로 안 나가게 clamp.
+  drawTooltip(game) {
+    if (this.hoverKind === 0 || !this.hoverL1) return;
+    const ctx = this.ctx;
+    ctx.font = FONT_TINY;
+    let w = ctx.measureText(this.hoverL1).width;
+    ctx.font = FONT_MICRO;
+    if (this.hoverL2) w = Math.max(w, ctx.measureText(this.hoverL2).width);
+    if (this.hoverL3) w = Math.max(w, ctx.measureText(this.hoverL3).width);
+    w += 20;
+    const lines = 1 + (this.hoverL2 ? 1 : 0) + (this.hoverL3 ? 1 : 0);
+    const h = 10 + lines * 15;
+
+    // 앵커 — 무엇을 가리키는지에 따라 다른 자리다. 손가락이 가리는 자리
+    // (버튼 바로 위)가 아니라 그 요소의 "고정된 자리" 위·아래에 뜬다.
+    let ax = this.hoverAX, ay = this.hoverAY - h - 8;
+    if (this.hoverKind === 1) { ax = btnX(this.hoverIdx) + BTN_W * 0.5; ay = LAY.y - h - 6; }
+    else if (this.hoverKind === 2) { ax = C.RALLY_CX; ay = C.RALLY_CY - C.RALLY_R - h - 6; }
+    else if (this.hoverKind === 3) { ax = ZOD_CHIP_X; ay = ZOD_CHIP_Y + ZOD_CHIP_H + 6; }
+    else if (this.hoverKind === 4 || this.hoverKind === 5) { ay = 68 + 15 + 6; }
+
+    let x = ax - w * 0.5;
+    if (x < 4) x = 4; else if (x + w > C.VIEW_W - 4) x = C.VIEW_W - 4 - w;
+    let y = ay;
+    if (y < 4) y = 4;
+    if (y + h > C.VIEW_H - 4) y = C.VIEW_H - 4 - h;
+
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.94)];
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 6);
+    ctx.fill();
+    ctx.strokeStyle = C.RAMP_PLAYER[C.rampIndex(0.4)];
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x + 0.5, y + 0.5, w - 1, h - 1, 6);
+    ctx.stroke();
+    ctx.lineWidth = C.STROKE;
+
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    let ty = y + 6;
+    ctx.font = FONT_TINY;
+    ctx.fillStyle = C.COL_BONUS;
+    ctx.fillText(this.hoverL1, x + 10, ty);
+    ty += 15;
+    ctx.font = FONT_MICRO;
+    ctx.fillStyle = C.RAMP_PLAYER[C.rampIndex(0.75)];
+    if (this.hoverL2) { ctx.fillText(this.hoverL2, x + 10, ty); ty += 15; }
+    if (this.hoverL3) { ctx.fillText(this.hoverL3, x + 10, ty); }
+  }
+
   // ── HUD — 여섯 개가 항상 보여야 한다 ────────────────────────
   //   금 · 경험치/시대 · 전선 위치 · 내 기지 체력 · 적 기지 체력 · 물 높이
   drawHud(game, feel, director, directorView, muted) {
@@ -4308,10 +4496,18 @@ export class Renderer {
     ctx.fillStyle = C.RAMP_BONUS[C.rampIndex(0.20)];
     ctx.beginPath();
     let anyT = 0;
+    // 툴팁이 쓸 자리 — 이 루프가 어차피 매 프레임 폭을 계산하므로 그 값을
+    // 그대로 받아 적는다(재계산 없음, 새 객체 없음 — 고정 배열에 숫자만 쓴다).
+    this.chipN = 0;
     for (let i = 0; i < C.TRAITS.length; i++) {
       if (!game.traits[i]) continue;
       const tw = C.TRAITS[i].name.length * 11 + 10;
       ctx.roundRect(px, 68, tw, 15, 7);
+      if (this.chipN < this.chipX.length) {
+        this.chipX[this.chipN] = px; this.chipW[this.chipN] = tw;
+        this.chipKind[this.chipN] = 1; this.chipIdx[this.chipN] = i;
+        this.chipN++;
+      }
       px += tw + 5; anyT = 1;
       if (px > 300) break;
     }
@@ -4319,6 +4515,11 @@ export class Renderer {
       if (!game.mastery[m]) continue;
       const tw = (C.MASTERY[m].name.length + 2) * 11 + 10;
       ctx.roundRect(px, 68, tw, 15, 7);
+      if (this.chipN < this.chipX.length) {
+        this.chipX[this.chipN] = px; this.chipW[this.chipN] = tw;
+        this.chipKind[this.chipN] = 2; this.chipIdx[this.chipN] = m;
+        this.chipN++;
+      }
       px += tw + 5; anyT = 1;
     }
     if (anyT) {
