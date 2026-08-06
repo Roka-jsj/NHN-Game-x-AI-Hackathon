@@ -293,6 +293,11 @@ export class Feel {
     this.bannerCode = 0;
     this.bannerFrames = 0;
     this.bannerTotal = Math.max(1, Math.round(C.BANNER_MS / C.SIM_DT));
+    // BAN_CAMPAIGN("원정이 끝났다")는 완주와 패배 둘 다에서 뜬다 — 이 한 줄이
+    // 그 둘을 가른다. render 는 이 값만 보고 색을 고른다(승=금색 그대로,
+    // 패=위험색으로). NAN 2026 심사위원단 지적: 승패의 가장 중요한 순간인데
+    // 배너 단계에선 색 구분이 없었다(결과 카드 단계에만 있었다).
+    this.bannerWin = true;
 
     // ── 처치의 무게 ──
     // 검사가 죽을 때와 거인이 죽을 때가 같으면 처치는 의미를 잃는다.
@@ -348,6 +353,7 @@ export class Feel {
     this.rearmArmL = 0; this.rearmArmR = 0;
     this.flashFrames = 0;
     this.bannerFrames = 0;
+    this.bannerWin = true;
     this.streak = 0; this.streakGap = 0;
     this.denyCd = 0; this.baseRingCd = 0; this.foeHitCd = 0; this.selfHitCd = 0;
     this.tideAt = -1e6;
@@ -785,9 +791,10 @@ export class Feel {
     this.fStep[i] = 0;
   }
 
-  banner(code) {
+  banner(code, win) {
     this.bannerCode = code;
     this.bannerFrames = this.bannerTotal;
+    this.bannerWin = win === undefined ? true : win;
   }
 
   // 실패한 입력 — **눌렀는데 아무 일도 안 일어나는 것이 가장 나쁘다.**
@@ -1194,7 +1201,7 @@ export class Feel {
         // 길게 멈추고, 화면이 기울고(회전은 여기와 승패에만 있다),
         // 고리가 셋이다. 하나는 다음이고 셋은 마지막이다.
         this.freeze(C.HITSTOP_NUKE, PR_ALWAYS);
-        if (C.BAN_CAMPAIGN !== undefined) this.banner(C.BAN_CAMPAIGN);
+        if (C.BAN_CAMPAIGN !== undefined) this.banner(C.BAN_CAMPAIGN, b === 1);
         const lx = C.BASE_L_X, rx = C.BASE_R_X, mx = C.VIEW_W * 0.5;
         if (b === 1) {
           // 완주. 이 게임에서 가장 밝은 순간이다.

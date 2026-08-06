@@ -5426,7 +5426,14 @@ export class Renderer {
     const t = 1 - feel.bannerFrames / feel.bannerTotal;
     const fade = t > 0.6 ? 1 - (t - 0.6) / 0.4 : 1;
     const y = C.GROUND_Y * 0.40 - easeOutCubic(t) * 24;
-    const col = feel.bannerCode === C.BAN_WATER ? C.RAMP_DANGER : C.RAMP_BONUS;
+    // NAN 2026 심사위원단 지적: 승/패 배너("전투를 이겼다"/"원정이 끝났다")가
+    // 색 구분 없이 같은 톤이었다 — 완전히 떠오른 결과 카드(drawResult)엔 이미
+    // 승=금색/패=중립흰색 구분이 있었지만, 그 직전 이 배너 단계엔 없었다.
+    // BAN_CAMPAIGN 은 완주·패배 둘 다에서 뜨므로 feel.bannerWin(feel.banner() 가
+    // E_CAMPAIGN_END 에서 승패를 그대로 넘겨준다)으로 가른다.
+    const isLoss = feel.bannerCode === C.BAN_WATER
+      || (feel.bannerCode === C.BAN_CAMPAIGN && !feel.bannerWin);
+    const col = isLoss ? C.RAMP_DANGER : C.RAMP_BONUS;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     // 가로선 두 줄 — 글자가 배경에 묻히지 않게 받쳐 준다
@@ -6211,7 +6218,13 @@ export class Renderer {
     const lv = d.levers;
     const H = 288;                    // 판별 줄이 들어오면서 268 → 288
 
-    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.97)];
+    // NAN 2026 심사위원단(위원1) 지적: 이 패널이 내 기지(BASE_L_X=92, x 38~146)를
+    // 그 위에 완전히 덮어(x 16~266, y 96~384) "내 기지가 얼마나 위험한가"가 안
+    // 보였다 — 제출 영상이 반드시 담는 화면(디렉터 뷰)이 정작 가장 중요한 정보를
+    // 가리는 모순이었다. 자리를 옮기면 다른 HUD(최강병기 카드·적 예고 띠 등, 전부
+    // 조건부로 뜬다)와 새 충돌이 생기므로, 배경을 반투명하게 낮춰 **뒤가 비치게**
+    // 한다 — 텍스트는 불투명이라 읽기는 그대로다.
+    ctx.fillStyle = C.RAMP_BG[C.rampIndex(0.62)];
     ctx.beginPath();
     ctx.roundRect(x, y, w, H, 6);
     ctx.fill();
