@@ -2221,6 +2221,32 @@ export class Renderer {
     }
     ctx.fill();
 
+    // 4.5) 무기 광택 — 사용자 요청: "유닛이 더 화려하면 좋겠다."
+    //      상성 타격(4)·화약 총구(4)·기계 표시등(4)은 전부 **사건**에만 붙어서
+    //      eras 0~2 는 대부분 시간에 아무 장식도 없었다. 여기서는 **상시** 반짝인다 —
+    //      다만 전부 같이 켜면 정지 화면이 되므로 유닛마다 다른 위상으로 깜빡이게
+    //      해(Math.sin, tick 기반이라 결정론적이다 — Math.random 아님) 대열 전체가
+    //      살아있는 인상을 준다. 모양은 원이 아니라 상성 타격(위 4번)과 같은
+    //      4갈래 별(addBurst) — 정점 근처에서만 커지므로 반짝 켜졌다 꺼지는
+    //      것이 아니라 **부풀었다 사그라든다.** 자리는 무기 끝(wtX/wtY, 이미
+    //      모든 병종이 채워 둔다) — "무기가 빛난다"가 가장 값싸고 가장 잘
+    //      읽히는 화려함이다. 색은 새로 안 만든다 — U_RIM(병종 색을 배경과
+    //      82% 섞은, 이미 구워 둔 밝은 톤)을 그대로 쓴다. 병종별로 묶어
+    //      칠하므로 draw call 은 최대 6개 늘 뿐이다.
+    for (let k = 0; k < UK; k++) {
+      let anyG = 0;
+      for (let j = 0; j < n; j++) {
+        const i = list[j];
+        if (game.uKind[i] !== k) continue;
+        const s = Math.sin(game.tick * 0.05 + i * 2.4);
+        if (s < 0.80) continue;
+        if (!anyG) { ctx.fillStyle = U_RIM[k]; ctx.beginPath(); anyG = 1; }
+        const dir = game.uSide[i] === SIDE_L ? 1 : -1;
+        this.addBurst(this.wtX[i], this.wtY[i], 3 + (s - 0.80) * 30, dir);
+      }
+      if (anyG) ctx.fill();
+    }
+
     // 5) 흰 심 — 상성 타격의 한가운데만. 금색 별 안에 흰 점이 박히면
     //    난전 속에서도 "지금 상성으로 때렸다"가 한 프레임에 읽힌다
     ctx.fillStyle = C.COL_PLAYER;
